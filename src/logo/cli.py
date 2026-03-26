@@ -4,7 +4,8 @@ logo CLI エントリポイント
 コマンド:
   logo init    - .logosyncs/memory.db を初期化
   logo index   - ~/.claude/projects/ の .jsonl を処理
-  logo search  - HNSW セマンティック検索
+  logo distill - 未蒸留 exchange を claude -p で palace object に変換
+  logo search  - BM25(V) + HNSW(D) CombMNZ セマンティック検索
 """
 
 from __future__ import annotations
@@ -152,6 +153,25 @@ def index(
     typer.echo(f"Indexed {len(new_files)} file(s), {total_exchanges} exchange(s).")
 
 
+# ---- distill ----
+
+
+@app.command()
+def distill() -> None:
+    """未蒸留の exchange を claude -p で蒸留して palace_objects を生成する"""
+    from logo.distiller import distill_all
+
+    root = _find_project_root()
+    db = _db_path(root)
+
+    if not db.exists():
+        typer.echo("Not initialized. Run `logo init` first.", err=True)
+        raise typer.Exit(1)
+
+    count = distill_all(db)
+    typer.echo(f"Distilled {count} exchange(s).")
+
+
 # ---- search ----
 
 
@@ -161,9 +181,9 @@ def search(
     limit: Annotated[int, typer.Option("--limit", "-n", help="返す件数")] = 5,
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
-    """セマンティック検索でクエリに近い過去会話を返す"""
+    """BM25(V) + HNSW(D) CombMNZ でクエリに近い過去会話を返す"""
     from logo.embedder import Embedder
-    from logo.search import search_hnsw
+    from logo.search import search_combined
 
     root = _find_project_root()
     db = _db_path(root)
@@ -174,7 +194,7 @@ def search(
 
     embedder = Embedder()
     query_vec = embedder.embed(query)
-    results = search_hnsw(db, query_vec, limit=limit)
+    results = search_combined(db, query, query_vec, limit=limit)
 
     if not results:
         typer.echo("No results found.")
@@ -186,13 +206,17 @@ def search(
                 "exchange_id": r.exchange_id,
                 "user_content": r.user_content,
                 "agent_content": r.agent_content,
-                "distance": r.distance,
+                "score": r.score,
+                "exchange_core": r.exchange_core,
+                "specific_context": r.specific_context,
             }
             for r in results
         ]
         typer.echo(json.dumps(output, ensure_ascii=False, indent=2))
     else:
         for i, r in enumerate(results, 1):
-            typer.echo(f"\n[{i}] distance={r.distance:.4f}")
+            typer.echo(f"\n[{i}] score={r.score:.4f}")
+            if r.exchange_core:
+                typer.echo(f"    Core: {r.exchange_core}")
             typer.echo(f"    Q: {r.user_content[:100]}")
             typer.echo(f"    A: {r.agent_content[:100]}")
