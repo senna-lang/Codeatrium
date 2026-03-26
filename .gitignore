@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Test & lint caches
+.pytest_cache/
+.ruff_cache/
+
+# Tool data (local only)
+.logosyncs/
+.logosyncx/
+
+# Claude Code local settings
+.claude/
