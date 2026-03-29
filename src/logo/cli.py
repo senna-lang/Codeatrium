@@ -2,16 +2,18 @@
 logo CLI エントリポイント
 
 コマンド:
-  logo init    - .logosyncs/memory.db を初期化
-  logo index   - ~/.claude/projects/ の .jsonl を処理
-  logo distill - 未蒸留 exchange を claude -p で palace object に変換
-  logo search  - BM25(V) + HNSW(D) CombMNZ セマンティック検索
+  logo init         - .logosyncs/memory.db を初期化
+  logo index        - ~/.claude/projects/ の .jsonl を処理
+  logo distill      - 未蒸留 exchange を claude -p で palace object に変換
+  logo search       - BM25(V) + HNSW(D) RRF セマンティック検索
+  logo context      - シンボル名から過去会話を逆引き
+  logo status       - インデックス状態を表示
+  logo hook install - Claude Code Stop hook を ~/.claude/settings.json に登録
 """
 
 from __future__ import annotations
 
 import json
-import struct
 from pathlib import Path
 from typing import Annotated
 
@@ -83,9 +85,8 @@ def index(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """未処理の .jsonl を処理して exchanges テーブルと vec_exchanges に登録する"""
+    """未処理の .jsonl を処理して exchanges テーブルに登録する（FTS5 自動同期）"""
     from logo.db import get_connection, init_db
-    from logo.embedder import Embedder
     from logo.indexer import index_file
 
     root = _find_project_root()
@@ -116,38 +117,13 @@ def index(
         typer.echo("Nothing new to index.")
         return
 
-    embedder = Embedder()
     total_exchanges = 0
-
     for jsonl in new_files:
         count = index_file(jsonl, db)
         if count == 0:
             continue
         if verbose:
             typer.echo(f"  {jsonl.name}: {count} exchanges")
-
-        # Phase 1: verbatim embedding を vec_exchanges に登録
-        con = get_connection(db)
-        unvectorized = con.execute(
-            """
-            SELECT e.id, e.user_content, e.agent_content
-            FROM exchanges e
-            LEFT JOIN vec_exchanges v ON v.exchange_id = e.id
-            WHERE v.exchange_id IS NULL
-            """
-        ).fetchall()
-
-        for row in unvectorized:
-            text = f"{row['user_content']}\n{row['agent_content']}"
-            vec = embedder.embed_passage(text)
-            blob = struct.pack(f"{len(vec)}f", *vec.tolist())
-            con.execute(
-                "INSERT OR IGNORE INTO vec_exchanges (exchange_id, embedding) VALUES (?, ?)",
-                (row["id"], blob),
-            )
-
-        con.commit()
-        con.close()
         total_exchanges += count
 
     typer.echo(f"Indexed {len(new_files)} file(s), {total_exchanges} exchange(s).")
@@ -220,3 +196,180 @@ def search(
                 typer.echo(f"    Core: {r.exchange_core}")
             typer.echo(f"    Q: {r.user_content[:100]}")
             typer.echo(f"    A: {r.agent_content[:100]}")
+
+
+# ---- context ----
+
+
+@app.command()
+def context(
+    symbol: Annotated[
+        str, typer.Option("--symbol", "-s", help="シンボル名（部分一致）")
+    ],
+    limit: Annotated[int, typer.Option("--limit", "-n", help="返す件数")] = 5,
+    json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
+) -> None:
+    """シンボル名から関連する過去会話を逆引きする"""
+    from logo.db import get_connection
+
+    root = _find_project_root()
+    db = _db_path(root)
+
+    if not db.exists():
+        typer.echo("Not initialized. Run `logo init` first.", err=True)
+        raise typer.Exit(1)
+
+    con = get_connection(db)
+    rows = con.execute(
+        """
+        SELECT
+            s.symbol_name,
+            s.symbol_kind,
+            s.file_path,
+            s.signature,
+            s.line,
+            e.id        AS exchange_id,
+            e.user_content,
+            e.agent_content,
+            p.exchange_core,
+            p.specific_context
+        FROM symbols s
+        JOIN palace_objects p ON p.id = s.palace_object_id
+        JOIN exchanges e ON e.id = p.exchange_id
+        WHERE s.symbol_name LIKE ?
+        LIMIT ?
+        """,
+        (f"%{symbol}%", limit),
+    ).fetchall()
+    con.close()
+
+    if not rows:
+        typer.echo("No results found.")
+        return
+
+    if json_output:
+        output = [
+            {
+                "symbol_name": r["symbol_name"],
+                "symbol_kind": r["symbol_kind"],
+                "file_path": r["file_path"],
+                "signature": r["signature"],
+                "line": r["line"],
+                "exchange_id": r["exchange_id"],
+                "exchange_core": r["exchange_core"],
+                "specific_context": r["specific_context"],
+                "user_content": r["user_content"],
+                "agent_content": r["agent_content"],
+            }
+            for r in rows
+        ]
+        typer.echo(json.dumps(output, ensure_ascii=False, indent=2))
+    else:
+        for i, r in enumerate(rows, 1):
+            typer.echo(f"\n[{i}] {r['symbol_kind']} {r['symbol_name']}")
+            typer.echo(f"    {r['file_path']}:{r['line']}")
+            typer.echo(f"    {r['signature']}")
+            if r["exchange_core"]:
+                typer.echo(f"    Core: {r['exchange_core']}")
+
+
+# ---- status ----
+
+
+@app.command()
+def status(
+    json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
+) -> None:
+    """インデックス状態（exchange 数・蒸留済み数・DB サイズ）を表示する"""
+    from logo.db import get_connection
+
+    root = _find_project_root()
+    db = _db_path(root)
+
+    if not db.exists():
+        typer.echo("Not initialized. Run `logo init` first.", err=True)
+        raise typer.Exit(1)
+
+    con = get_connection(db)
+    total = con.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
+    distilled = con.execute(
+        "SELECT COUNT(*) FROM exchanges WHERE distilled_at IS NOT NULL"
+    ).fetchone()[0]
+    palace_count = con.execute("SELECT COUNT(*) FROM palace_objects").fetchone()[0]
+    symbol_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    db_size_bytes = db.stat().st_size
+    db_size_kb = db_size_bytes / 1024
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {
+                    "db_path": str(db),
+                    "exchanges": total,
+                    "distilled": distilled,
+                    "undistilled": total - distilled,
+                    "palace_objects": palace_count,
+                    "symbols": symbol_count,
+                    "db_size_kb": round(db_size_kb, 1),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        typer.echo(f"DB: {db} ({db_size_kb:.1f} KB)")
+        typer.echo(
+            f"Exchanges : {total} total, {distilled} distilled, {total - distilled} pending"
+        )
+        typer.echo(f"Palace    : {palace_count}")
+        typer.echo(f"Symbols   : {symbol_count}")
+
+
+# ---- hook ----
+
+_HOOK_COMMAND = "logo index && nohup logo distill > /dev/null 2>&1 &"
+
+hook_app = typer.Typer(help="Claude Code Stop hook 管理")
+app.add_typer(hook_app, name="hook")
+
+
+@hook_app.command("install")
+def hook_install() -> None:
+    """Claude Code の Stop hook に logo index && logo distill を登録する"""
+    settings_path = Path.home() / ".claude" / "settings.json"
+
+    if settings_path.exists():
+        with settings_path.open() as f:
+            settings: dict = json.load(f)
+    else:
+        settings = {}
+
+    hooks = settings.setdefault("hooks", {})
+    stop_hooks: list = hooks.setdefault("Stop", [])
+
+    # 既存エントリ確認
+    for entry in stop_hooks:
+        for h in entry.get("hooks", []):
+            if h.get("command") == _HOOK_COMMAND:
+                typer.echo("Hook already installed.")
+                return
+
+    stop_hooks.append(
+        {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": _HOOK_COMMAND,
+                }
+            ]
+        }
+    )
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    with settings_path.open("w") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=2)
+
+    typer.echo(f"Hook installed: {settings_path}")
+    typer.echo(f"  Command: {_HOOK_COMMAND}")

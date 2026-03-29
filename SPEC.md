@@ -430,9 +430,35 @@ verbatim                 distilled
   │                         │
   └────────────┬────────────┘
                │
-         CombMNZ で融合
-         （複数リストにヒットした文書を優先）
-         ※ 論文ベスト構成: Cross BM25(V)+HNSW(D) / CombMNZ → MRR 0.759
+         RRF (Reciprocal Rank Fusion) で融合
+           score(d) = Σ 1 / (k + rank_i(d))   k=60（標準値）
+           スコアの絶対値に依存せず順位だけで融合するため正規化不要
+
+         ※ 採用根拠（arXiv:2603.13017 の実験結果に基づく）:
+           論文は 107 構成の BM25/ベクトル検索を比較評価した（201件のリコールクエリ）。
+           主要発見:
+             - BM25 単独 20 構成: 全て有意に劣化 (効果量 |d|=0.031–0.756)
+             - ベクトル検索 20 構成: Bonferroni 補正後も有意な劣化なし
+             - 最良構成: Cross BM25(V)+HNSW(D) → MRR 0.759
+           → BM25 単独は全クエリタイプで劣化する。コーディングエージェントの
+             クエリが識別子・パス中心であっても、BM25 のみに絞る根拠はない。
+           → 論文の全クエリタイプ（conceptual / phrase / exact term）で
+             Cross BM25(V)+HNSW(D) が最良。QueryClassifier によるタイプ別
+             切り替えを行わず、全クエリに同じ構成を適用するのが最もロバスト。
+
+         ※ CombMNZ ではなく RRF を採用する理由:
+           CombMNZ は hit_count 乗数により、両リストに出た HNSW 偽陽性が
+           BM25 完全一致を押しのける構造的な問題がある。
+           RRF は順位ベースのため hit_count 問題が発生せず、
+           スコア正規化も不要でシンプル。論文は CombMNZ を評価しているが、
+           RRF は同等以上の性能が多くの先行研究で示されている（Cormack et al., 2009）。
+
+         ※ QueryClassifier を採用しない理由:
+           「keyword クエリは BM25 のみで十分」という仮説は実証されていない。
+           論文は BM25 単独が有意に劣化することを示しており、
+           keyword クエリも例外ではないと考えるのが自然。
+           分類ミスのリスクを抱えるより、全クエリに同じ構成を使う方がロバスト。
+
          ※ HNSW(verbatim) は含めない
            理由: verbatim は長文で embedding 品質が低く、論文評価でも有意な改善なし
            verbatim の強みはキーワード一致（BM25）が担う
@@ -496,6 +522,7 @@ verbatim                 distilled
 - [ ] `--output-format json --json-schema` でスキーマ強制（公式 headless モード機能）
 - [ ] `logo distill` でバッチ蒸留
 - [ ] Cross-layer 検索（BM25 verbatim + HNSW distilled）
+- [ ] RRF による融合（CombMNZ・QueryClassifier を採用しない理由は SEARCH セクション参照）
 
 ### Phase 3: シンボル統合（差別化の核心）
 
@@ -535,6 +562,16 @@ verbatim                 distilled
 - [x] **CLI の言語**: Python (typer) + pipx 配布で確定。Embedding がネイティブに動くため Go より適切。
 - [x] **シンボル解決の深さ**: Tree-sitter で確定。LSP はスコープ外。
 - [x] **ツール名**: logosyncs、コマンド名 `logo` で確定
+- [x] **融合アルゴリズム**: CombMNZ → RRF (Reciprocal Rank Fusion) に変更。
+      arXiv:2603.13017 の実験結果（107構成比較・201クエリ）に基づく。
+      BM25 単独は全構成で有意に劣化、Cross BM25(V)+HNSW(D) が全クエリタイプで最良（MRR 0.759）。
+      融合手法は論文の CombMNZ ではなく RRF を採用:
+        - CombMNZ の hit_count 乗数は keyword クエリで HNSW 偽陽性を過剰評価する構造的問題がある
+        - RRF は順位ベースのためその問題がなく、スコア正規化も不要
+      QueryClassifier は採用しない:
+        - 「keyword クエリは BM25 のみで十分」は実証されていない仮説
+        - 論文は BM25 単独が有意に劣化することを示しており keyword クエリも例外ではないと考えるのが自然
+        - 全クエリに同じ構成を適用する方が分類ミスのリスクなくロバスト
 - [x] **CLAUDE.md テンプレート**: 下記セクション参照
 - [x] **マルチエージェント対応**: Phase 1 は Claude Code（`~/.claude/projects/**/*.jsonl`）固定。
       将来的に他の CLI 系エージェントへ拡張する方針。

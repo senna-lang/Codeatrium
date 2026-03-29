@@ -7,7 +7,6 @@ call_claude・Embedder はモックしてモデルロードを避ける
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 
 from logo.db import get_connection, init_db
 from logo.distiller import (

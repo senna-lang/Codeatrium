@@ -10,6 +10,7 @@ SQLite DB の初期化・スキーマ定義・接続管理
   palace_fts     - palace_objects の FTS5 仮想テーブル（将来用）
   rooms          - palace object の room_assignments
   vec_palace     - sqlite-vec HNSW インデックス（Phase2 distilled ベクトル検索用）
+  symbols        - tree-sitter 解決済みシンボル（Phase3 コード逆引き用）
 """
 
 import sqlite3
@@ -106,6 +107,17 @@ def init_db(db_path: Path) -> None:
             room_label       TEXT NOT NULL,
             relevance        REAL NOT NULL,
             dedup_hash       TEXT NOT NULL    -- hash(room_type, room_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS symbols (
+            id               TEXT PRIMARY KEY,   -- sha256(symbol_name + file_path)
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,       -- "AuthMiddleware.validate"
+            symbol_kind      TEXT NOT NULL,       -- "function" / "class" / "method"
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT  NOT NULL,
+            dedup_hash       TEXT NOT NULL        -- sha256(symbol_name + file_path)
         );
     """)
 

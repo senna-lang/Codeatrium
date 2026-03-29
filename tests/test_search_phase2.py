@@ -1,5 +1,5 @@
 """
-Phase 2 検索テスト: BM25・CombMNZ・search_combined
+Phase 2 検索テスト: BM25・RRF・search_combined
 embedding は固定ベクトルで代替してモデルロードを避ける
 """
 
@@ -9,7 +9,14 @@ from pathlib import Path
 import numpy as np
 
 from logo.db import get_connection, init_db
-from logo.search import BM25Result, CombMNZResult, combmnz, search_bm25, search_combined
+from logo.search import (
+    BM25Result,
+    FusedResult,
+    HNSWPalaceResult,
+    rrf,
+    search_bm25,
+    search_combined,
+)
 
 LONG_TEXT = "connection pool " * 10
 
@@ -92,29 +99,39 @@ def test_search_bm25_returns_bm25result(tmp_path: Path) -> None:
     assert results[0].bm25_score > 0
 
 
-# --- combmnz ---
+# --- rrf ---
 
 
-def test_combmnz_bm25_only() -> None:
-    bm25 = [BM25Result(exchange_id="ex1", user_content="u", agent_content="a", bm25_score=2.0)]
-    results = combmnz(bm25, [], limit=5)
+def test_rrf_bm25_only() -> None:
+    bm25 = [
+        BM25Result(
+            exchange_id="ex1", user_content="u", agent_content="a", bm25_score=2.0
+        )
+    ]
+    results = rrf(bm25, [], limit=5)
     assert len(results) == 1
     assert results[0].exchange_id == "ex1"
 
 
-def test_combmnz_returns_combmnz_result() -> None:
-    bm25 = [BM25Result(exchange_id="ex1", user_content="u", agent_content="a", bm25_score=1.0)]
-    results = combmnz(bm25, [], limit=5)
-    assert isinstance(results[0], CombMNZResult)
-
-
-def test_combmnz_both_hits_scores_higher() -> None:
-    """BM25 + HNSW 両方ヒットは片方ヒットより高スコア"""
-    from logo.search import HNSWPalaceResult
-
+def test_rrf_returns_fused_result() -> None:
     bm25 = [
-        BM25Result(exchange_id="ex1", user_content="u", agent_content="a", bm25_score=1.0),
-        BM25Result(exchange_id="ex2", user_content="u", agent_content="a", bm25_score=0.5),
+        BM25Result(
+            exchange_id="ex1", user_content="u", agent_content="a", bm25_score=1.0
+        )
+    ]
+    results = rrf(bm25, [], limit=5)
+    assert isinstance(results[0], FusedResult)
+
+
+def test_rrf_both_lists_scores_higher() -> None:
+    """両リストにヒットした exchange は片方のみより高スコア"""
+    bm25 = [
+        BM25Result(
+            exchange_id="ex1", user_content="u", agent_content="a", bm25_score=1.0
+        ),
+        BM25Result(
+            exchange_id="ex2", user_content="u", agent_content="a", bm25_score=0.5
+        ),
     ]
     hnsw = [
         HNSWPalaceResult(
@@ -126,16 +143,12 @@ def test_combmnz_both_hits_scores_higher() -> None:
             distance=0.1,
         )
     ]
-    results = combmnz(bm25, hnsw, limit=5)
-    # ex1 はどちらにもヒットするので ex2 より高スコアになるはず
-    ids = [r.exchange_id for r in results]
-    assert ids[0] == "ex1"
+    results = rrf(bm25, hnsw, limit=5)
+    # ex1 は両リストにヒット → ex2（BM25 のみ）より上位
+    assert results[0].exchange_id == "ex1"
 
 
-def test_combmnz_includes_exchange_core_when_available() -> None:
-    from logo.search import HNSWPalaceResult
-
-    bm25 = []
+def test_rrf_includes_exchange_core_from_hnsw() -> None:
     hnsw = [
         HNSWPalaceResult(
             exchange_id="ex1",
@@ -146,22 +159,41 @@ def test_combmnz_includes_exchange_core_when_available() -> None:
             distance=0.1,
         )
     ]
-    results = combmnz(bm25, hnsw, limit=5)
+    results = rrf([], hnsw, limit=5)
     assert results[0].exchange_core == "connection pool を修正した"
 
 
-def test_combmnz_empty_both() -> None:
-    results = combmnz([], [], limit=5)
+def test_rrf_empty_both() -> None:
+    results = rrf([], [], limit=5)
     assert results == []
 
 
-def test_combmnz_respects_limit() -> None:
+def test_rrf_respects_limit() -> None:
     bm25 = [
-        BM25Result(exchange_id=f"ex{i}", user_content="u", agent_content="a", bm25_score=float(i))
+        BM25Result(
+            exchange_id=f"ex{i}",
+            user_content="u",
+            agent_content="a",
+            bm25_score=float(i),
+        )
         for i in range(10)
     ]
-    results = combmnz(bm25, [], limit=3)
+    results = rrf(bm25, [], limit=3)
     assert len(results) <= 3
+
+
+def test_rrf_score_decreases_with_rank() -> None:
+    """順位が下がるほどスコアが下がる（RRF の基本性質）"""
+    bm25 = [
+        BM25Result(
+            exchange_id="ex1", user_content="u", agent_content="a", bm25_score=10.0
+        ),
+        BM25Result(
+            exchange_id="ex2", user_content="u", agent_content="a", bm25_score=1.0
+        ),
+    ]
+    results = rrf(bm25, [], limit=5)
+    assert results[0].score > results[1].score
 
 
 # --- search_combined ---
@@ -196,7 +228,9 @@ def test_search_combined_with_palace(tmp_path: Path) -> None:
     con = get_connection(db_path)
     _insert_exchange(con, "ex1", LONG_TEXT, "pool_size=5 を追加した")
     _insert_palace(
-        con, "p1", "ex1",
+        con,
+        "p1",
+        "ex1",
         "connection pool pool_size db-pool DB Pool",
         "connection pool を修正した",
         np.ones(384, dtype=np.float32),

@@ -6,6 +6,7 @@ SPEC Section 6 DISTILLER フロー準拠:
   ② claude -p で palace object 生成（--output-format json --json-schema）
   ③ bm25_text を組み立てて palace_fts に登録
   ④ distill_text を embedding して vec_palace に登録
+  ⑤ files_touched を tree-sitter で解析してシンボルを symbols テーブルに登録
 """
 
 from __future__ import annotations
@@ -172,7 +173,7 @@ def save_palace_object(
     db_path: Path,
     exchange_id: str,
     palace: PalaceObject,
-    embedding: "Any",  # np.ndarray
+    embedding: Any,  # np.ndarray
 ) -> None:
     """PalaceObject を DB に保存し exchange の distilled_at を更新する"""
     import numpy as np
@@ -235,6 +236,32 @@ def save_palace_object(
         "INSERT OR IGNORE INTO vec_palace (palace_id, embedding) VALUES (?, ?)",
         (palace_id, blob),
     )
+
+    # ⑤ tree-sitter シンボル解決
+    from logo.resolver import SymbolResolver
+
+    resolver = SymbolResolver()
+    for file_str in palace.files_touched:
+        for sym in resolver.extract(Path(file_str)):
+            sym_id = _sha256(f"{sym.symbol_name}:{sym.file_path}")
+            con.execute(
+                """
+                INSERT OR IGNORE INTO symbols
+                    (id, palace_object_id, symbol_name, symbol_kind,
+                     file_path, signature, line, dedup_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sym_id,
+                    palace_id,
+                    sym.symbol_name,
+                    sym.symbol_kind,
+                    sym.file_path,
+                    sym.signature,
+                    sym.line,
+                    sym_id,
+                ),
+            )
 
     con.execute(
         "UPDATE exchanges SET distilled_at = ? WHERE id = ?",

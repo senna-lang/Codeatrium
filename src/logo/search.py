@@ -2,9 +2,13 @@
 検索モジュール
 
 Phase 1: search_hnsw    — verbatim HNSW（後方互換で維持）
-Phase 2: search_combined — BM25(V) + HNSW(D) CombMNZ 融合
-  論文ベスト構成: Cross BM25(V)+HNSW(D) / CombMNZ → MRR 0.759
-  HNSW(verbatim) は論文ベスト構成に含まれないため search_combined には使わない
+Phase 2: search_combined — BM25(V) + HNSW(D) RRF 融合
+  採用根拠（arXiv:2603.13017）:
+    - 107構成比較で Cross BM25(V)+HNSW(D) が全クエリタイプで最良（MRR 0.759）
+    - BM25 単独は全構成で有意に劣化 → クエリタイプで切り替えない
+    - 融合は RRF (Reciprocal Rank Fusion): score = Σ 1/(k+rank)
+      CombMNZ の hit_count 乗数問題を回避・スコア正規化不要
+  HNSW(verbatim) は含めない（verbatim 長文は embedding 品質低・論文評価で有意改善なし）
 """
 
 from __future__ import annotations
@@ -17,7 +21,6 @@ from pathlib import Path
 import numpy as np
 
 from logo.db import get_connection
-
 
 # ---- データクラス ----
 
@@ -55,8 +58,8 @@ class HNSWPalaceResult:
 
 
 @dataclass
-class CombMNZResult:
-    """CombMNZ 融合検索結果"""
+class FusedResult:
+    """RRF 融合検索結果"""
 
     exchange_id: str
     user_content: str
@@ -72,17 +75,6 @@ class CombMNZResult:
 def _serialize(vec: np.ndarray) -> bytes:
     arr = vec.astype(np.float32)
     return struct.pack(f"{len(arr)}f", *arr.tolist())
-
-
-def _normalize(scores: dict[str, float]) -> dict[str, float]:
-    """min-max 正規化して [0, 1] に変換する"""
-    if not scores:
-        return {}
-    vals = list(scores.values())
-    min_v, max_v = min(vals), max(vals)
-    if min_v == max_v:
-        return {k: 1.0 for k in scores}
-    return {k: (v - min_v) / (max_v - min_v) for k, v in scores.items()}
 
 
 # ---- Phase 1: HNSW verbatim（後方互換） ----
@@ -129,9 +121,7 @@ def search_hnsw(
 # ---- Phase 2: BM25 verbatim ----
 
 
-def search_bm25(
-    db_path: Path, query_text: str, limit: int = 10
-) -> list[BM25Result]:
+def search_bm25(db_path: Path, query_text: str, limit: int = 10) -> list[BM25Result]:
     """FTS5 BM25 で exchanges_fts を検索する"""
     con = get_connection(db_path)
     try:
@@ -213,60 +203,49 @@ def search_hnsw_palace(
     ]
 
 
-# ---- Phase 2: CombMNZ 融合 ----
+# ---- Phase 2: RRF 融合 ----
 
 
-def combmnz(
+def rrf(
     bm25_results: list[BM25Result],
     hnsw_results: list[HNSWPalaceResult],
     limit: int = 5,
-) -> list[CombMNZResult]:
+    k: int = 60,
+) -> list[FusedResult]:
     """
-    BM25(V) と HNSW(D) の結果を CombMNZ で融合する。
+    BM25(V) と HNSW(D) の結果を RRF (Reciprocal Rank Fusion) で融合する。
 
-    CombMNZ: score = Σ(normalized_scores) × (ヒットしたリスト数)
-    論文ベスト構成: Cross BM25(V)+HNSW(D) / CombMNZ → MRR 0.759
+    RRF: score(d) = Σ 1 / (k + rank_i(d))
+    k=60 は標準値（Cormack et al., 2009）。
+    スコアの絶対値に依存せず順位だけで融合するため正規化不要。
     """
     if not bm25_results and not hnsw_results:
         return []
 
-    bm25_raw = {r.exchange_id: r.bm25_score for r in bm25_results}
-    hnsw_raw = {r.exchange_id: 1.0 / (1.0 + r.distance) for r in hnsw_results}
+    scores: dict[str, float] = {}
+    for rank, r in enumerate(bm25_results, 1):
+        scores[r.exchange_id] = scores.get(r.exchange_id, 0.0) + 1.0 / (k + rank)
+    for rank, r in enumerate(hnsw_results, 1):
+        scores[r.exchange_id] = scores.get(r.exchange_id, 0.0) + 1.0 / (k + rank)
 
-    norm_bm25 = _normalize(bm25_raw)
-    norm_hnsw = _normalize(hnsw_raw)
-
-    all_ids = set(norm_bm25) | set(norm_hnsw)
-
-    combmnz_scores: dict[str, float] = {}
-    for eid in all_ids:
-        hit_count = (1 if eid in norm_bm25 else 0) + (1 if eid in norm_hnsw else 0)
-        combined = norm_bm25.get(eid, 0.0) + norm_hnsw.get(eid, 0.0)
-        combmnz_scores[eid] = combined * hit_count
-
-    sorted_ids = sorted(combmnz_scores, key=lambda k: combmnz_scores[k], reverse=True)[
-        :limit
-    ]
+    sorted_ids = sorted(scores, key=lambda x: scores[x], reverse=True)[:limit]
 
     bm25_map = {r.exchange_id: r for r in bm25_results}
     hnsw_map = {r.exchange_id: r for r in hnsw_results}
 
-    results: list[CombMNZResult] = []
+    results: list[FusedResult] = []
     for eid in sorted_ids:
         if eid in bm25_map:
-            r = bm25_map[eid]
-            user_content, agent_content = r.user_content, r.agent_content
+            r_base = bm25_map[eid]
         else:
-            r = hnsw_map[eid]
-            user_content, agent_content = r.user_content, r.agent_content
-
+            r_base = hnsw_map[eid]
         palace_r = hnsw_map.get(eid)
         results.append(
-            CombMNZResult(
+            FusedResult(
                 exchange_id=eid,
-                user_content=user_content,
-                agent_content=agent_content,
-                score=combmnz_scores[eid],
+                user_content=r_base.user_content,
+                agent_content=r_base.agent_content,
+                score=scores[eid],
                 exchange_core=palace_r.exchange_core if palace_r else None,
                 specific_context=palace_r.specific_context if palace_r else None,
             )
@@ -283,12 +262,12 @@ def search_combined(
     query_text: str,
     query_vec: np.ndarray,
     limit: int = 5,
-) -> list[CombMNZResult]:
+) -> list[FusedResult]:
     """
-    BM25(V) + HNSW(D) の CombMNZ 融合検索。
+    BM25(V) + HNSW(D) の RRF 融合検索。
 
     palace objects がない場合は BM25 のみで結果を返す。
     """
     bm25_results = search_bm25(db_path, query_text, limit=limit * 2)
     hnsw_results = search_hnsw_palace(db_path, query_vec, limit=limit * 2)
-    return combmnz(bm25_results, hnsw_results, limit=limit)
+    return rrf(bm25_results, hnsw_results, limit=limit)
