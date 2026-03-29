@@ -99,6 +99,20 @@ def init_db(db_path: Path) -> None:
             VALUES (new.rowid, new.bm25_text);
         END;
 
+        CREATE TRIGGER IF NOT EXISTS palace_ad
+        AFTER DELETE ON palace_objects BEGIN
+            INSERT INTO palace_fts(palace_fts, rowid, bm25_text)
+            VALUES ('delete', old.rowid, old.bm25_text);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS palace_au
+        AFTER UPDATE ON palace_objects BEGIN
+            INSERT INTO palace_fts(palace_fts, rowid, bm25_text)
+            VALUES ('delete', old.rowid, old.bm25_text);
+            INSERT INTO palace_fts(rowid, bm25_text)
+            VALUES (new.rowid, new.bm25_text);
+        END;
+
         CREATE TABLE IF NOT EXISTS rooms (
             id               TEXT PRIMARY KEY,
             palace_object_id TEXT NOT NULL,

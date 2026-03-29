@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -165,10 +166,11 @@ def index_file(jsonl_path: Path, db_path: Path) -> int:
         con.close()
         return 0
 
-    # conversations に登録
+    # conversations に登録（started_at はファイルの mtime から取得）
+    mtime = datetime.fromtimestamp(jsonl_path.stat().st_mtime, tz=UTC).isoformat()
     con.execute(
-        "INSERT INTO conversations (id, source_path) VALUES (?, ?)",
-        (conversation_id, str(jsonl_path)),
+        "INSERT INTO conversations (id, source_path, started_at) VALUES (?, ?, ?)",
+        (conversation_id, str(jsonl_path), mtime),
     )
 
     exchanges = parse_exchanges(jsonl_path)
