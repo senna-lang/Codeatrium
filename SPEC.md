@@ -277,15 +277,20 @@ rooms (
 ### トリガー
 
 ```
-Claude Code セッション終了
-  │
-  └─ Stop フック
-       ├─ logo index                 （同期・即時 / embedding のみ）
-       └─ nohup logo distill &       （detach して起動・Claude Code 終了後も継続）
+Claude Code ラリー終了（毎ターン）
+  └─ Stop フック（async: true）
+       └─ logo index          （ノンブロッキング / embedding のみ）
+
+セッション境界（/clear・/resume・CC終了）
+  └─ SessionEnd フック
+       └─ nohup logo distill &（detach・CC終了後も継続）
             │ claude --print は ~/.claude/ の認証情報を使うため
             │ 親プロセス（Claude Code）の終了に依存しない
             └─ 次セッション開始までに完了していればよい
 ```
+
+> **SessionEnd の reason 対応**: `clear`（/clear）・`resume`（/resume）・`logout`・`other`（CC終了）
+> Stop フックの `async: true` は CC ネイティブの非同期実行。nohup 不要でラリーをブロックしない。
 
 ### INDEXER
 
@@ -298,10 +303,33 @@ Claude Code セッション終了
   │   ※ 会話全体ではなく exchange 単位で扱う
   │
   │   フィルタ・分割ルール（論文 Section 3.1 準拠）:
-  │     - 100文字未満の exchange は trivial として除外
+  │     - 50文字未満の exchange は trivial として除外
+  │       ※ 論文は「4トークン未満」を閾値とするが、実データ分析に基づき 50文字を採用:
+  │         - このプロジェクトの 386件の exchange を実測した結果:
+  │             >= 10文字: 382件 (99.0%)
+  │             >= 20文字: 375件 (97.2%)
+  │             >= 50文字: 363件 (94.0%)
+  │             >= 100文字: 342件 (88.6%)
+  │         - 50〜99文字帯に有用なやりとりが複数確認された
+  │           例: 「論文にはなんと書かれている？」「E2Eテストの設計をしたい。」
+  │               「コアコンセプトにLSP情報で拡張すると書いてあるけど」
+  │         - 100文字は論文の閾値（≈4〜8文字）に対して過剰に厳しかった
+  │         - tool-use のみで agent がテキストを返さない exchange は
+  │           combined が短くなるが、_is_real_user_entry により
+  │           user_text 空の中間ステップは既に除外されているため問題ない
   │     - 20 ply を超える exchange は固定間隔で分割
   │     - tool-use のみのラウンドトリップ（user の実質的な発話なし）は
   │       exchange の区切りとしない → 次の実質応答まで同一 exchange に含める
+  │
+  │   _is_real_user_entry による事前除外（trivial フィルタより前に適用）:
+  │     - user_text が空の entry → 中間ステップとして除外
+  │       ※ agent が自律的に次のアクションを起こすターンはユーザー発話なし
+  │     - tool_result のみの entry → CC がツール結果を user ロールで返す仕様
+  │       実質的なユーザー発話ではないため除外
+  │     - コンパクション要約（"This session is being continued..." 等）→ 除外
+  │       CC のセッション引き継ぎテキストは exchange 境界としない
+  │     ※ 実測: 386件の有効 exchange に対し、これらの除外により
+  │        中間ステップが trivial フィルタに混入しないことを確認済み
   │
   ├──────────────────────────────────────────────────┐
   │                                                  │
@@ -532,8 +560,10 @@ verbatim                 distilled
 
 ### Phase 4: 自動化 + 全件ロード
 
-- [ ] Claude Code Stop フックで `logo index` を自動実行
-- [ ] `logo index` 完了後にバックグラウンドで `logo distill` を起動
+- [ ] Claude Code **Stop フック**（`async: true`）で `logo index` を自動実行（毎ターン・ノンブロッキング）
+- [ ] Claude Code **SessionEnd フック**（`nohup ... &`）で `logo distill` をセッション境界時のみ起動
+      （`/clear`・`/resume`・CC終了をトリガーとし、毎ターンの蒸留コストを回避）
+- [ ] `logo hook install` で両フックを `~/.claude/settings.json` に一括登録
 - [ ] CLAUDE.md テンプレート（LLM が自動で呼び出す設定）
 - [ ] `logo status` でインデックス状況の可視化
 - [ ] `logo dump --distilled [--limit N] [--json]` — 全件 in-context ロード用コマンド
@@ -640,6 +670,274 @@ logo show "~/.claude/projects/.../abc.jsonl:ply=42" --json
 logo context --symbol "AuthMiddleware.validate" --json
 \`\`\`
 ````
+
+---
+
+## 11. `claude -p` 蒸留運用上の問題と解決策
+
+> Zenn 記事素材。実装中に踏んだ落とし穴と対処をまとめる。
+
+### 問題① Stop フックがラリーをブロックする
+
+**症状**: Stop フックに `logo index && logo distill` を同期実行で登録したため、Claude が応答を返すたびに数秒待ちが発生し UX が壊滅した。
+
+**原因**: `logo index` が同期実行でブロックしていた。
+
+**解決**: Stop フックを `async: true`（CC ネイティブ非同期）に変更し、`logo index` をノンブロッキング化。`logo distill` は Stop フックから外してセッション境界のみで実行するよう分離した。
+
+---
+
+### 問題② SessionEnd フックの無限ループ
+
+**症状**: `logo distill` を登録した SessionEnd フックが多重起動し、複数の `claude --print` プロセスが積み重なった。最長で数時間前から走り続けるプロセスが残っていた。
+
+**原因**: `claude --print` 自体が CC セッションとして扱われ、そのセッション終了時に SessionEnd フックが再発火するループが発生していた。
+
+```
+SessionEnd → logo distill → claude --print → SessionEnd → logo distill → ...
+```
+
+**解決**: `claude --print` 呼び出しに `--setting-sources ""` を追加。サブプロセスが `~/.claude/settings.json` を読まなくなり、フック再発火が止まる。さらに SessionEnd → **SessionStart** に変更することで根本的にループ構造を回避（`claude --print` は SessionStart を発火しない）。
+
+---
+
+### 問題③ `claude --print` 1 回で 28K tokens 消費
+
+**症状**: `logo distill --limit 1` を実行しただけで CC Pro のレートリミットに当たった。
+
+**原因**: `claude --print` はインタラクティブセッションと同等のコンテキスト初期化を行い、プロジェクトの CLAUDE.md（約 28K tokens）をキャッシュ作成していた。`cwd='/tmp'` に変えても `~/.claude` ユーザーレベル設定の読み込みは防げなかった。同症状の公式 Issue: [anthropics/claude-code#12333](https://github.com/anthropics/claude-code/issues/12333)
+
+**解決**: 以下 2 フラグを組み合わせることで cache_creation を 27K → 4K に削減。
+
+```bash
+claude --print \
+  --no-session-persistence \   # セッション保存無効・コンテキスト初期化を抑制
+  --setting-sources "" \       # user/project/local 設定をスキップ → CLAUDE.md 非読込
+  ...
+```
+
+実測値:
+
+| フラグ | cache_creation | cache_read |
+|--------|---------------|-----------|
+| なし（初期実装） | 27,272 | 13,635 |
+| `--no-session-persistence` のみ | 12,426 | 26,513 |
+| `+ --setting-sources ""` | **4,232** | 20,808 |
+
+`cache_read` は `cache_creation` の 10 倍安価なため、実質コストは大幅削減。
+
+なお `--bare` フラグ（公式推奨のスクリプトモード）を使えばさらに削減できるが、OAuth 認証非対応のため API キーが必要。CC Pro ユーザーには使えない。
+
+> ドキュメントより: `--bare` is the recommended mode for scripted and SDK calls, and **will become the default for `-p` in a future release.**
+
+---
+
+### 問題④ `--json-schema` フラグがタイムアウトする
+
+**症状**: `--json-schema` を渡すと 30 秒以上待ってもレスポンスが返らないか、`result` フィールドに会話的な応答が入り JSON パースに失敗した。
+
+**原因**:
+1. `--output-format json` のレスポンスは `{"type":"result","result":"..."}` のラッパー構造。`result` フィールドを直接パースしていたのが誤り。
+2. `--json-schema` 使用時の構造化出力は `result` ではなく **`structured_output`** フィールドに入る（ドキュメント参照）。
+3. 初回呼び出しはグラマーコンパイルが発生し数十秒かかる（Anthropic ドキュメント記載）。
+
+**解決**: `structured_output` フィールドを優先参照するように修正。searchat の実装を参考に確認。
+
+```python
+outer = json.loads(result.stdout)
+if "structured_output" in outer and outer["structured_output"]:
+    return outer["structured_output"]   # ← 正しいフィールド
+```
+
+---
+
+### 問題⑤ 多重プロセス起動（プロセスロックなし）
+
+**症状**: 複数の CC インスタンス（Zed・ターミナル・他プロジェクト）が同時に SessionEnd/SessionStart を発火し、`logo distill` プロセスが並列に複数起動した。
+
+**解決**: ファイルベースのプロセスロックを実装。起動時に `.logosyncs/distill.lock` に PID を書き込み、起動済み PID が生きていれば即 exit。強制終了後の残骸ロックも PID 死活確認で自動クリア。
+
+```python
+if lock_path.exists():
+    existing_pid = int(lock_path.read_text().strip())
+    os.kill(existing_pid, 0)  # PID 生死確認（ProcessLookupError で死亡判定）
+    raise typer.Exit(0)       # 生きていれば即終了
+```
+
+2 つ目以降はキューに積まれず**即破棄**される。次の SessionStart 発火時に未蒸留分をまとめて処理するため取りこぼしは発生しない。
+
+---
+
+### 問題⑥ sqlite-vec virtual table が `INSERT OR IGNORE` 非対応
+
+**症状**: `logo distill` 実行時に `OperationalError: UNIQUE constraint failed on vec_palace primary key` が発生。
+
+**原因**: sqlite-vec の virtual table は通常の SQLite テーブルと異なり `INSERT OR IGNORE` の conflict resolution をサポートしない。
+
+**解決**: 存在チェック後に INSERT する方式に変更。
+
+```python
+exists = con.execute("SELECT 1 FROM vec_palace WHERE palace_id = ?", (palace_id,)).fetchone()
+if not exists:
+    con.execute("INSERT INTO vec_palace (palace_id, embedding) VALUES (?, ?)", ...)
+```
+
+---
+
+### 問題⑦ フックのトリガー選択（SessionEnd vs SessionStart）
+
+**結論**: `SessionEnd` より `SessionStart` が優れている。
+
+| | SessionEnd | SessionStart |
+|--|-----------|-------------|
+| ループリスク | `claude --print` が再発火する可能性あり | `claude --print` は発火しない |
+| タイムアウト | デフォルト 1.5 秒制限あり | 制限なし |
+| タイミング | セッション終了時（次の indexing 未完の可能性） | 新セッション開始時（前回分の indexing 完了後） |
+
+SessionStart の matcher: `startup\|clear\|resume\|compact`
+
+---
+
+## 12. `logo search` パフォーマンスチューニング
+
+### 問題: 毎回 7 秒かかるコールドスタート
+
+**症状**: `logo search` を実行するたびに 7〜8 秒かかる。エージェントが自律的に使うには許容できない遅延。
+
+**原因**: `logo search` は毎回新しい Python プロセスを起動し、`multilingual-e5-small`（500MB）のモデル重みをゼロからロードしていた。
+
+```
+$ time logo search "RRF 採用理由"
+real  0m7.6s   ← ほぼ全部モデルロード時間
+```
+
+---
+
+### 解決: Unix ソケットサーバー方式
+
+モデルを常駐させる軽量サーバーを実装し、`logo search` はソケット経由でクエリを投げるだけにした。
+
+**アーキテクチャ:**
+
+```
+logo search "..." 
+  │
+  ├─ .logosyncs/embedder.sock が存在する？
+  │     YES → ソケット経由でクエリ送信 → 0.15秒
+  │     NO  → 直接モデルロード（~7秒）
+  │            └─ バックグラウンドでサーバーを起動（次回から高速）
+  │
+  └─ 結果を返す
+
+embedder_server（常駐プロセス）
+  - Unix ソケット .logosyncs/embedder.sock でリッスン
+  - モデルをメモリに保持
+  - リクエストごとにスレッドで処理
+  - 10分間アイドルで自動終了（CPU 0%、メモリ ~500MB）
+```
+
+**実測値:**
+
+| 状態 | 検索時間 |
+|------|---------|
+| サーバーなし（初回） | ~7.5 秒 |
+| サーバー起動済み（2回目以降） | **0.15 秒**（50倍速） |
+
+**ライフサイクル:**
+
+- `SessionStart` フックで `nohup logo server start > /dev/null 2>&1 &` を実行 → CC 起動時に自動ウォームアップ
+- 10分アイドルでサーバー自動終了（明示的な停止不要）
+- 次の SessionStart で再起動
+
+**デッドロックの落とし穴:**
+
+サーバー内で `Embedder()` を使う際、`_find_sock_path()` が自分自身のソケットを発見して自己接続し、デッドロックが発生した。
+
+```
+Server → embedder.embed() → _try_socket_embed(自分) → Server 待機 → デッドロック
+```
+
+**解決**: サーバー起動時に `LOGO_NO_SOCK=1` 環境変数をセットし、`Embedder` がソケットを探さないようにした。
+
+```python
+os.environ["LOGO_NO_SOCK"] = "1"
+embedder = Embedder()   # ソケット不使用・直接モデルロード
+del os.environ["LOGO_NO_SOCK"]
+```
+
+---
+
+## 13. インデックス除外ルール
+
+### コンパクション要約の除外
+
+**問題**: CC がコンテキスト圧縮（`/compact`）を行うと、再開セッションの先頭に長大な要約テキストが `role: "user"` として挿入される。これをそのまま exchange に含めると：
+
+- 蒸留結果に要約が混入し、実際の会話内容と区別できなくなる
+- `logo context --symbol` の結果が要約テキストで汚染される
+- トークン無駄遣い（要約は数千文字に及ぶ）
+
+**解決**: `_is_real_user_entry()` でコンパクション要約のプレフィックスを検出し、exchange 境界として扱わない。
+
+```python
+_COMPACT_PREFIXES = (
+    "This session is being continued from a previous conversation",
+    "前のセッションからの引き継ぎです",
+    "このセッションは、以前の会話から引き継がれています",
+)
+```
+
+実際の `.jsonl` で確認したパターン:
+
+```
+"This session is being continued from a previous conversation that ran out of context.
+ The summary below covers the earlier portion of the conversation.\n\nSummary:\n..."
+```
+
+**注意**: 既にインデックス済みの exchange には要約が混入している場合がある。再インデックスしない限り残る。
+
+---
+
+## 14. tree-sitter シンボル解決のユースケースと改善案
+
+### 現状
+
+蒸留時に `files_touched` からシンボルを tree-sitter で抽出し、`symbols` テーブルに保存する。`logo context --symbol <name>` で「このシンボルに関連する過去会話」を逆引きできる。
+
+### ユースケース
+
+**① コードから会話を逆引き（実装済み）**
+
+```bash
+logo context --symbol "distill"
+# → distill 関数に関連する過去の設計議論・実装経緯が返る
+```
+
+「なぜこの実装にしたか」「どんな制約を決めたか」を即座に確認できる。
+
+**② エージェントが編集前に文脈を自動取得（最重要ユースケース）**
+
+CLAUDE.md に以下を記述しておくことで、CC がファイルを編集しようとしたとき `logo context --symbol` を自動実行できる：
+
+```bash
+logo context --symbol "変更対象の関数名" --json
+```
+
+エージェントが「自分がこれから触るコードについて過去に何を決めたか」を自律的に参照できる。毎回人間が説明する必要がなくなる。このツールの根幹的な価値と直結する。
+
+**③ リファクタリング前のリスク把握**
+
+関数名・シグネチャを変える前に過去議論を確認し、設計上の制約の見落としを防ぐ。
+
+**④ バグ調査**
+
+「このクラスを触った会話を全部出して」で、バグが入り込んだ経緯を会話ログから追える。
+
+### 改善案
+
+- **PreToolUse フックとの統合**: CC が Edit/Write ツールを使う前に対象ファイルのシンボルを自動検索し、関連する過去会話を context として注入する
+- **シンボル変更の追跡**: 同一シンボルのリネームを検出して過去の参照を維持する（現在はシンボル名の完全一致のみ）
+- **`logo context --file <path>` の充実**: ファイル単位での逆引きをシンボル一覧とともに返す
 
 ---
 
