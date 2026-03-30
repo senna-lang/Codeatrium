@@ -6,7 +6,7 @@ exchange 境界定義:
   次の同様エントリの直前まで。ツール呼び出し・中間応答は同一 exchange に含める。
 
 フィルタルール（SPEC Section 6 / 論文 Section 3.1 準拠）:
-  - 100文字未満の exchange は trivial として除外
+  - 50文字未満の exchange は trivial として除外
   - isMeta=True の user エントリは exchange 境界としない
 """
 
@@ -55,6 +55,20 @@ def _extract_text(content: Any) -> str:
     return ""
 
 
+# コンパクション要約の先頭パターン（CC が自動生成するセッション引き継ぎテキスト）
+_COMPACT_PREFIXES = (
+    "This session is being continued from a previous conversation",
+    "前のセッションからの引き継ぎです",
+    "このセッションは、以前の会話から引き継がれています",
+)
+
+
+def _is_compaction_summary(text: str) -> bool:
+    """CC のコンパクション要約エントリか判定する"""
+    t = text.strip()
+    return any(t.startswith(prefix) for prefix in _COMPACT_PREFIXES)
+
+
 def _is_real_user_entry(entry: dict) -> bool:
     """実質的なユーザー発話を持つ user エントリか判定する"""
     if entry.get("type") != "user":
@@ -75,6 +89,9 @@ def _is_real_user_entry(entry: dict) -> bool:
         if isinstance(b, dict)
     ):
         return False
+    # コンパクション要約は exchange 境界としない
+    if _is_compaction_summary(text):
+        return False
     return bool(text.strip())
 
 
@@ -84,7 +101,7 @@ def _is_real_user_entry(entry: dict) -> bool:
 def parse_exchanges(jsonl_path: Path) -> list[Exchange]:
     """
     .jsonl ファイルを読んで exchange リストを返す。
-    trivial（100文字未満）は除外する。
+    trivial（50文字未満）は除外する。
     """
     entries: list[dict] = []
     with jsonl_path.open(encoding="utf-8") as f:
@@ -127,7 +144,7 @@ def parse_exchanges(jsonl_path: Path) -> list[Exchange]:
         combined = user_text + agent_text
 
         # trivial フィルタ
-        if len(combined) < 100:
+        if len(combined) < 50:
             continue
 
         user_uuid = user_entry.get("uuid", f"{start}")

@@ -122,27 +122,84 @@ def extract_files_touched(user_content: str, agent_content: str) -> list[str]:
     return result
 
 
+def _session_dir() -> Path:
+    """claude -p が書き出す JSONL のディレクトリ"""
+    return Path.home() / ".claude" / "projects"
+
+
+def _snapshot_jsonl(session_dir: Path) -> set[Path]:
+    if not session_dir.exists():
+        return set()
+    return set(session_dir.rglob("*.jsonl"))
+
+
+def _cleanup_side_effect_jsonls(session_dir: Path, before: set[Path]) -> None:
+    """claude -p 呼び出しで生成された JSONL を削除する（searchat 方式）"""
+    if not session_dir.exists():
+        return
+    after = set(session_dir.rglob("*.jsonl"))
+    for p in after - before:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
 def call_claude(prompt: str) -> dict[str, Any]:
     """claude -p でプロンプトを実行し JSON を返す（テストでモック対象）"""
-    result = subprocess.run(
-        [
-            "claude",
-            "-p",
-            "--model",
-            "claude-haiku-4-5-20251001",
-            "--output-format",
-            "json",
-            "--json-schema",
-            _JSON_SCHEMA,
-            prompt,
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    import shutil
+
+    cli = shutil.which("claude")
+    if cli is None:
+        raise RuntimeError("claude CLI not found in PATH")
+
+    session_dir = _session_dir()
+    before = _snapshot_jsonl(session_dir)
+
+    try:
+        result = subprocess.run(
+            [
+                cli,
+                "--print",
+                "--model",
+                "claude-haiku-4-5-20251001",
+                "--output-format",
+                "json",
+                "--json-schema",
+                _JSON_SCHEMA,
+                "--no-session-persistence",  # セッション保存無効 → CLAUDE.md 非読込
+                "--setting-sources",
+                "",  # user/project/local 設定スキップ → cache_creation 27K→4K に削減
+            ],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    finally:
+        _cleanup_side_effect_jsonls(session_dir, before)
+
     if result.returncode != 0:
         raise RuntimeError(f"claude -p failed: {result.stderr}")
-    return json.loads(result.stdout)
+
+    # --output-format json + --json-schema の場合:
+    # {"type":"result", "structured_output": {...}, "result": "", ...}
+    outer = json.loads(result.stdout)
+    if isinstance(outer, dict):
+        if "structured_output" in outer and outer["structured_output"]:
+            return outer["structured_output"]
+        # fallback: result フィールド
+        inner = outer.get("result", "")
+        if isinstance(inner, str) and inner.strip():
+            # markdown フェンスを除去
+            text = inner.strip()
+            if text.startswith("```"):
+                lines = text.splitlines()
+                text = "\n".join(
+                    lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+                )
+            return json.loads(text.strip())
+    return outer
 
 
 def distill_exchange(
@@ -232,10 +289,15 @@ def save_palace_object(
 
     arr = embedding.astype(np.float32)
     blob = struct.pack(f"{len(arr)}f", *arr.tolist())
-    con.execute(
-        "INSERT OR IGNORE INTO vec_palace (palace_id, embedding) VALUES (?, ?)",
-        (palace_id, blob),
-    )
+    # sqlite-vec virtual table は INSERT OR IGNORE 非対応のため存在チェック後に INSERT
+    exists = con.execute(
+        "SELECT 1 FROM vec_palace WHERE palace_id = ?", (palace_id,)
+    ).fetchone()
+    if not exists:
+        con.execute(
+            "INSERT INTO vec_palace (palace_id, embedding) VALUES (?, ?)",
+            (palace_id, blob),
+        )
 
     # ⑤ tree-sitter シンボル解決
     from logo.resolver import SymbolResolver
@@ -272,18 +334,23 @@ def save_palace_object(
     con.close()
 
 
-def distill_all(db_path: Path) -> int:
-    """未蒸留の exchange を全て処理する。Returns: 処理した exchange 数"""
+def distill_all(db_path: Path, limit: int | None = None) -> int:
+    """未蒸留の exchange を処理する。Returns: 処理した exchange 数
+
+    Args:
+        limit: 処理する最大件数。None の場合は全件処理。
+    """
     from logo.db import get_connection
 
     con = get_connection(db_path)
-    rows = con.execute(
-        """
+    query = """
         SELECT id, user_content, agent_content, ply_start, ply_end
         FROM exchanges
         WHERE distilled_at IS NULL
-        """
-    ).fetchall()
+    """
+    if limit is not None:
+        query += f" LIMIT {limit}"
+    rows = con.execute(query).fetchall()
     con.close()
 
     if not rows:

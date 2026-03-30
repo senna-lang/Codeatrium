@@ -204,9 +204,22 @@ def search_hnsw(
 # ---- Phase 2: BM25 verbatim ----
 
 
+def _fts5_query(text: str) -> str:
+    """クエリを FTS5 OR 形式に変換する。
+
+    FTS5 のデフォルトは AND 結合で、全トークンが揃わないとヒットしない。
+    スペース区切りで分割して OR 結合に変換することで再現率を上げる。
+    ダブルクォートで囲んでフレーズ検索特殊文字をエスケープする。
+    """
+    tokens = text.split()
+    escaped = ['"' + t.replace('"', '""') + '"' for t in tokens if t]
+    return " OR ".join(escaped) if escaped else text
+
+
 def search_bm25(db_path: Path, query_text: str, limit: int = 10) -> list[BM25Result]:
     """FTS5 BM25 で exchanges_fts を検索する"""
     con = get_connection(db_path)
+    fts_query = _fts5_query(query_text)
     try:
         rows = con.execute(
             """
@@ -221,7 +234,7 @@ def search_bm25(db_path: Path, query_text: str, limit: int = 10) -> list[BM25Res
             ORDER BY score DESC
             LIMIT ?
             """,
-            (query_text, limit),
+            (fts_query, limit),
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
