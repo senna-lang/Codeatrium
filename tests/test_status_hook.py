@@ -115,11 +115,28 @@ def test_hook_install_adds_command(tmp_path, monkeypatch):
     runner.invoke(app, ["hook", "install"])
     settings_path = tmp_path / ".claude" / "settings.json"
     data = json.loads(settings_path.read_text())
-    commands = [
-        h["command"] for entry in data["hooks"]["Stop"] for h in entry.get("hooks", [])
+
+    # Stop hook: logo index (async: true)
+    stop_commands = [
+        h for entry in data["hooks"]["Stop"] for h in entry.get("hooks", [])
     ]
-    assert any("logo index" in c for c in commands)
-    assert any("logo distill" in c for c in commands)
+    assert any("logo index" in h.get("command", "") for h in stop_commands)
+    assert all(
+        h.get("async") is True
+        for h in stop_commands
+        if "logo index" in h.get("command", "")
+    )
+
+    # SessionStart hook: logo distill (matcher: startup|clear|resume|compact)
+    session_start_entries = data["hooks"]["SessionStart"]
+    assert any(
+        entry.get("matcher") == "startup|clear|resume|compact"
+        for entry in session_start_entries
+    )
+    session_start_commands = [
+        h for entry in session_start_entries for h in entry.get("hooks", [])
+    ]
+    assert any("logo distill" in h.get("command", "") for h in session_start_commands)
 
 
 def test_hook_install_idempotent(tmp_path, monkeypatch):

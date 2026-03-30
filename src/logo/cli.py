@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import typer
 
@@ -27,13 +27,38 @@ LOGOSYNCS_DIR = ".logosyncs"
 DB_NAME = "memory.db"
 
 
+def _git_root() -> Path | None:
+    """git rev-parse --show-toplevel でリポジトリルートを返す。git 外なら None"""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return Path(result.stdout.strip())
+    except subprocess.CalledProcessError:
+        return None
+
+
 def _find_project_root() -> Path:
-    """.logosyncs/ ディレクトリを探してプロジェクトルートを返す。なければ cwd"""
+    """.logosyncs/ を探してプロジェクトルートを返す。
+    検索順: cwd → 親ディレクトリ（git root まで）
+    git root を超えて遡らないことでプロジェクト外の DB を拾わない。
+    """
     cwd = Path.cwd()
-    for p in [cwd, *cwd.parents]:
+    git_root = _git_root()
+    # 探索上限: git root があればそこまで、なければ cwd のみ
+    candidates = [cwd, *cwd.parents]
+    for p in candidates:
         if (p / LOGOSYNCS_DIR).exists():
             return p
-    return cwd
+        if git_root and p == git_root:
+            break
+    # 見つからなければ git root（なければ cwd）を返す
+    return git_root or cwd
 
 
 def _db_path(project_root: Path) -> Path:
@@ -133,8 +158,15 @@ def index(
 
 
 @app.command()
-def distill() -> None:
+def distill(
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", "-n", help="処理する最大件数（省略時は全件）"),
+    ] = None,
+) -> None:
     """未蒸留の exchange を claude -p で蒸留して palace_objects を生成する"""
+    import os
+
     from logo.distiller import distill_all
 
     root = _find_project_root()
@@ -144,8 +176,28 @@ def distill() -> None:
         typer.echo("Not initialized. Run `logo init` first.", err=True)
         raise typer.Exit(1)
 
-    count = distill_all(db)
-    typer.echo(f"Distilled {count} exchange(s).")
+    # プロセスレベルのロック：多重起動を防ぐ
+    lock_path = db.parent / "distill.lock"
+    if lock_path.exists():
+        try:
+            existing_pid = int(lock_path.read_text().strip())
+            # PID が実際に生きているか確認
+            os.kill(existing_pid, 0)
+            typer.echo(
+                f"logo distill is already running (PID {existing_pid}). Exiting.",
+                err=True,
+            )
+            raise typer.Exit(0)
+        except (ValueError, ProcessLookupError, PermissionError):
+            # PID が死んでいる or 読めない → ロックファイルが残骸なので上書き
+            pass
+
+    lock_path.write_text(str(os.getpid()))
+    try:
+        count = distill_all(db, limit=limit)
+        typer.echo(f"Distilled {count} exchange(s).")
+    finally:
+        lock_path.unlink(missing_ok=True)
 
 
 # ---- search ----
@@ -330,50 +382,261 @@ def status(
 
 # ---- hook ----
 
-_HOOK_COMMAND = "logo index && nohup logo distill > /dev/null 2>&1 &"
-
-hook_app = typer.Typer(help="Claude Code Stop hook 管理")
+hook_app = typer.Typer(help="Claude Code hook 管理")
 app.add_typer(hook_app, name="hook")
+
+
+def _logo_bin() -> str:
+    """sys.executable と同じ venv の bin/logo のフルパスを返す（PATH 非依存）。"""
+    import sys
+
+    return str(Path(sys.executable).parent / "logo")
 
 
 @hook_app.command("install")
 def hook_install() -> None:
-    """Claude Code の Stop hook に logo index && logo distill を登録する"""
+    """Claude Code の Stop / SessionStart フックに logo を登録する。
+
+    Stop (async):      logo index    — 毎ターン・ノンブロッキング
+    SessionStart:      logo distill  — CC起動・/clear・/resume・compact 時
+                       claude --print サブセッションは SessionStart を発火しないためループなし
+    """
     settings_path = Path.home() / ".claude" / "settings.json"
 
     if settings_path.exists():
         with settings_path.open() as f:
-            settings: dict = json.load(f)
+            settings: dict[str, Any] = json.load(f)
     else:
         settings = {}
 
     hooks = settings.setdefault("hooks", {})
-    stop_hooks: list = hooks.setdefault("Stop", [])
+    logo = _logo_bin()
+    index_cmd = f"{logo} index"
+    distill_cmd = f"nohup {logo} distill > /dev/null 2>&1 &"
+    server_cmd = f"nohup {logo} server start > /dev/null 2>&1 &"
+    changed = False
 
-    # 既存エントリ確認
+    # --- Stop hook: logo index (async: true) ---
+    stop_hooks: list[dict[str, Any]] = hooks.setdefault("Stop", [])
+    stop_installed = False
     for entry in stop_hooks:
         for h in entry.get("hooks", []):
-            if h.get("command") == _HOOK_COMMAND:
-                typer.echo("Hook already installed.")
-                return
+            if "logo" in h.get("command", "") and "index" in h.get("command", ""):
+                stop_installed = True
+                if h.get("command") != index_cmd or not h.get("async"):
+                    h["command"] = index_cmd
+                    h["async"] = True
+                    h.pop("nohup", None)
+                    changed = True
+    if not stop_installed:
+        stop_hooks.append(
+            {"hooks": [{"type": "command", "command": index_cmd, "async": True}]}
+        )
+        changed = True
 
-    stop_hooks.append(
-        {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": _HOOK_COMMAND,
-                }
-            ]
-        }
-    )
+    # --- SessionStart hook: logo server start + logo distill (nohup detach) ---
+    # matcher: startup|clear|resume|compact — ユーザー起点のセッション境界のみ発火
+    # server start: embedding サーバーをウォームアップ（アイドル10分で自動停止）
+    # distill: claude --print サブセッションは SessionStart を発火しないためループなし
+    session_start_hooks: list[dict[str, Any]] = hooks.setdefault("SessionStart", [])
+
+    # server start エントリの確認・追加
+    server_start_installed = False
+    for entry in session_start_hooks:
+        if entry.get("matcher") != "startup|clear|resume|compact":
+            continue
+        for h in entry.get("hooks", []):
+            if "logo" in h.get("command", "") and "server" in h.get("command", ""):
+                server_start_installed = True
+                if h.get("command") != server_cmd:
+                    h["command"] = server_cmd
+                    changed = True
+
+    # distill エントリの確認・追加
+    session_start_installed = False
+    for entry in session_start_hooks:
+        if entry.get("matcher") != "startup|clear|resume|compact":
+            continue
+        for h in entry.get("hooks", []):
+            if "logo" in h.get("command", "") and "distill" in h.get("command", ""):
+                session_start_installed = True
+                if h.get("command") != distill_cmd:
+                    h["command"] = distill_cmd
+                    changed = True
+
+    if not server_start_installed or not session_start_installed:
+        # 既存エントリを探して hooks を追加、なければ新規作成
+        target_entry = next(
+            (
+                e
+                for e in session_start_hooks
+                if e.get("matcher") == "startup|clear|resume|compact"
+            ),
+            None,
+        )
+        if target_entry is None:
+            target_entry = {"matcher": "startup|clear|resume|compact", "hooks": []}
+            session_start_hooks.append(target_entry)
+        hooks_list = cast(list[dict[str, Any]], target_entry["hooks"])
+        if not server_start_installed:
+            hooks_list.append({"type": "command", "command": server_cmd})
+            changed = True
+        if not session_start_installed:
+            hooks_list.append({"type": "command", "command": distill_cmd})
+            changed = True
+
+    # 古い SessionEnd の logo distill エントリがあれば削除
+    if "SessionEnd" in hooks:
+        hooks["SessionEnd"] = [
+            entry
+            for entry in hooks["SessionEnd"]
+            if not any(
+                "logo" in h.get("command", "") and "distill" in h.get("command", "")
+                for h in entry.get("hooks", [])
+            )
+        ]
+        if not hooks["SessionEnd"]:
+            del hooks["SessionEnd"]
+        changed = True
+
+    if not changed:
+        typer.echo("Hooks already up to date.")
+        return
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     with settings_path.open("w") as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)
 
-    typer.echo(f"Hook installed: {settings_path}")
-    typer.echo(f"  Command: {_HOOK_COMMAND}")
+    typer.echo(f"Hooks installed: {settings_path}")
+    typer.echo(f"  Stop (async):       {index_cmd}")
+    typer.echo(f"  SessionStart:       {server_cmd}")
+    typer.echo(f"  SessionStart:       {distill_cmd}")
+    typer.echo("  (matcher: startup|clear|resume|compact)")
+
+
+# ---- server ----
+
+server_app = typer.Typer(help="embedding サーバー管理")
+app.add_typer(server_app, name="server")
+
+
+def _sock_path(root: Path) -> Path:
+    return _db_path(root).parent / "embedder.sock"
+
+
+def _server_pid_path(root: Path) -> Path:
+    return _db_path(root).parent / "embedder.pid"
+
+
+@server_app.command("start")
+def server_start() -> None:
+    """embedding サーバーをバックグラウンドで起動する"""
+    import subprocess
+
+    root = _find_project_root()
+    sock = _sock_path(root)
+
+    if sock.exists():
+        # ping して生死確認
+        import socket as _socket
+
+        try:
+            with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+                s.settimeout(1.0)
+                s.connect(str(sock))
+                import json as _json
+
+                s.sendall((_json.dumps({"type": "ping"}) + "\n").encode())
+                resp = s.recv(256)
+                if b"ok" in resp:
+                    typer.echo("Server is already running.")
+                    return
+        except Exception:
+            sock.unlink(missing_ok=True)
+
+    pid_path = _server_pid_path(root)
+    # venv の Python を使う（sys.executable はシステム Python の場合があるため）
+    from logo.embedder import _logo_python
+
+    proc = subprocess.Popen(
+        [_logo_python(), "-m", "logo.embedder_server", str(sock)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    pid_path.write_text(str(proc.pid))
+
+    # 起動待ち（最大 30 秒）
+    import time
+
+    for i in range(150):
+        if sock.exists():
+            typer.echo(f"Server started (PID {proc.pid})")
+            return
+        time.sleep(0.2)
+        if i % 25 == 24:
+            typer.echo("  Loading model...", err=True)
+
+    typer.echo("Server failed to start.", err=True)
+    raise typer.Exit(1)
+
+
+@server_app.command("stop")
+def server_stop() -> None:
+    """embedding サーバーを停止する"""
+    import json as _json
+    import socket as _socket
+
+    root = _find_project_root()
+    sock = _sock_path(root)
+
+    if not sock.exists():
+        typer.echo("Server is not running.")
+        return
+
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+            s.settimeout(2.0)
+            s.connect(str(sock))
+            s.sendall((_json.dumps({"type": "stop"}) + "\n").encode())
+        typer.echo("Server stopped.")
+    except Exception as e:
+        typer.echo(f"Could not connect to server: {e}", err=True)
+        sock.unlink(missing_ok=True)
+
+    _server_pid_path(root).unlink(missing_ok=True)
+
+
+@server_app.command("status")
+def server_status() -> None:
+    """embedding サーバーの状態を確認する"""
+    import json as _json
+    import socket as _socket
+
+    root = _find_project_root()
+    sock = _sock_path(root)
+
+    if not sock.exists():
+        typer.echo("Server: stopped")
+        return
+
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(str(sock))
+            s.sendall((_json.dumps({"type": "ping"}) + "\n").encode())
+            resp = s.recv(256)
+            if b"ok" in resp:
+                pid_path = _server_pid_path(root)
+                pid = pid_path.read_text().strip() if pid_path.exists() else "unknown"
+                typer.echo(f"Server: running (PID {pid})")
+                typer.echo(f"Socket: {sock}")
+                return
+    except Exception:
+        pass
+
+    typer.echo("Server: socket exists but not responding")
+    sock.unlink(missing_ok=True)
 
 
 # ---- show ----
@@ -495,7 +758,7 @@ def dump(
     ).fetchall()
     con.close()
 
-    rooms_map: dict[str, list] = {}
+    rooms_map: dict[str, list[Any]] = {}
     for r in room_rows:
         rooms_map.setdefault(r["palace_object_id"], []).append(
             {
