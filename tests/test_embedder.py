@@ -13,6 +13,7 @@ def test_embedder_returns_384_dim() -> None:
     import numpy as np
 
     embedder = Embedder.__new__(Embedder)
+    embedder._sock_path = None
     embedder._model = MagicMock()
     embedder._model.encode.return_value = np.zeros((1, 384), dtype="float32")
 
@@ -25,6 +26,7 @@ def test_embedder_encode_called_with_text() -> None:
     import numpy as np
 
     embedder = Embedder.__new__(Embedder)
+    embedder._sock_path = None
     embedder._model = MagicMock()
     embedder._model.encode.return_value = np.zeros((1, 384), dtype="float32")
 
@@ -37,6 +39,7 @@ def test_embedder_returns_float32() -> None:
     import numpy as np
 
     embedder = Embedder.__new__(Embedder)
+    embedder._sock_path = None
     embedder._model = MagicMock()
     embedder._model.encode.return_value = np.zeros((1, 384), dtype="float32")
 
