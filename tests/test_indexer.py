@@ -83,7 +83,7 @@ def test_parse_exchanges_multiple(tmp_path: Path) -> None:
 
 
 def test_parse_exchanges_skips_trivial(tmp_path: Path) -> None:
-    """100文字未満の exchange は除外"""
+    """50文字未満の exchange は除外"""
     f = tmp_path / "session.jsonl"
     write_jsonl(
         f,
@@ -168,7 +168,7 @@ def test_index_file_inserts_to_db(tmp_path: Path) -> None:
 
 
 def test_index_file_dedup(tmp_path: Path) -> None:
-    """同じファイルを2回 index しても重複しない"""
+    """同じファイルを2回 index しても exchange は重複しない"""
     db_path = tmp_path / ".codeatrium" / "memory.db"
     init_db(db_path)
 
@@ -182,11 +182,57 @@ def test_index_file_dedup(tmp_path: Path) -> None:
     )
 
     index_file(jsonl, db_path)
-    index_file(jsonl, db_path)
+    count = index_file(jsonl, db_path)
+
+    assert count == 0  # 2回目は新規 exchange なし
+    con = get_connection(db_path)
+    rows = con.execute("SELECT * FROM exchanges").fetchall()
+    assert len(rows) == 1
+    con.close()
+
+
+def test_index_file_incremental(tmp_path: Path) -> None:
+    """セッション途中で追記された exchange が差分インデックスされる"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    # 初回: 1 exchange
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "最初の質問です。よろしくお願いします。" * 5),
+            make_assistant_entry("a1", "了解しました。詳しく説明します。" * 5, "u1"),
+        ],
+    )
+    count1 = index_file(jsonl, db_path)
+    assert count1 == 1
+
+    # 追記: 2つ目の exchange を追加
+    with jsonl.open("a") as f:
+        f.write(
+            json.dumps(
+                make_user_entry("u2", "次の質問です。詳しく教えてください。" * 5, "a1"),
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                make_assistant_entry(
+                    "a2", "詳しく説明します。ご参考になれば幸いです。" * 5, "u2"
+                ),
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+    count2 = index_file(jsonl, db_path)
+    assert count2 == 1  # 新規の1件だけ
 
     con = get_connection(db_path)
-    rows = con.execute("SELECT * FROM conversations").fetchall()
-    assert len(rows) == 1
+    rows = con.execute("SELECT * FROM exchanges").fetchall()
+    assert len(rows) == 2  # 合計2件
     con.close()
 
 

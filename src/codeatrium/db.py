@@ -36,9 +36,10 @@ def init_db(db_path: Path) -> None:
 
     con.executescript("""
         CREATE TABLE IF NOT EXISTS conversations (
-            id          TEXT PRIMARY KEY,   -- sha256(source_path)
-            source_path TEXT NOT NULL UNIQUE,
-            started_at  TIMESTAMP
+            id            TEXT PRIMARY KEY,   -- sha256(source_path)
+            source_path   TEXT NOT NULL UNIQUE,
+            started_at    TIMESTAMP,
+            last_ply_end  INT  NOT NULL DEFAULT -1  -- 最後にインデックスした ply_end（差分用）
         );
 
         CREATE TABLE IF NOT EXISTS exchanges (
@@ -134,6 +135,13 @@ def init_db(db_path: Path) -> None:
             dedup_hash       TEXT NOT NULL        -- sha256(symbol_name + file_path)
         );
     """)
+
+    # マイグレーション: last_ply_end カラムが無い既存 DB に追加
+    try:
+        con.execute("ALTER TABLE conversations ADD COLUMN last_ply_end INT NOT NULL DEFAULT -1")
+        con.commit()
+    except Exception:
+        pass  # カラムが既に存在する場合は無視
 
     # sqlite-vec の仮想テーブル（HNSW, Phase1 verbatim embedding 用）
     con.execute("""

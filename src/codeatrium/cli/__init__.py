@@ -57,6 +57,9 @@ def init(
             "[distill]\n"
             '# model = "claude-haiku-4-5-20251001"\n'
             "# batch_limit = 20\n"
+            "\n"
+            "[index]\n"
+            "# min_chars = 50   # trivial フィルタ閾値（文字数）\n"
         )
 
     typer.echo(f"Initialized: {db}")

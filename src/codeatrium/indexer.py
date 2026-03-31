@@ -62,6 +62,9 @@ _COMPACT_PREFIXES = (
     "このセッションは、以前の会話から引き継がれています",
 )
 
+# loci distill が claude --print に渡す蒸留プロンプトの先頭パターン
+_DISTILL_PROMPT_PREFIX = "この対話のやり取りをJSONに蒸留してください"
+
 
 def _is_compaction_summary(text: str) -> bool:
     """CC のコンパクション要約エントリか判定する"""
@@ -92,16 +95,19 @@ def _is_real_user_entry(entry: dict) -> bool:
     # コンパクション要約は exchange 境界としない
     if _is_compaction_summary(text):
         return False
+    # loci distill の蒸留プロンプトは除外
+    if text.strip().startswith(_DISTILL_PROMPT_PREFIX):
+        return False
     return bool(text.strip())
 
 
 # ---- 公開API ----
 
 
-def parse_exchanges(jsonl_path: Path) -> list[Exchange]:
+def parse_exchanges(jsonl_path: Path, min_chars: int = 50) -> list[Exchange]:
     """
     .jsonl ファイルを読んで exchange リストを返す。
-    trivial（50文字未満）は除外する。
+    trivial（min_chars 文字未満）は除外する。
     """
     entries: list[dict] = []
     with jsonl_path.open(encoding="utf-8") as f:
@@ -144,7 +150,7 @@ def parse_exchanges(jsonl_path: Path) -> list[Exchange]:
         combined = user_text + agent_text
 
         # trivial フィルタ
-        if len(combined) < 50:
+        if len(combined) < min_chars:
             continue
 
         user_uuid = user_entry.get("uuid", f"{start}")
@@ -164,10 +170,10 @@ def parse_exchanges(jsonl_path: Path) -> list[Exchange]:
     return exchanges
 
 
-def index_file(jsonl_path: Path, db_path: Path) -> int:
+def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
     """
     .jsonl ファイルを DB に登録する。
-    すでに登録済みの場合はスキップ（重複排除）。
+    既存 conversation の場合は last_ply_end 以降の新規 exchange のみ追加する。
     Returns: 新規登録した exchange 数
     """
     from codeatrium.db import get_connection
@@ -175,23 +181,34 @@ def index_file(jsonl_path: Path, db_path: Path) -> int:
     conversation_id = _sha256(str(jsonl_path))
     con = get_connection(db_path)
 
-    # 重複チェック
+    # 既存 conversation の last_ply_end を取得
     row = con.execute(
-        "SELECT id FROM conversations WHERE id = ?", (conversation_id,)
+        "SELECT last_ply_end FROM conversations WHERE id = ?", (conversation_id,)
     ).fetchone()
-    if row is not None:
+    last_ply_end = row["last_ply_end"] if row is not None else -1
+
+    exchanges = parse_exchanges(jsonl_path, min_chars=min_chars)
+    new_exchanges = [ex for ex in exchanges if ex.ply_start > last_ply_end]
+
+    if not new_exchanges:
         con.close()
         return 0
 
-    # conversations に登録（started_at はファイルの mtime から取得）
+    # conversations に登録 or 更新
     mtime = datetime.fromtimestamp(jsonl_path.stat().st_mtime, tz=UTC).isoformat()
-    con.execute(
-        "INSERT INTO conversations (id, source_path, started_at) VALUES (?, ?, ?)",
-        (conversation_id, str(jsonl_path), mtime),
-    )
+    if row is None:
+        con.execute(
+            "INSERT INTO conversations (id, source_path, started_at, last_ply_end) "
+            "VALUES (?, ?, ?, ?)",
+            (conversation_id, str(jsonl_path), mtime, new_exchanges[-1].ply_end),
+        )
+    else:
+        con.execute(
+            "UPDATE conversations SET last_ply_end = ? WHERE id = ?",
+            (new_exchanges[-1].ply_end, conversation_id),
+        )
 
-    exchanges = parse_exchanges(jsonl_path)
-    for ex in exchanges:
+    for ex in new_exchanges:
         con.execute(
             """
             INSERT OR IGNORE INTO exchanges
@@ -210,4 +227,4 @@ def index_file(jsonl_path: Path, db_path: Path) -> int:
 
     con.commit()
     con.close()
-    return len(exchanges)
+    return len(new_exchanges)
