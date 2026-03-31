@@ -41,13 +41,22 @@ def _make_exchange(db_path, ex_id, user_text=LONG_TEXT, agent_text=LONG_TEXT):
         "INSERT OR IGNORE INTO conversations (id, source_path) VALUES (?,?)",
         ("conv1", "/path/to.jsonl"),
     )
+    # 会話に2件以上の exchange を確保（min_exchanges=2 フィルタ対策）
+    con.execute(
+        """
+        INSERT OR IGNORE INTO exchanges
+            (id, conversation_id, ply_start, ply_end, user_content, agent_content, distilled_at)
+        VALUES (?,?,?,?,?,?,?)
+        """,
+        ("_pad_conv1", "conv1", 0, 1, "padding", "padding", "2026-01-01"),
+    )
     con.execute(
         """
         INSERT OR IGNORE INTO exchanges
             (id, conversation_id, ply_start, ply_end, user_content, agent_content)
         VALUES (?,?,?,?,?,?)
         """,
-        (ex_id, "conv1", 0, 3, user_text, agent_text),
+        (ex_id, "conv1", 2, 5, user_text, agent_text),
     )
     con.commit()
     con.close()

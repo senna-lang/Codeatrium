@@ -192,9 +192,11 @@ def distill_all(
 
     con = get_connection(db_path)
     query = """
-        SELECT id, user_content, agent_content, ply_start, ply_end
-        FROM exchanges
-        WHERE distilled_at IS NULL
+        SELECT e.id, e.user_content, e.agent_content, e.ply_start, e.ply_end
+        FROM exchanges e
+        WHERE e.distilled_at IS NULL
+          AND (SELECT COUNT(*) FROM exchanges e2
+               WHERE e2.conversation_id = e.conversation_id) >= 2
     """
     if limit is not None:
         query += f" LIMIT {limit}"

@@ -21,10 +21,19 @@ from codeatrium.search import (
 LONG_TEXT = "connection pool " * 10
 
 
-def _insert_exchange(con, ex_id, user_content, agent_content):
+def _insert_exchange(con, ex_id, user_content, agent_content, conv_id="conv1"):
     con.execute(
         "INSERT OR IGNORE INTO conversations (id, source_path) VALUES (?,?)",
-        ("conv1", "/path/to.jsonl"),
+        (conv_id, f"/path/{conv_id}.jsonl"),
+    )
+    # 会話に2件以上の exchange を確保（min_exchanges=2 フィルタ対策）
+    con.execute(
+        """
+        INSERT OR IGNORE INTO exchanges
+            (id, conversation_id, ply_start, ply_end, user_content, agent_content)
+        VALUES (?,?,?,?,?,?)
+        """,
+        (f"_pad_{conv_id}", conv_id, 0, 1, "padding", "padding"),
     )
     con.execute(
         """
@@ -32,7 +41,7 @@ def _insert_exchange(con, ex_id, user_content, agent_content):
             (id, conversation_id, ply_start, ply_end, user_content, agent_content)
         VALUES (?,?,?,?,?,?)
         """,
-        (ex_id, "conv1", 0, 3, user_content, agent_content),
+        (ex_id, conv_id, 2, 5, user_content, agent_content),
     )
     con.commit()
 
@@ -194,6 +203,46 @@ def test_rrf_score_decreases_with_rank() -> None:
     ]
     results = rrf(bm25, [], limit=5)
     assert results[0].score > results[1].score
+
+
+# --- min_exchanges フィルタ ---
+
+
+def test_search_bm25_excludes_single_exchange_sessions(tmp_path: Path) -> None:
+    """1件しかない会話は min_exchanges=2 でフィルタされる"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    # 1 exchange のみの会話
+    con.execute(
+        "INSERT INTO conversations (id, source_path) VALUES (?,?)",
+        ("solo", "/path/solo.jsonl"),
+    )
+    con.execute(
+        """
+        INSERT INTO exchanges
+            (id, conversation_id, ply_start, ply_end, user_content, agent_content)
+        VALUES (?,?,?,?,?,?)
+        """,
+        ("ex_solo", "solo", 0, 3, LONG_TEXT, "solo response"),
+    )
+    con.commit()
+    con.close()
+
+    results = search_bm25(db_path, "connection pool", limit=5, min_exchanges=2)
+    assert results == []
+
+
+def test_search_bm25_includes_multi_exchange_sessions(tmp_path: Path) -> None:
+    """2件以上ある会話は min_exchanges=2 で返される"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "ex1", LONG_TEXT, "pool response")
+    con.close()
+
+    results = search_bm25(db_path, "connection pool", limit=5, min_exchanges=2)
+    assert len(results) >= 1
 
 
 # --- search_combined ---

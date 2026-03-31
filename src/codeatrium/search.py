@@ -112,7 +112,9 @@ def _fts5_query(text: str) -> str:
     return " OR ".join(escaped) if escaped else text
 
 
-def search_bm25(db_path: Path, query_text: str, limit: int = 10) -> list[BM25Result]:
+def search_bm25(
+    db_path: Path, query_text: str, limit: int = 10, min_exchanges: int = 2
+) -> list[BM25Result]:
     """FTS5 BM25 で exchanges_fts を検索する"""
     con = get_connection(db_path)
     fts_query = _fts5_query(query_text)
@@ -127,10 +129,12 @@ def search_bm25(db_path: Path, query_text: str, limit: int = 10) -> list[BM25Res
             FROM exchanges_fts
             JOIN exchanges e ON e.rowid = exchanges_fts.rowid
             WHERE exchanges_fts MATCH ?
+              AND (SELECT COUNT(*) FROM exchanges e2
+                   WHERE e2.conversation_id = e.conversation_id) >= ?
             ORDER BY score DESC
             LIMIT ?
             """,
-            (fts_query, limit),
+            (fts_query, min_exchanges, limit),
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
@@ -150,7 +154,7 @@ def search_bm25(db_path: Path, query_text: str, limit: int = 10) -> list[BM25Res
 
 
 def search_hnsw_palace(
-    db_path: Path, query_vec: np.ndarray, limit: int = 10
+    db_path: Path, query_vec: np.ndarray, limit: int = 10, min_exchanges: int = 2
 ) -> list[HNSWPalaceResult]:
     """sqlite-vec HNSW で vec_palace を検索する（distilled embedding）"""
     con = get_connection(db_path)
@@ -174,9 +178,11 @@ def search_hnsw_palace(
             ) v
             JOIN palace_objects p ON p.id = v.palace_id
             JOIN exchanges e ON e.id = p.exchange_id
+            WHERE (SELECT COUNT(*) FROM exchanges e2
+                   WHERE e2.conversation_id = e.conversation_id) >= ?
             ORDER BY v.distance
             """,
-            (blob, limit),
+            (blob, limit, min_exchanges),
         ).fetchall()
     except sqlite3.OperationalError:
         rows = []
@@ -248,10 +254,15 @@ def search_combined(
     query_text: str,
     query_vec: np.ndarray,
     limit: int = 5,
+    min_exchanges: int = 2,
 ) -> list[FusedResult]:
     """BM25(V) + HNSW(D) の RRF 融合検索。"""
-    bm25_results = search_bm25(db_path, query_text, limit=limit * 2)
-    hnsw_results = search_hnsw_palace(db_path, query_vec, limit=limit * 2)
+    bm25_results = search_bm25(
+        db_path, query_text, limit=limit * 2, min_exchanges=min_exchanges
+    )
+    hnsw_results = search_hnsw_palace(
+        db_path, query_vec, limit=limit * 2, min_exchanges=min_exchanges
+    )
     fused = rrf(bm25_results, hnsw_results, limit=limit)
 
     if fused:
