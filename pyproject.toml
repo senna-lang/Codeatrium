@@ -5,8 +5,23 @@ build-backend = "hatchling.build"
 [project]
 name = "codeatrium"
 version = "0.1.0"
-description = "CLI-first memory layer for AI coding agents"
+description = "Memory palace for AI coding agents — index sessions, recall code context in <0.2s"
+readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11"
+authors = [
+    { name = "senna-lang", email = "senna-lang@users.noreply.github.com" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "typer[all]>=0.12.0",
     "sentence-transformers>=3.0.0",
@@ -26,6 +41,11 @@ dev = [
 
 [project.scripts]
 loci = "codeatrium.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/senna-lang/codeatrium"
+Repository = "https://github.com/senna-lang/codeatrium"
+Issues = "https://github.com/senna-lang/codeatrium/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/codeatrium"]

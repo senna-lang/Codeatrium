@@ -17,16 +17,6 @@ class PalaceObject:
 
 
 @dataclass
-class SearchResult:
-    """Phase 1 HNSW 検索結果"""
-
-    exchange_id: str
-    user_content: str
-    agent_content: str
-    distance: float
-
-
-@dataclass
 class BM25Result:
     """BM25 verbatim 検索結果"""
 

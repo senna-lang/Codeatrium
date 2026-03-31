@@ -12,22 +12,35 @@ Primary user is **the agent itself**, not a human. The tool is invoked via `loci
 
 ```
 codeatrium/
-├── CLAUDE.md                     # このファイル（エージェント向けガイド）
-├── AGENTS.md                     # 他エージェント向け使用ガイド（共通）
-├── SPEC.md                       # 詳細仕様書（JP）
-├── REFACTOR.md                   # リファクタリング計画
-├── src/codeatrium/                     # 実装コード
-│   ├── cli.py                    # CLI エントリポイント（typer）
-│   ├── indexer.py                # .jsonl パース・exchange 分割
-│   ├── distiller.py              # claude -p 蒸留パイプライン
-│   ├── search.py                 # BM25 + HNSW RRF 融合検索
-│   ├── embedder.py               # multilingual-e5-small ラッパー
-│   ├── embedder_server.py        # Unix ソケット embedding サーバー
-│   ├── resolver.py               # tree-sitter シンボル解決
-│   └── db.py                     # SQLite スキーマ・接続管理
-├── tests/                        # pytest テスト（84件）
-├── .codeatrium/memory.db          # インデックス DB（git 管理外）
-└── .logosyncx/                   # logos CLI によるプラン・タスク管理
+├── CLAUDE.md                          # このファイル（エージェント向けガイド）
+├── AGENTS.md                          # 他エージェント向け使用ガイド（共通）
+├── src/codeatrium/
+│   ├── cli/                           # CLI 層（typer）
+│   │   ├── __init__.py                # app 定義 + init + サブコマンド登録
+│   │   ├── index_cmd.py               # loci index
+│   │   ├── distill_cmd.py             # loci distill
+│   │   ├── search_cmd.py              # loci search / context
+│   │   ├── show_cmd.py                # loci show / dump
+│   │   ├── status_cmd.py              # loci status
+│   │   ├── hook_cmd.py                # loci hook install
+│   │   └── server_cmd.py              # loci server start/stop/status
+│   ├── models.py                      # 共有データクラス
+│   ├── paths.py                       # パス解決ヘルパー
+│   ├── config.py                      # .codeatrium/config.toml 読み込み
+│   ├── hooks.py                       # Claude Code hook JSON 操作
+│   ├── llm.py                         # claude --print ラッパー + プロンプト
+│   ├── db.py                          # SQLite スキーマ・接続管理
+│   ├── indexer.py                     # .jsonl パース・exchange 分割
+│   ├── distiller.py                   # 蒸留パイプライン
+│   ├── search.py                      # BM25 + HNSW RRF 融合検索
+│   ├── embedder.py                    # multilingual-e5-small ラッパー
+│   ├── embedder_server.py             # Unix ソケット embedding サーバー
+│   └── resolver.py                    # tree-sitter シンボル解決
+├── tests/                             # pytest テスト（96件）
+├── .codeatrium/                       # インデックス DB + config（git 管理外）
+│   ├── memory.db
+│   └── config.toml
+└── docs/internal/                     # 内部ドキュメント（git 管理外）
 ```
 
 ## Tech Stack
@@ -71,6 +84,16 @@ query → BM25 (FTS5 verbatim) + HNSW (distilled embedding)
 
 論文ベスト構成: Cross BM25(V)+HNSW(D) / RRF → MRR 0.759
 
+## Configuration
+
+`.codeatrium/config.toml` でカスタマイズ可能（`loci init` 時に自動生成）:
+
+```toml
+[distill]
+model = "claude-haiku-4-5-20251001"   # 蒸留に使うモデル
+batch_limit = 20                       # hook 1回あたりの蒸留上限
+```
+
 ## CLI Commands
 
 ```bash
@@ -91,7 +114,7 @@ loci hook install                            # Register hooks to ~/.claude/setti
 |------|---------|---------|
 | Stop (async) | 毎ラリー後 | `loci index` |
 | SessionStart | startup / clear / resume / compact | `loci server start` |
-| SessionStart | startup / clear / resume / compact | `loci distill` |
+| SessionStart | startup / clear / resume / compact | `loci distill --limit <batch_limit>` |
 
 ---
 
@@ -123,7 +146,7 @@ loci search "クエリ" --json --limit 5
       { "room_type": "concept", "room_key": "rrf-adoption", "room_label": "RRF adoption reason" }
     ],
     "symbols": [
-      { "name": "distill", "file": "src/codeatrium/cli.py", "line": 161, "signature": "def distill(...)" }
+      { "name": "distill", "file": "src/codeatrium/distiller.py", "line": 55, "signature": "def distill_exchange(...)" }
     ],
     "verbatim_ref": "~/.claude/projects/.../abc.jsonl:ply=42"
   }
@@ -154,6 +177,7 @@ loci context --symbol "distill" --json
 - `loci distill` の `claude --print` 呼び出しには `--no-session-persistence --setting-sources ""` を付ける（CLAUDE.md 非読込・27K token 問題を回避）
 - Embedding server は Unix socket 常駐。2回目以降の `loci search` は <0.2秒
 - コンパクション要約（"This session is being continued..."）は exchange 境界として扱わない
+- `loci init` 時に既存 exchange の蒸留範囲を対話プロンプトで選択可能（トークン消費制御）
 
 ## Logosyncx
 

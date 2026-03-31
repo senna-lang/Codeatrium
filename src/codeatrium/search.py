@@ -1,7 +1,4 @@
-"""検索モジュール
-
-Phase 1: search_hnsw    — verbatim HNSW（後方互換で維持）
-Phase 2: search_combined — BM25(V) + HNSW(D) RRF 融合
+"""検索モジュール — BM25(V) + HNSW(D) RRF 融合
   採用根拠（arXiv:2603.13017）:
     - 107構成比較で Cross BM25(V)+HNSW(D) が全クエリタイプで最良（MRR 0.759）
     - BM25 単独は全構成で有意に劣化 → クエリタイプで切り替えない
@@ -29,7 +26,6 @@ from codeatrium.models import (
     BM25Result,
     FusedResult,
     HNSWPalaceResult,
-    SearchResult,
 )
 
 # ---- 内部ヘルパー ----
@@ -106,48 +102,7 @@ def _enrich_results(con: sqlite3.Connection, results: list[FusedResult]) -> None
         r.symbols = symbols_map.get(r.exchange_id, [])
 
 
-# ---- Phase 1: HNSW verbatim（後方互換） ----
-
-
-def search_hnsw(
-    db_path: Path, query_vec: np.ndarray, limit: int = 5
-) -> list[SearchResult]:
-    """sqlite-vec HNSW で近傍 exchange を検索する（verbatim embedding）"""
-    con = get_connection(db_path)
-    blob = _serialize(query_vec)
-
-    rows = con.execute(
-        """
-        SELECT
-            v.exchange_id,
-            e.user_content,
-            e.agent_content,
-            v.distance
-        FROM (
-            SELECT exchange_id, distance
-            FROM vec_exchanges
-            WHERE embedding MATCH ?
-            AND k = ?
-        ) v
-        JOIN exchanges e ON e.id = v.exchange_id
-        ORDER BY v.distance
-        """,
-        (blob, limit),
-    ).fetchall()
-
-    con.close()
-    return [
-        SearchResult(
-            exchange_id=row["exchange_id"],
-            user_content=row["user_content"],
-            agent_content=row["agent_content"],
-            distance=row["distance"],
-        )
-        for row in rows
-    ]
-
-
-# ---- Phase 2: BM25 verbatim ----
+# ---- BM25 verbatim ----
 
 
 def _fts5_query(text: str) -> str:
@@ -191,7 +146,7 @@ def search_bm25(db_path: Path, query_text: str, limit: int = 10) -> list[BM25Res
     ]
 
 
-# ---- Phase 2: HNSW distilled ----
+# ---- HNSW distilled ----
 
 
 def search_hnsw_palace(
@@ -240,7 +195,7 @@ def search_hnsw_palace(
     ]
 
 
-# ---- Phase 2: RRF 融合 ----
+# ---- RRF 融合 ----
 
 
 def rrf(
@@ -285,7 +240,7 @@ def rrf(
     return results
 
 
-# ---- Phase 2: メイン検索 ----
+# ---- メイン検索 ----
 
 
 def search_combined(

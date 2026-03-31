@@ -37,11 +37,11 @@ RECV_BUFSIZE = 65536
 def _load_embedder() -> Embedder:
     # サーバー内では直接モデルを使う（ソケット経由にすると自己接続デッドロック）
 
-    os.environ["LOGO_NO_SOCK"] = "1"
+    os.environ["CODEATRIUM_NO_SOCK"] = "1"
     from codeatrium.embedder import Embedder
 
     embedder = Embedder()
-    del os.environ["LOGO_NO_SOCK"]
+    del os.environ["CODEATRIUM_NO_SOCK"]
     return embedder
 
 

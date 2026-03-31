@@ -38,14 +38,14 @@ RECV_TIMEOUT = 30.0  # 埋め込み受信タイムアウト
 
 
 def _sock_path_from_env() -> Path | None:
-    """環境変数 LOGO_SOCK_PATH があれば優先使用（テスト用）。
-    LOGO_NO_SOCK=1 の場合はソケット無効（サーバー内自己接続デッドロック防止）。
+    """環境変数 CODEATRIUM_SOCK_PATH があれば優先使用（テスト用）。
+    CODEATRIUM_NO_SOCK=1 の場合はソケット無効（サーバー内自己接続デッドロック防止）。
     """
     import os
 
-    if os.environ.get("LOGO_NO_SOCK"):
+    if os.environ.get("CODEATRIUM_NO_SOCK"):
         return None
-    p = os.environ.get("LOGO_SOCK_PATH")
+    p = os.environ.get("CODEATRIUM_SOCK_PATH")
     return Path(p) if p else None
 
 
@@ -53,7 +53,7 @@ def _find_sock_path() -> Path | None:
     """DB の親ディレクトリの embedder.sock を探す"""
     import os
 
-    if os.environ.get("LOGO_NO_SOCK"):
+    if os.environ.get("CODEATRIUM_NO_SOCK"):
         return None
     # .codeatrium/ の場所を git root から解決
     try:
