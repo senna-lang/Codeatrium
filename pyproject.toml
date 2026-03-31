@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "logosyncs"
+name = "codeatrium"
 version = "0.1.0"
 description = "CLI-first memory layer for AI coding agents"
 requires-python = ">=3.11"
@@ -25,10 +25,10 @@ dev = [
 ]
 
 [project.scripts]
-logo = "logo.cli:app"
+loci = "codeatrium.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/logo"]
+packages = ["src/codeatrium"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -5,7 +5,7 @@ Embedder のテスト
 
 from unittest.mock import MagicMock
 
-from logo.embedder import Embedder
+from codeatrium.embedder import Embedder
 
 
 def test_embedder_returns_384_dim() -> None:

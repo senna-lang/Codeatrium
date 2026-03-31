@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from logo.embedder import Embedder
+from codeatrium.embedder import Embedder
 
 # ---- ファイルパス抽出 ----
 
@@ -235,7 +235,7 @@ def save_palace_object(
     """PalaceObject を DB に保存し exchange の distilled_at を更新する"""
     import numpy as np
 
-    from logo.db import get_connection
+    from codeatrium.db import get_connection
 
     palace_id = _sha256(f"palace:{exchange_id}")
     distill_text = palace.exchange_core + "\n" + palace.specific_context
@@ -300,7 +300,7 @@ def save_palace_object(
         )
 
     # ⑤ tree-sitter シンボル解決
-    from logo.resolver import SymbolResolver
+    from codeatrium.resolver import SymbolResolver
 
     resolver = SymbolResolver()
     for file_str in palace.files_touched:
@@ -340,7 +340,7 @@ def distill_all(db_path: Path, limit: int | None = None) -> int:
     Args:
         limit: 処理する最大件数。None の場合は全件処理。
     """
-    from logo.db import get_connection
+    from codeatrium.db import get_connection
 
     con = get_connection(db_path)
     query = """

@@ -1,5 +1,5 @@
 """
-logo show / logo dump --distilled のテスト
+loci show / loci dump --distilled のテスト
 
 show: verbatim_ref (path:ply=N) から exchange 原文を取得
 dump: 蒸留済み palace objects を新しい順に出力
@@ -15,8 +15,8 @@ from pathlib import Path
 import numpy as np
 from typer.testing import CliRunner
 
-from logo.cli import app
-from logo.db import get_connection, init_db
+from codeatrium.cli import app
+from codeatrium.db import get_connection, init_db
 
 runner = CliRunner()
 
@@ -24,9 +24,9 @@ LONG = "x" * 200
 
 
 def _setup(tmp_path: Path) -> tuple[Path, sqlite3.Connection]:
-    logosyncs = tmp_path / ".logosyncs"
-    logosyncs.mkdir()
-    db = logosyncs / "memory.db"
+    codeatrium_dir = tmp_path / ".codeatrium"
+    codeatrium_dir.mkdir()
+    db = codeatrium_dir / "memory.db"
     init_db(db)
     con = get_connection(db)
     return db, con
@@ -66,7 +66,7 @@ def _insert_palace(con, palace_id, exchange_id, core, distilled_at):
     con.commit()
 
 
-# ---- logo show ----
+# ---- loci show ----
 
 
 def test_show_invalid_ref(tmp_path, monkeypatch):
@@ -112,7 +112,7 @@ def test_show_json_output(tmp_path, monkeypatch):
     assert "ply_start" in data
 
 
-# ---- logo dump --distilled ----
+# ---- loci dump --distilled ----
 
 
 def test_dump_requires_distilled_flag(tmp_path, monkeypatch):

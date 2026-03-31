@@ -1,14 +1,14 @@
 """
-logo CLI エントリポイント
+loci CLI エントリポイント
 
 コマンド:
-  logo init         - .logosyncs/memory.db を初期化
-  logo index        - ~/.claude/projects/ の .jsonl を処理
-  logo distill      - 未蒸留 exchange を claude -p で palace object に変換
-  logo search       - BM25(V) + HNSW(D) RRF セマンティック検索
-  logo context      - シンボル名から過去会話を逆引き
-  logo status       - インデックス状態を表示
-  logo hook install - Claude Code Stop hook を ~/.claude/settings.json に登録
+  loci init         - .codeatrium/memory.db を初期化
+  loci index        - ~/.claude/projects/ の .jsonl を処理
+  loci distill      - 未蒸留 exchange を claude -p で palace object に変換
+  loci search       - BM25(V) + HNSW(D) RRF セマンティック検索
+  loci context      - シンボル名から過去会話を逆引き
+  loci status       - インデックス状態を表示
+  loci hook install - Claude Code Stop hook を ~/.claude/settings.json に登録
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ app = typer.Typer(help="CLI-first memory layer for AI coding agents")
 
 # デフォルトの Claude Code セッションログ格納先
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-LOGOSYNCS_DIR = ".logosyncs"
+CODEATRIUM_DIR = ".codeatrium"
 DB_NAME = "memory.db"
 
 
@@ -44,7 +44,7 @@ def _git_root() -> Path | None:
 
 
 def _find_project_root() -> Path:
-    """.logosyncs/ を探してプロジェクトルートを返す。
+    """.codeatrium/ を探してプロジェクトルートを返す。
     検索順: cwd → 親ディレクトリ（git root まで）
     git root を超えて遡らないことでプロジェクト外の DB を拾わない。
     """
@@ -53,7 +53,7 @@ def _find_project_root() -> Path:
     # 探索上限: git root があればそこまで、なければ cwd のみ
     candidates = [cwd, *cwd.parents]
     for p in candidates:
-        if (p / LOGOSYNCS_DIR).exists():
+        if (p / CODEATRIUM_DIR).exists():
             return p
         if git_root and p == git_root:
             break
@@ -62,7 +62,7 @@ def _find_project_root() -> Path:
 
 
 def _db_path(project_root: Path) -> Path:
-    return project_root / LOGOSYNCS_DIR / DB_NAME
+    return project_root / CODEATRIUM_DIR / DB_NAME
 
 
 def _resolve_claude_projects_path(project_root: Path) -> Path | None:
@@ -86,8 +86,8 @@ def _resolve_claude_projects_path(project_root: Path) -> Path | None:
 
 @app.command()
 def init() -> None:
-    """プロジェクトルートに .logosyncs/memory.db を初期化する"""
-    from logo.db import init_db
+    """プロジェクトルートに .codeatrium/memory.db を初期化する"""
+    from codeatrium.db import init_db
 
     root = _find_project_root()
     db = _db_path(root)
@@ -111,8 +111,8 @@ def index(
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """未処理の .jsonl を処理して exchanges テーブルに登録する（FTS5 自動同期）"""
-    from logo.db import get_connection, init_db
-    from logo.indexer import index_file
+    from codeatrium.db import get_connection, init_db
+    from codeatrium.indexer import index_file
 
     root = _find_project_root()
     db = _db_path(root)
@@ -167,13 +167,13 @@ def distill(
     """未蒸留の exchange を claude -p で蒸留して palace_objects を生成する"""
     import os
 
-    from logo.distiller import distill_all
+    from codeatrium.distiller import distill_all
 
     root = _find_project_root()
     db = _db_path(root)
 
     if not db.exists():
-        typer.echo("Not initialized. Run `logo init` first.", err=True)
+        typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
 
     # プロセスレベルのロック：多重起動を防ぐ
@@ -184,7 +184,7 @@ def distill(
             # PID が実際に生きているか確認
             os.kill(existing_pid, 0)
             typer.echo(
-                f"logo distill is already running (PID {existing_pid}). Exiting.",
+                f"loci distill is already running (PID {existing_pid}). Exiting.",
                 err=True,
             )
             raise typer.Exit(0)
@@ -210,14 +210,14 @@ def search(
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
     """BM25(V) + HNSW(D) RRF でクエリに近い過去会話を返す"""
-    from logo.embedder import Embedder
-    from logo.search import search_combined
+    from codeatrium.embedder import Embedder
+    from codeatrium.search import search_combined
 
     root = _find_project_root()
     db = _db_path(root)
 
     if not db.exists():
-        typer.echo("Not initialized. Run `logo init` first.", err=True)
+        typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
 
     embedder = Embedder()
@@ -263,13 +263,13 @@ def context(
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
     """シンボル名から関連する過去会話を逆引きする"""
-    from logo.db import get_connection
+    from codeatrium.db import get_connection
 
     root = _find_project_root()
     db = _db_path(root)
 
     if not db.exists():
-        typer.echo("Not initialized. Run `logo init` first.", err=True)
+        typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
 
     con = get_connection(db)
@@ -334,13 +334,13 @@ def status(
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
     """インデックス状態（exchange 数・蒸留済み数・DB サイズ）を表示する"""
-    from logo.db import get_connection
+    from codeatrium.db import get_connection
 
     root = _find_project_root()
     db = _db_path(root)
 
     if not db.exists():
-        typer.echo("Not initialized. Run `logo init` first.", err=True)
+        typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
 
     con = get_connection(db)
@@ -386,19 +386,19 @@ hook_app = typer.Typer(help="Claude Code hook 管理")
 app.add_typer(hook_app, name="hook")
 
 
-def _logo_bin() -> str:
-    """sys.executable と同じ venv の bin/logo のフルパスを返す（PATH 非依存）。"""
+def _loci_bin() -> str:
+    """sys.executable と同じ venv の bin/loci のフルパスを返す（PATH 非依存）。"""
     import sys
 
-    return str(Path(sys.executable).parent / "logo")
+    return str(Path(sys.executable).parent / "loci")
 
 
 @hook_app.command("install")
 def hook_install() -> None:
-    """Claude Code の Stop / SessionStart フックに logo を登録する。
+    """Claude Code の Stop / SessionStart フックに loci を登録する。
 
-    Stop (async):      logo index    — 毎ターン・ノンブロッキング
-    SessionStart:      logo distill  — CC起動・/clear・/resume・compact 時
+    Stop (async):      loci index    — 毎ターン・ノンブロッキング
+    SessionStart:      loci distill  — CC起動・/clear・/resume・compact 時
                        claude --print サブセッションは SessionStart を発火しないためループなし
     """
     settings_path = Path.home() / ".claude" / "settings.json"
@@ -410,18 +410,18 @@ def hook_install() -> None:
         settings = {}
 
     hooks = settings.setdefault("hooks", {})
-    logo = _logo_bin()
-    index_cmd = f"{logo} index"
-    distill_cmd = f"nohup {logo} distill > /dev/null 2>&1 &"
-    server_cmd = f"nohup {logo} server start > /dev/null 2>&1 &"
+    loci = _loci_bin()
+    index_cmd = f"{loci} index"
+    distill_cmd = f"nohup {loci} distill > /dev/null 2>&1 &"
+    server_cmd = f"nohup {loci} server start > /dev/null 2>&1 &"
     changed = False
 
-    # --- Stop hook: logo index (async: true) ---
+    # --- Stop hook: loci index (async: true) ---
     stop_hooks: list[dict[str, Any]] = hooks.setdefault("Stop", [])
     stop_installed = False
     for entry in stop_hooks:
         for h in entry.get("hooks", []):
-            if "logo" in h.get("command", "") and "index" in h.get("command", ""):
+            if "loci" in h.get("command", "") and "index" in h.get("command", ""):
                 stop_installed = True
                 if h.get("command") != index_cmd or not h.get("async"):
                     h["command"] = index_cmd
@@ -434,7 +434,7 @@ def hook_install() -> None:
         )
         changed = True
 
-    # --- SessionStart hook: logo server start + logo distill (nohup detach) ---
+    # --- SessionStart hook: loci server start + loci distill (nohup detach) ---
     # matcher: startup|clear|resume|compact — ユーザー起点のセッション境界のみ発火
     # server start: embedding サーバーをウォームアップ（アイドル10分で自動停止）
     # distill: claude --print サブセッションは SessionStart を発火しないためループなし
@@ -446,7 +446,7 @@ def hook_install() -> None:
         if entry.get("matcher") != "startup|clear|resume|compact":
             continue
         for h in entry.get("hooks", []):
-            if "logo" in h.get("command", "") and "server" in h.get("command", ""):
+            if "loci" in h.get("command", "") and "server" in h.get("command", ""):
                 server_start_installed = True
                 if h.get("command") != server_cmd:
                     h["command"] = server_cmd
@@ -458,7 +458,7 @@ def hook_install() -> None:
         if entry.get("matcher") != "startup|clear|resume|compact":
             continue
         for h in entry.get("hooks", []):
-            if "logo" in h.get("command", "") and "distill" in h.get("command", ""):
+            if "loci" in h.get("command", "") and "distill" in h.get("command", ""):
                 session_start_installed = True
                 if h.get("command") != distill_cmd:
                     h["command"] = distill_cmd
@@ -485,13 +485,13 @@ def hook_install() -> None:
             hooks_list.append({"type": "command", "command": distill_cmd})
             changed = True
 
-    # 古い SessionEnd の logo distill エントリがあれば削除
+    # 古い SessionEnd の loci distill エントリがあれば削除
     if "SessionEnd" in hooks:
         hooks["SessionEnd"] = [
             entry
             for entry in hooks["SessionEnd"]
             if not any(
-                "logo" in h.get("command", "") and "distill" in h.get("command", "")
+                "loci" in h.get("command", "") and "distill" in h.get("command", "")
                 for h in entry.get("hooks", [])
             )
         ]
@@ -556,10 +556,10 @@ def server_start() -> None:
 
     pid_path = _server_pid_path(root)
     # venv の Python を使う（sys.executable はシステム Python の場合があるため）
-    from logo.embedder import _logo_python
+    from codeatrium.embedder import _loci_python
 
     proc = subprocess.Popen(
-        [_logo_python(), "-m", "logo.embedder_server", str(sock)],
+        [_loci_python(), "-m", "codeatrium.embedder_server", str(sock)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -648,7 +648,7 @@ def show(
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
     """verbatim_ref から exchange の原文を取得する"""
-    from logo.db import get_connection
+    from codeatrium.db import get_connection
 
     # ref をパース: "path:ply=N"
     if ":ply=" not in ref:
@@ -664,7 +664,7 @@ def show(
     root = _find_project_root()
     db = _db_path(root)
     if not db.exists():
-        typer.echo("Not initialized. Run `logo init` first.", err=True)
+        typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
 
     con = get_connection(db)
@@ -715,7 +715,7 @@ def dump(
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
     """蒸留済み palace objects を新しい順に出力する（セッション開始時の in-context ロード用）"""
-    from logo.db import get_connection
+    from codeatrium.db import get_connection
 
     if not distilled:
         typer.echo("Use --distilled to dump palace objects.", err=True)
@@ -724,7 +724,7 @@ def dump(
     root = _find_project_root()
     db = _db_path(root)
     if not db.exists():
-        typer.echo("Not initialized. Run `logo init` first.", err=True)
+        typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
 
     con = get_connection(db)

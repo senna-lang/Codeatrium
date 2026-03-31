@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from logo.db import get_connection, init_db
-from logo.distiller import (
+from codeatrium.db import get_connection, init_db
+from codeatrium.distiller import (
     PalaceObject,
     distill_all,
     distill_exchange,
@@ -84,7 +84,7 @@ def test_extract_files_dedup() -> None:
 # --- distill_exchange ---
 
 
-@patch("logo.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
 def test_distill_exchange_returns_palace(mock_call) -> None:
     palace = distill_exchange("ex1", "pool の設定", "pool_size=5 を追加した", 0, 3)
     assert palace.exchange_core == "pool_size を 5 に設定した"
@@ -92,13 +92,13 @@ def test_distill_exchange_returns_palace(mock_call) -> None:
     assert len(palace.room_assignments) == 1
 
 
-@patch("logo.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
 def test_distill_exchange_calls_claude_once(mock_call) -> None:
     distill_exchange("ex1", "pool の設定", "pool_size=5", 0, 3)
     mock_call.assert_called_once()
 
 
-@patch("logo.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
 def test_distill_exchange_extracts_files(mock_call) -> None:
     palace = distill_exchange("ex1", "src/db/pool.py を修正", "pool_size=5", 0, 3)
     assert "src/db/pool.py" in palace.files_touched
@@ -203,7 +203,7 @@ def test_save_palace_object_saves_vec(tmp_path) -> None:
 # --- distill_all ---
 
 
-@patch("logo.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
 def test_distill_all_processes_undistilled(mock_call, tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
@@ -212,13 +212,13 @@ def test_distill_all_processes_undistilled(mock_call, tmp_path) -> None:
     mock_embedder = MagicMock()
     mock_embedder.embed_passage.return_value = np.zeros(384, dtype=np.float32)
 
-    with patch("logo.distiller.Embedder", return_value=mock_embedder):
+    with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
         count = distill_all(db_path)
 
     assert count == 1
 
 
-@patch("logo.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
 def test_distill_all_skips_distilled(mock_call, tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
@@ -230,13 +230,13 @@ def test_distill_all_skips_distilled(mock_call, tmp_path) -> None:
     con.close()
 
     mock_embedder = MagicMock()
-    with patch("logo.distiller.Embedder", return_value=mock_embedder):
+    with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
         count = distill_all(db_path)
 
     assert count == 0
 
 
-@patch("logo.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
 def test_distill_all_returns_count(mock_call, tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
@@ -246,7 +246,7 @@ def test_distill_all_returns_count(mock_call, tmp_path) -> None:
     mock_embedder = MagicMock()
     mock_embedder.embed_passage.return_value = np.zeros(384, dtype=np.float32)
 
-    with patch("logo.distiller.Embedder", return_value=mock_embedder):
+    with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
         count = distill_all(db_path)
 
     assert count == 2

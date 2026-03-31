@@ -1,17 +1,17 @@
-# AGENTS.md — logosyncs Usage Guide for AI Agents
+# AGENTS.md — codeatrium Usage Guide for AI Agents
 
 This file describes how AI coding agents (Claude Code, Codex, etc.) should use
-`logo` — the CLI memory tool for this project.
+`loci` — the CLI memory tool for this project.
 
 ---
 
-## What is logosyncs?
+## What is codeatrium?
 
-`logo` indexes past conversations between you and the user, distills them into
+`loci` indexes past conversations between you and the user, distills them into
 searchable summaries, and lets you retrieve past decisions, implementations, and
 code locations in under 1 second.
 
-**Primary user is you, the agent.** Call `logo search` proactively whenever you
+**Primary user is you, the agent.** Call `loci search` proactively whenever you
 need context about past work.
 
 ---
@@ -20,11 +20,11 @@ need context about past work.
 
 | Situation | Command |
 |-----------|---------|
-| "Where did we implement X?" | `logo search "X" --json --limit 5` |
-| "Did we already fix this bug?" | `logo search "bug description" --json` |
-| "Why did we choose this approach?" | `logo search "design decision keyword" --json` |
-| About to edit a function | `logo context --symbol "FunctionName" --json` |
-| Need verbatim conversation | `logo show "<verbatim_ref>" --json` |
+| "Where did we implement X?" | `loci search "X" --json --limit 5` |
+| "Did we already fix this bug?" | `loci search "bug description" --json` |
+| "Why did we choose this approach?" | `loci search "design decision keyword" --json` |
+| About to edit a function | `loci context --symbol "FunctionName" --json` |
+| Need verbatim conversation | `loci show "<verbatim_ref>" --json` |
 
 ---
 
@@ -33,7 +33,7 @@ need context about past work.
 ### Search past conversations
 
 ```bash
-logo search "query" --json --limit 5
+loci search "query" --json --limit 5
 ```
 
 Response:
@@ -61,7 +61,7 @@ Response:
 ### Get full conversation text
 
 ```bash
-logo show "~/.claude/projects/.../session.jsonl:ply=42" --json
+loci show "~/.claude/projects/.../session.jsonl:ply=42" --json
 ```
 
 Use this when `exchange_core` is not enough and you need the full context.
@@ -71,13 +71,13 @@ Use this when `exchange_core` is not enough and you need the full context.
 Before editing a symbol, check past discussions about it:
 
 ```bash
-logo context --symbol "SymbolName" --json
+loci context --symbol "SymbolName" --json
 ```
 
 ### Check index status
 
 ```bash
-logo status
+loci status
 ```
 
 ---
@@ -85,7 +85,7 @@ logo status
 ## Interpreting Results
 
 - Results with `exchange_core: null` are indexed but not yet distilled. Use
-  `logo show` with the `verbatim_ref` to read the raw conversation.
+  `loci show` with the `verbatim_ref` to read the raw conversation.
 - `rooms` group related exchanges by topic. Use `room_key` values as search
   queries to find related conversations.
 - `symbols` link past conversations to specific code locations. If a symbol
@@ -99,9 +99,9 @@ logo status
    built before starting work.
 2. **Use technical terms** — queries with exact symbol names, error messages, or
    parameter names yield better results than natural language paraphrases.
-3. **Follow up with `logo show`** — when `exchange_core` is ambiguous, fetch the
+3. **Follow up with `loci show`** — when `exchange_core` is ambiguous, fetch the
    full verbatim conversation.
-4. **Check symbols before editing** — run `logo context --symbol` for any
+4. **Check symbols before editing** — run `loci context --symbol` for any
    non-trivial function you are about to change.
 
 ---
@@ -112,11 +112,11 @@ The following runs automatically. You do not need to manage it.
 
 | What | When | How |
 |------|------|-----|
-| `logo index` | After every agent turn | Stop hook (async) |
-| `logo server start` | On session start / `/clear` / `/resume` | SessionStart hook |
-| `logo distill` | On session start / `/clear` / `/resume` | SessionStart hook |
+| `loci index` | After every agent turn | Stop hook (async) |
+| `loci server start` | On session start / `/clear` / `/resume` | SessionStart hook |
+| `loci distill` | On session start / `/clear` / `/resume` | SessionStart hook |
 
-The embedding server stays resident in memory so `logo search` returns in
+The embedding server stays resident in memory so `loci search` returns in
 <0.2s after the first call.
 
 ---

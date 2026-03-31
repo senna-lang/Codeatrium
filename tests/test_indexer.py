@@ -5,8 +5,8 @@
 import json
 from pathlib import Path
 
-from logo.db import get_connection, init_db
-from logo.indexer import index_file, parse_exchanges
+from codeatrium.db import get_connection, init_db
+from codeatrium.indexer import index_file, parse_exchanges
 
 # ---- フィクスチャ ----
 
@@ -145,7 +145,7 @@ def test_parse_exchanges_deterministic_id(tmp_path: Path) -> None:
 
 
 def test_index_file_inserts_to_db(tmp_path: Path) -> None:
-    db_path = tmp_path / ".logosyncs" / "memory.db"
+    db_path = tmp_path / ".codeatrium" / "memory.db"
     init_db(db_path)
 
     jsonl = tmp_path / "session.jsonl"
@@ -169,7 +169,7 @@ def test_index_file_inserts_to_db(tmp_path: Path) -> None:
 
 def test_index_file_dedup(tmp_path: Path) -> None:
     """同じファイルを2回 index しても重複しない"""
-    db_path = tmp_path / ".logosyncs" / "memory.db"
+    db_path = tmp_path / ".codeatrium" / "memory.db"
     init_db(db_path)
 
     jsonl = tmp_path / "session.jsonl"
@@ -192,7 +192,7 @@ def test_index_file_dedup(tmp_path: Path) -> None:
 
 def test_index_file_fts_populated(tmp_path: Path) -> None:
     """FTS インデックスに内容が入る"""
-    db_path = tmp_path / ".logosyncs" / "memory.db"
+    db_path = tmp_path / ".codeatrium" / "memory.db"
     init_db(db_path)
 
     jsonl = tmp_path / "session.jsonl"

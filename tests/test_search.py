@@ -8,8 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
-from logo.db import get_connection, init_db
-from logo.search import SearchResult, search_hnsw
+from codeatrium.db import get_connection, init_db
+from codeatrium.search import SearchResult, search_hnsw
 
 
 def insert_exchange_with_vec(

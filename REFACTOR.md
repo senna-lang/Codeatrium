@@ -1,7 +1,7 @@
 # REFACTOR.md — リファクタリング計画
 
 > 作成日: 2026-03-30  
-> 対象: `logosyncs` プロジェクト（コアが一通り実装完了した段階）
+> 対象: `codeatrium` プロジェクト（コアが一通り実装完了した段階）
 
 ---
 
@@ -51,17 +51,17 @@
 ### 目標構成
 
 ```
-src/logo/
+src/codeatrium/
 ├── cli.py              # typer app 定義・サブコマンド登録のみ
 ├── paths.py            # パス解決ヘルパー（_find_project_root 等）
 └── commands/
     ├── __init__.py
-    ├── index.py        # logo index
-    ├── search_cmd.py   # logo search / context
-    ├── distill_cmd.py  # logo distill
-    ├── server_cmd.py   # logo server start/stop/status
-    ├── hook_cmd.py     # logo hook install
-    └── show_cmd.py     # logo show / dump / status
+    ├── index.py        # loci index
+    ├── search_cmd.py   # loci search / context
+    ├── distill_cmd.py  # loci distill
+    ├── server_cmd.py   # loci server start/stop/status
+    ├── hook_cmd.py     # loci hook install
+    └── show_cmd.py     # loci show / dump / status
 ```
 
 ### 手順
@@ -88,7 +88,7 @@ src/logo/
 ### 目標構成
 
 ```
-src/logo/
+src/codeatrium/
 ├── distiller.py        # distill_all / distill_exchange（バッチループのみ）
 ├── llm.py              # call_claude + プロンプト定数 + JSON スキーマ
 └── palace_repo.py      # save_palace_object（DB 永続化・シンボル連携）
@@ -105,7 +105,7 @@ src/logo/
 ### 目標構成
 
 ```
-src/logo/
+src/codeatrium/
 ├── models.py           # 全データクラス定義
 └── search.py           # 検索ロジックのみ（models をインポート）
 ```
@@ -121,7 +121,7 @@ src/logo/
 ### 目標構成（言語追加時に対応）
 
 ```
-src/logo/
+src/codeatrium/
 └── resolvers/
     ├── __init__.py     # SymbolResolver（ファサード）
     ├── python.py
@@ -139,10 +139,10 @@ src/logo/
 
 | コマンド | テストファイル | 優先度 |
 |---|---|---|
-| `logo index` | なし | 🟡 中 |
-| `logo search` | なし（CLI レベル） | 🟡 中 |
-| `logo context` | なし | 🟡 中 |
-| `logo server start/stop/status` | なし | 🟢 低 |
+| `loci index` | なし | 🟡 中 |
+| `loci search` | なし（CLI レベル） | 🟡 中 |
+| `loci context` | なし | 🟡 中 |
+| `loci server start/stop/status` | なし | 🟢 低 |
 
 Phase B の分割と合わせて `tests/commands/` にコマンド単位のテストを追加する。
 

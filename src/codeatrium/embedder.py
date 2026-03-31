@@ -4,7 +4,7 @@ sentence-transformers / multilingual-e5-small の embedding ラッパー
 モデル: intfloat/multilingual-e5-small（384次元・日本語+英語混在対応・CPU動作）
 
 ソケットサーバー方式:
-  - .logosyncs/embedder.sock が存在すれば Unix ソケット経由で embed（< 1秒）
+  - .codeatrium/embedder.sock が存在すれば Unix ソケット経由で embed（< 1秒）
   - ソケットなければ直接モデルをロード（~7秒）＋バックグラウンドでサーバー起動
   - 2回目以降は常にソケット経由になるため高速
 
@@ -23,9 +23,9 @@ from pathlib import Path
 import numpy as np
 
 
-def _logo_python() -> str:
+def _loci_python() -> str:
     """venv の Python パスを返す（sys.executable はシステム Python の場合があるため）"""
-    # logo CLI と同じ venv の python を使う
+    # loci CLI と同じ venv の python を使う
     python = Path(sys.executable).parent / "python3"
     if python.exists():
         return str(python)
@@ -55,7 +55,7 @@ def _find_sock_path() -> Path | None:
 
     if os.environ.get("LOGO_NO_SOCK"):
         return None
-    # .logosyncs/ の場所を git root から解決
+    # .codeatrium/ の場所を git root から解決
     try:
         import subprocess as sp
 
@@ -65,7 +65,7 @@ def _find_sock_path() -> Path | None:
             text=True,
         )
         if result.returncode == 0:
-            return Path(result.stdout.strip()) / ".logosyncs" / "embedder.sock"
+            return Path(result.stdout.strip()) / ".codeatrium" / "embedder.sock"
     except Exception:
         pass
     return None
@@ -100,7 +100,7 @@ def _start_server_background(sock_path: Path) -> None:
     """embedder_server をバックグラウンドで起動する"""
     try:
         subprocess.Popen(
-            [_logo_python(), "-m", "logo.embedder_server", str(sock_path)],
+            [_loci_python(), "-m", "codeatrium.embedder_server", str(sock_path)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

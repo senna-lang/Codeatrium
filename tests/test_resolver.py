@@ -5,7 +5,7 @@ tree-sitter で Python / TypeScript / Go のシンボルを抽出する。
 抽出対象: 関数・クラス・メソッド（symbol_name / symbol_kind / signature / line）
 """
 
-from logo.resolver import Symbol, SymbolResolver
+from codeatrium.resolver import Symbol, SymbolResolver
 
 resolver = SymbolResolver()
 

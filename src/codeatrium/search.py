@@ -26,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from logo.db import get_connection
+from codeatrium.db import get_connection
 
 # ---- データクラス ----
 

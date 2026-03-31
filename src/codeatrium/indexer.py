@@ -170,7 +170,7 @@ def index_file(jsonl_path: Path, db_path: Path) -> int:
     すでに登録済みの場合はスキップ（重複排除）。
     Returns: 新規登録した exchange 数
     """
-    from logo.db import get_connection
+    from codeatrium.db import get_connection
 
     conversation_id = _sha256(str(jsonl_path))
     con = get_connection(db_path)

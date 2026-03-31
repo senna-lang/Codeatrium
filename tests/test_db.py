@@ -5,7 +5,7 @@ DB 初期化・スキーマのテスト
 import sqlite3
 from pathlib import Path
 
-from logo.db import get_connection, init_db
+from codeatrium.db import get_connection, init_db
 
 
 def test_init_db_creates_conversations_table(tmp_path: Path) -> None:
