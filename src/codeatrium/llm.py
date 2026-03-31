@@ -93,9 +93,11 @@ def _cleanup_side_effect_jsonls(session_dir: Path, before: set[Path]) -> None:
 # ---- LLM 呼び出し ----
 
 
-def call_claude(prompt: str) -> dict[str, Any]:
+def call_claude(prompt: str, model: str | None = None) -> dict[str, Any]:
     """claude -p でプロンプトを実行し JSON を返す（テストでモック対象）"""
     import shutil
+
+    from codeatrium.config import DEFAULT_DISTILL_MODEL
 
     cli = shutil.which("claude")
     if cli is None:
@@ -110,7 +112,7 @@ def call_claude(prompt: str) -> dict[str, Any]:
                 cli,
                 "--print",
                 "--model",
-                "claude-haiku-4-5-20251001",
+                model or DEFAULT_DISTILL_MODEL,
                 "--output-format",
                 "json",
                 "--json-schema",

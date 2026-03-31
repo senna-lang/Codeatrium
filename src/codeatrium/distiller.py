@@ -58,6 +58,7 @@ def distill_exchange(
     agent_content: str,
     ply_start: int,
     ply_end: int,
+    model: str | None = None,
 ) -> PalaceObject:
     """1つの exchange を蒸留して PalaceObject を返す"""
     messages_text = (user_content + "\n" + agent_content)[:4000]
@@ -66,7 +67,7 @@ def distill_exchange(
         ply_end=ply_end,
         messages_text=messages_text,
     )
-    raw = call_claude(prompt)
+    raw = call_claude(prompt, model=model)
     files_touched = extract_files_touched(user_content, agent_content)
     return PalaceObject(
         exchange_core=raw["exchange_core"],
@@ -183,7 +184,9 @@ def save_palace_object(
     con.close()
 
 
-def distill_all(db_path: Path, limit: int | None = None) -> int:
+def distill_all(
+    db_path: Path, limit: int | None = None, model: str | None = None
+) -> int:
     """未蒸留の exchange を処理する。Returns: 処理した exchange 数"""
     from codeatrium.db import get_connection
 
@@ -210,6 +213,7 @@ def distill_all(db_path: Path, limit: int | None = None) -> int:
             row["agent_content"],
             row["ply_start"],
             row["ply_end"],
+            model=model,
         )
         distill_text = palace.exchange_core + "\n" + palace.specific_context
         vec = embedder.embed_passage(distill_text)

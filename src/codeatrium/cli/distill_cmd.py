@@ -16,11 +16,13 @@ def distill(
     """未蒸留の exchange を claude -p で蒸留して palace_objects を生成する"""
     import os
 
+    from codeatrium.config import load_config
     from codeatrium.distiller import distill_all
     from codeatrium.paths import db_path, find_project_root
 
     root = find_project_root()
     db = db_path(root)
+    cfg = load_config(root)
 
     if not db.exists():
         typer.echo("Not initialized. Run `loci init` first.", err=True)
@@ -41,7 +43,7 @@ def distill(
 
     lock_path.write_text(str(os.getpid()))
     try:
-        count = distill_all(db, limit=limit)
+        count = distill_all(db, limit=limit, model=cfg.distill_model)
         typer.echo(f"Distilled {count} exchange(s).")
     finally:
         lock_path.unlink(missing_ok=True)

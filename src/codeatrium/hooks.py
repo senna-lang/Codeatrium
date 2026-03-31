@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
+from codeatrium.config import DEFAULT_DISTILL_BATCH_LIMIT
 from codeatrium.paths import loci_bin
 
 
-def install_hooks() -> tuple[bool, str]:
+def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool, str]:
     """Claude Code の Stop / SessionStart フックに loci を登録する。
 
     Returns: (changed, message) — 変更の有無と結果メッセージ
@@ -25,7 +26,7 @@ def install_hooks() -> tuple[bool, str]:
     hooks = settings.setdefault("hooks", {})
     loci = loci_bin()
     index_cmd = f"{loci} index"
-    distill_cmd = f"nohup {loci} distill > /dev/null 2>&1 &"
+    distill_cmd = f"nohup {loci} distill --limit {batch_limit} > /dev/null 2>&1 &"
     server_cmd = f"nohup {loci} server start > /dev/null 2>&1 &"
     changed = False
 
