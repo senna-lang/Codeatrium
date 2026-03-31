@@ -1,5 +1,4 @@
-"""
-検索モジュール
+"""検索モジュール
 
 Phase 1: search_hnsw    — verbatim HNSW（後方互換で維持）
 Phase 2: search_combined — BM25(V) + HNSW(D) RRF 融合
@@ -20,63 +19,18 @@ from __future__ import annotations
 
 import sqlite3
 import struct
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from codeatrium.db import get_connection
-
-# ---- データクラス ----
-
-
-@dataclass
-class SearchResult:
-    """Phase 1 HNSW 検索結果"""
-
-    exchange_id: str
-    user_content: str
-    agent_content: str
-    distance: float
-
-
-@dataclass
-class BM25Result:
-    """BM25 verbatim 検索結果"""
-
-    exchange_id: str
-    user_content: str
-    agent_content: str
-    bm25_score: float  # 正値（高いほど良い）
-
-
-@dataclass
-class HNSWPalaceResult:
-    """HNSW distilled 検索結果"""
-
-    exchange_id: str
-    user_content: str
-    agent_content: str
-    exchange_core: str
-    specific_context: str
-    distance: float
-
-
-@dataclass
-class FusedResult:
-    """RRF 融合検索結果（SPEC 準拠の出力フォーマット）"""
-
-    exchange_id: str
-    user_content: str
-    agent_content: str
-    score: float
-    exchange_core: str | None = None
-    specific_context: str | None = None
-    verbatim_ref: str | None = None
-    rooms: list[dict[str, Any]] = field(default_factory=list)
-    symbols: list[dict[str, Any]] = field(default_factory=list)
-
+from codeatrium.models import (
+    BM25Result,
+    FusedResult,
+    HNSWPalaceResult,
+    SearchResult,
+)
 
 # ---- 内部ヘルパー ----
 
@@ -87,19 +41,13 @@ def _serialize(vec: np.ndarray) -> bytes:
 
 
 def _enrich_results(con: sqlite3.Connection, results: list[FusedResult]) -> None:
-    """
-    FusedResult リストに verbatim_ref / rooms / symbols を付加する（in-place）。
-
-    SPEC の検索出力フォーマット:
-      { exchange_core, specific_context, verbatim_ref, rooms: [...], symbols: [...] }
-    """
+    """FusedResult リストに verbatim_ref / rooms / symbols を付加する（in-place）。"""
     if not results:
         return
 
     exchange_ids = [r.exchange_id for r in results]
     placeholders = ",".join("?" * len(exchange_ids))
 
-    # verbatim_ref: source_path + ply_start
     ref_rows = con.execute(
         f"""
         SELECT e.id, c.source_path, e.ply_start
@@ -111,7 +59,6 @@ def _enrich_results(con: sqlite3.Connection, results: list[FusedResult]) -> None
     ).fetchall()
     ref_map = {r["id"]: f"{r['source_path']}:ply={r['ply_start']}" for r in ref_rows}
 
-    # rooms
     room_rows = con.execute(
         f"""
         SELECT p.exchange_id, r.room_type, r.room_key, r.room_label, r.relevance
@@ -133,7 +80,6 @@ def _enrich_results(con: sqlite3.Connection, results: list[FusedResult]) -> None
             }
         )
 
-    # symbols
     sym_rows = con.execute(
         f"""
         SELECT p.exchange_id, s.symbol_name, s.file_path, s.line, s.signature
@@ -205,12 +151,7 @@ def search_hnsw(
 
 
 def _fts5_query(text: str) -> str:
-    """クエリを FTS5 OR 形式に変換する。
-
-    FTS5 のデフォルトは AND 結合で、全トークンが揃わないとヒットしない。
-    スペース区切りで分割して OR 結合に変換することで再現率を上げる。
-    ダブルクォートで囲んでフレーズ検索特殊文字をエスケープする。
-    """
+    """クエリを FTS5 OR 形式に変換する。"""
     tokens = text.split()
     escaped = ['"' + t.replace('"', '""') + '"' for t in tokens if t]
     return " OR ".join(escaped) if escaped else text
@@ -308,16 +249,7 @@ def rrf(
     limit: int = 5,
     k: int = 60,
 ) -> list[FusedResult]:
-    """
-    BM25(V) と HNSW(D) の結果を RRF (Reciprocal Rank Fusion) で融合する。
-
-    RRF: score(d) = Σ 1 / (k + rank_i(d))
-    k=60 は標準値（Cormack et al., 2009）。
-    スコアの絶対値に依存せず順位だけで融合するため正規化不要。
-
-    注意: verbatim_ref / rooms / symbols は search_combined で付加される。
-    rrf() 単体では rooms=[] / symbols=[] のまま返す。
-    """
+    """BM25(V) と HNSW(D) の結果を RRF (Reciprocal Rank Fusion) で融合する。"""
     if not bm25_results and not hnsw_results:
         return []
 
@@ -362,12 +294,7 @@ def search_combined(
     query_vec: np.ndarray,
     limit: int = 5,
 ) -> list[FusedResult]:
-    """
-    BM25(V) + HNSW(D) の RRF 融合検索。
-
-    palace objects がない場合は BM25 のみで結果を返す。
-    結果には verbatim_ref / rooms / symbols を付加する（SPEC 準拠）。
-    """
+    """BM25(V) + HNSW(D) の RRF 融合検索。"""
     bm25_results = search_bm25(db_path, query_text, limit=limit * 2)
     hnsw_results = search_hnsw_palace(db_path, query_vec, limit=limit * 2)
     fused = rrf(bm25_results, hnsw_results, limit=limit)

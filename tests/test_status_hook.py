@@ -101,7 +101,7 @@ def test_status_counts_exchanges(tmp_path, monkeypatch):
 
 def test_hook_install_creates_settings(tmp_path, monkeypatch):
     settings_path = tmp_path / ".claude" / "settings.json"
-    monkeypatch.setattr("codeatrium.cli.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
     result = runner.invoke(app, ["hook", "install"])
     assert result.exit_code == 0
     assert settings_path.exists()
@@ -111,7 +111,7 @@ def test_hook_install_creates_settings(tmp_path, monkeypatch):
 
 
 def test_hook_install_adds_command(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeatrium.cli.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
     runner.invoke(app, ["hook", "install"])
     settings_path = tmp_path / ".claude" / "settings.json"
     data = json.loads(settings_path.read_text())
@@ -140,7 +140,7 @@ def test_hook_install_adds_command(tmp_path, monkeypatch):
 
 
 def test_hook_install_idempotent(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeatrium.cli.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
     runner.invoke(app, ["hook", "install"])
     runner.invoke(app, ["hook", "install"])
     settings_path = tmp_path / ".claude" / "settings.json"
@@ -152,7 +152,7 @@ def test_hook_install_idempotent(tmp_path, monkeypatch):
 
 
 def test_hook_install_merges_existing_settings(tmp_path, monkeypatch):
-    monkeypatch.setattr("codeatrium.cli.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
     settings_path = tmp_path / ".claude" / "settings.json"
     settings_path.parent.mkdir(parents=True)
     settings_path.write_text(json.dumps({"model": "opus"}))
