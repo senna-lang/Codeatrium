@@ -26,6 +26,11 @@ def index(
 
     root = find_project_root()
     db = db_path(root)
+
+    if not db.exists() and not (root / ".codeatrium").exists():
+        typer.echo("Not initialized. Run `loci init` first.", err=True)
+        raise typer.Exit(1)
+
     init_db(db)
     cfg = load_config(root)
 

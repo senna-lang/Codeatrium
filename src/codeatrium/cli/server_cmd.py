@@ -15,9 +15,13 @@ def server_start() -> None:
     import subprocess
 
     from codeatrium.embedder import _loci_python
-    from codeatrium.paths import find_project_root, server_pid_path, sock_path
+    from codeatrium.paths import db_path, find_project_root, server_pid_path, sock_path
 
     root = find_project_root()
+    if not db_path(root).exists():
+        typer.echo("Not initialized. Run `loci init` first.", err=True)
+        raise typer.Exit(1)
+
     sock = sock_path(root)
 
     if sock.exists():
