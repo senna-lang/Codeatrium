@@ -113,61 +113,25 @@ loci hook install                            # Register hooks to ~/.claude/setti
 | Hook | Trigger | Command |
 |------|---------|---------|
 | Stop (async) | 毎ラリー後 | `loci index` |
+| SessionStart | startup / clear / resume / compact | `loci prime` |
 | SessionStart | startup / clear / resume / compact | `loci server start` |
 | SessionStart | startup / clear / resume / compact | `loci distill --limit <batch_limit>` |
 
 ---
 
+<!-- BEGIN CODEATRIUM -->
 ## Past Memory Search (codeatrium)
 
-過去の実装・意思決定・コードの位置を検索するには `loci search` を使う。
+IMPORTANT: Command usage is injected automatically at session start via `loci prime` (SessionStart hook).
+If not in context, run `loci prime`.
 
-### いつ使うか
+### Rules
 
-- 「〜はどこに実装した？」「〜ってどこだっけ？」と聞かれたとき
-- 過去に同じバグを直したか確認したいとき
-- ある機能がすでに実装済みか調べたいとき
-- 実装の意思決定の理由を確認したいとき
-- コードを編集する前に、そのシンボルに関する過去の議論を確認したいとき
-
-### 検索
-
-```bash
-loci search "クエリ" --json --limit 5
-```
-
-出力:
-```json
-[
-  {
-    "exchange_core": "何をしたかの要約（1-2文）",
-    "specific_context": "技術的詳細（数値・エラーメッセージ・パラメータ名）",
-    "rooms": [
-      { "room_type": "concept", "room_key": "rrf-adoption", "room_label": "RRF adoption reason" }
-    ],
-    "symbols": [
-      { "name": "distill", "file": "src/codeatrium/distiller.py", "line": 55, "signature": "def distill_exchange(...)" }
-    ],
-    "verbatim_ref": "~/.claude/projects/.../abc.jsonl:ply=42"
-  }
-]
-```
-
-### 原文の取得
-
-検索結果の `verbatim_ref` を使って会話の原文を取得:
-
-```bash
-loci show "~/.claude/projects/.../abc.jsonl:ply=42" --json
-```
-
-### コードから逆引き
-
-編集しようとしているシンボルに関する過去の会話を確認:
-
-```bash
-loci context --symbol "distill" --json
-```
+1. **Search before implementing** — always check if something was discussed or built before starting work.
+2. **Check symbols before editing** — run `loci context --symbol` for any non-trivial function you are about to change.
+3. **Use technical terms** — queries with exact symbol names, error messages, or parameter names yield better results.
+4. **Follow up with `loci show`** — when `exchange_core` is ambiguous, fetch the full verbatim conversation.
+<!-- END CODEATRIUM -->
 
 ---
 
