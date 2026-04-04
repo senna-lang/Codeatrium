@@ -20,11 +20,11 @@ Agents use two core commands:
 - **Reverse lookup from code** — `loci context --symbol "name"` recalls past conversations about a specific code symbol
   - tree-sitter symbol resolution (Python / TypeScript / Go) lets agents understand implementation intent before editing
 
-<img src="assets/interface.en.svg" alt="Simple Interface" width="600">
+<img src="assets/interface.en.svg" alt="Simple Interface" width="800">
 
 ## How It Works
 
-<img src="assets/architecture.svg" alt="Codeatrium Architecture" width="600">
+<img src="assets/architecture.svg" alt="Codeatrium Architecture" width="800">
 
 1. **Index** — Splits agent session logs into exchanges (user utterance + agent response pairs) and indexes them with FTS5 for keyword search
 2. **Distill** — An LLM (`claude --print`, default `claude-haiku-4-5`) summarizes each exchange into a palace object: `exchange_core` (what was done), `specific_context` (concrete details), `room_assignments` (topic tags). tree-sitter resolves touched files to symbol level (function/class/method + file + line + signature)

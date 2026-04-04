@@ -20,11 +20,11 @@ CLI コマンド `loci`（[Method of Loci＝記憶の宮殿](https://ja.wikipedi
 - **コードから逆引き** — `loci context --symbol "名前"` で特定のコードシンボルに関する過去の会話を想起
   - tree-sitter（Python / TypeScript / Go）のシンボル解決により、エージェントは実装意図・背景を把握できる
 
-<img src="assets/interface.ja.svg" alt="Simple Interface" width="600">
+<img src="assets/interface.ja.svg" alt="Simple Interface" width="800">
 
 ## 仕組み
 
-<img src="assets/architecture.svg" alt="Codeatrium Architecture" width="600">
+<img src="assets/architecture.svg" alt="Codeatrium Architecture" width="800">
 
 1. **Index** — エージェントのセッションログを exchange（ユーザー発話 + エージェント応答のペア）に分割し、FTS5 でキーワード検索可能にする
 2. **Distill** — LLM（`claude --print`、デフォルトは `claude-haiku-4-5`）が各 exchange を palace object に要約: `exchange_core`（何をしたか）、`specific_context`（具体的な詳細）、`room_assignments`（トピックタグ）。tree-sitter で触れたファイルをシンボルレベル（関数・クラス・メソッド + ファイル + 行 + シグネチャ）に解決
