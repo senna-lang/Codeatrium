@@ -7,7 +7,6 @@ SQLite DB の初期化・スキーマ定義・接続管理
   exchanges_fts  - exchanges の FTS5 仮想テーブル（BM25 verbatim 検索用）
   vec_exchanges  - sqlite-vec HNSW インデックス（Phase1 verbatim ベクトル検索用）
   palace_objects - 蒸留済み palace object（exchange_core + specific_context）
-  palace_fts     - palace_objects の FTS5 仮想テーブル（将来用）
   rooms          - palace object の room_assignments
   vec_palace     - sqlite-vec HNSW インデックス（Phase2 distilled ベクトル検索用）
   symbols        - tree-sitter 解決済みシンボル（Phase3 コード逆引き用）
@@ -84,35 +83,8 @@ def init_db(db_path: Path) -> None:
             exchange_id      TEXT NOT NULL,
             exchange_core    TEXT NOT NULL,
             specific_context TEXT NOT NULL,
-            distill_text     TEXT NOT NULL,   -- exchange_core + newline + specific_context
-            bm25_text        TEXT NOT NULL    -- FTS5 検索対象（SPEC Section 6 準拠の連結テキスト）
+            distill_text     TEXT NOT NULL    -- exchange_core + newline + specific_context
         );
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS palace_fts USING fts5(
-            bm25_text,
-            content=palace_objects,
-            content_rowid=rowid
-        );
-
-        CREATE TRIGGER IF NOT EXISTS palace_ai
-        AFTER INSERT ON palace_objects BEGIN
-            INSERT INTO palace_fts(rowid, bm25_text)
-            VALUES (new.rowid, new.bm25_text);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS palace_ad
-        AFTER DELETE ON palace_objects BEGIN
-            INSERT INTO palace_fts(palace_fts, rowid, bm25_text)
-            VALUES ('delete', old.rowid, old.bm25_text);
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS palace_au
-        AFTER UPDATE ON palace_objects BEGIN
-            INSERT INTO palace_fts(palace_fts, rowid, bm25_text)
-            VALUES ('delete', old.rowid, old.bm25_text);
-            INSERT INTO palace_fts(rowid, bm25_text)
-            VALUES (new.rowid, new.bm25_text);
-        END;
 
         CREATE TABLE IF NOT EXISTS rooms (
             id               TEXT PRIMARY KEY,

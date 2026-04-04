@@ -46,14 +46,14 @@ def _insert_exchange(con, ex_id, user_content, agent_content, conv_id="conv1"):
     con.commit()
 
 
-def _insert_palace(con, palace_id, exchange_id, bm25_text, exchange_core, vec):
+def _insert_palace(con, palace_id, exchange_id, exchange_core, vec):
     con.execute(
         """
         INSERT OR IGNORE INTO palace_objects
-            (id, exchange_id, exchange_core, specific_context, distill_text, bm25_text)
-        VALUES (?,?,?,?,?,?)
+            (id, exchange_id, exchange_core, specific_context, distill_text)
+        VALUES (?,?,?,?,?)
         """,
-        (palace_id, exchange_id, exchange_core, "detail", exchange_core, bm25_text),
+        (palace_id, exchange_id, exchange_core, "detail", exchange_core),
     )
     blob = struct.pack(f"{len(vec)}f", *vec.tolist())
     con.execute(
@@ -280,7 +280,6 @@ def test_search_combined_with_palace(tmp_path: Path) -> None:
         con,
         "p1",
         "ex1",
-        "connection pool pool_size db-pool DB Pool",
         "connection pool を修正した",
         np.ones(384, dtype=np.float32),
     )

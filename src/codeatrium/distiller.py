@@ -3,9 +3,8 @@
 SPEC Section 6 DISTILLER フロー準拠:
   ① files_touched を regex で抽出（LLM非使用）
   ② claude -p で palace object 生成（--output-format json --json-schema）
-  ③ bm25_text を組み立てて palace_fts に登録
-  ④ distill_text を embedding して vec_palace に登録
-  ⑤ files_touched を tree-sitter で解析してシンボルを symbols テーブルに登録
+  ③ distill_text を embedding して vec_palace に登録
+  ④ files_touched を tree-sitter で解析してシンボルを symbols テーブルに登録
 """
 
 from __future__ import annotations
@@ -90,23 +89,14 @@ def save_palace_object(
 
     palace_id = _sha256(f"palace:{exchange_id}")
     distill_text = palace.exchange_core + "\n" + palace.specific_context
-    bm25_text = " ".join(
-        [
-            palace.exchange_core,
-            palace.specific_context,
-            " ".join(palace.files_touched),
-            " ".join(r["room_key"] for r in palace.room_assignments),
-            " ".join(r["room_label"] for r in palace.room_assignments),
-        ]
-    )
 
     con = get_connection(db_path)
 
     con.execute(
         """
         INSERT OR IGNORE INTO palace_objects
-            (id, exchange_id, exchange_core, specific_context, distill_text, bm25_text)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (id, exchange_id, exchange_core, specific_context, distill_text)
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
             palace_id,
@@ -114,7 +104,6 @@ def save_palace_object(
             palace.exchange_core,
             palace.specific_context,
             distill_text,
-            bm25_text,
         ),
     )
 

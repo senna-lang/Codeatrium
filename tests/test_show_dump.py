@@ -49,9 +49,9 @@ def _insert_exchange(con, ex_id, conv_id, source_path, ply_start=0):
 def _insert_palace(con, palace_id, exchange_id, core, distilled_at):
     con.execute(
         """INSERT OR IGNORE INTO palace_objects
-           (id, exchange_id, exchange_core, specific_context, distill_text, bm25_text)
-           VALUES (?,?,?,?,?,?)""",
-        (palace_id, exchange_id, core, "detail", core, core),
+           (id, exchange_id, exchange_core, specific_context, distill_text)
+           VALUES (?,?,?,?,?)""",
+        (palace_id, exchange_id, core, "detail", core),
     )
     vec = np.ones(384, dtype=np.float32)
     blob = struct.pack("384f", *vec.tolist())
