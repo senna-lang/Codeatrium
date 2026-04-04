@@ -90,6 +90,74 @@ def test_extract_files_dedup() -> None:
     assert result.count("src/foo.py") == 1
 
 
+def test_extract_files_excludes_site_packages() -> None:
+    result = extract_files_touched(
+        "/opt/anaconda3/lib/python3.11/site-packages/sklearn/base.py", ""
+    )
+    assert result == []
+
+
+def test_extract_files_excludes_stdlib() -> None:
+    result = extract_files_touched(
+        "/opt/anaconda3/lib/python3.11/urllib/request.py", ""
+    )
+    assert result == []
+
+
+def test_extract_files_excludes_venv() -> None:
+    result = extract_files_touched(
+        ".venv/lib/python3.11/site-packages/typer/main.py", ""
+    )
+    assert result == []
+
+
+def test_extract_files_excludes_node_modules() -> None:
+    result = extract_files_touched(
+        "node_modules/react/index.js", ""
+    )
+    assert result == []
+
+
+def test_extract_files_keeps_project_files_alongside_external() -> None:
+    """外部パスは除外しつつプロジェクトファイルは残る"""
+    result = extract_files_touched(
+        "src/app.py /usr/lib/python3/os.py src/util/helper.py", ""
+    )
+    assert "src/app.py" in result
+    assert "src/util/helper.py" in result
+    assert len(result) == 2
+
+
+def test_extract_files_project_root_filters_absolute() -> None:
+    """project_root 指定時、配下の絶対パスは残り外部は除外"""
+    result = extract_files_touched(
+        "/home/user/myproject/src/app.py /opt/anaconda3/lib/python3.11/os.py",
+        "/home/user/myproject/tests/test_app.py",
+        project_root="/home/user/myproject",
+    )
+    assert "/home/user/myproject/src/app.py" in result
+    assert "/home/user/myproject/tests/test_app.py" in result
+    assert len(result) == 2
+
+
+def test_extract_files_project_root_unknown_external() -> None:
+    """ハードコードマーカーにない外部パスも git root で除外される"""
+    result = extract_files_touched(
+        "/home/user/.local/lib/python3.11/foo/bar.py", "",
+        project_root="/home/user/myproject",
+    )
+    assert result == []
+
+
+def test_extract_files_relative_paths_unaffected_by_root() -> None:
+    """相対パスは project_root に影響されずマーカーのみでフィルタ"""
+    result = extract_files_touched(
+        "src/app.py node_modules/react/index.js", "",
+        project_root="/home/user/myproject",
+    )
+    assert result == ["src/app.py"]
+
+
 # --- distill_exchange ---
 
 

@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import os
 import re
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from codeatrium.embedder import Embedder
 from codeatrium.llm import DISTILL_PROMPT_TEMPLATE, call_claude
@@ -38,14 +42,49 @@ def _sha256(text: str) -> str:
 # ---- 公開 API ----
 
 
-def extract_files_touched(user_content: str, agent_content: str) -> list[str]:
-    """user_content + agent_content から regex でファイルパスを抽出する（重複排除・順序維持）"""
+_EXTERNAL_PATH_MARKERS = (
+    "site-packages/",
+    "dist-packages/",
+    "/lib/python",
+    "/opt/",
+    "/usr/lib/",
+    "/usr/local/lib/",
+    ".venv/",
+    "/venv/",
+    "node_modules/",
+)
+
+
+def _is_external_path(path: str, project_root: str | None = None) -> bool:
+    """プロジェクト外のパスか判定する。
+
+    絶対パス: project_root が指定されていればその配下かチェック。
+    相対パス: ハードコードマーカーでフィルタ。
+    """
+    if path.startswith("/"):
+        # 絶対パス: project_root 配下でなければ外部
+        if project_root:
+            return not path.startswith(project_root)
+        # project_root 不明時はマーカーでフォールバック
+    return any(marker in path for marker in _EXTERNAL_PATH_MARKERS)
+
+
+def extract_files_touched(
+    user_content: str, agent_content: str, project_root: str | None = None
+) -> list[str]:
+    """user_content + agent_content から regex でファイルパスを抽出する（重複排除・順序維持）
+
+    project_root が指定された場合、絶対パスはその配下のもののみ残す。
+    相対パスはハードコードマーカー（node_modules 等）でフィルタする。
+    """
     text = user_content + "\n" + agent_content
+    # project_root を末尾スラッシュ付きに正規化
+    root_prefix = (project_root.rstrip("/") + "/") if project_root else None
     seen: set[str] = set()
     result: list[str] = []
     for m in _FILES_PATTERN.findall(text):
         path = m[0] or m[1]
-        if path and path not in seen:
+        if path and path not in seen and not _is_external_path(path, root_prefix):
             seen.add(path)
             result.append(path)
     return result
@@ -58,6 +97,7 @@ def distill_exchange(
     ply_start: int,
     ply_end: int,
     model: str | None = None,
+    project_root: str | None = None,
 ) -> PalaceObject:
     """1つの exchange を蒸留して PalaceObject を返す"""
     messages_text = (user_content + "\n" + agent_content)[:4000]
@@ -67,7 +107,9 @@ def distill_exchange(
         messages_text=messages_text,
     )
     raw = call_claude(prompt, model=model)
-    files_touched = extract_files_touched(user_content, agent_content)
+    files_touched = extract_files_touched(
+        user_content, agent_content, project_root=project_root
+    )
     return PalaceObject(
         exchange_core=raw["exchange_core"],
         specific_context=raw["specific_context"],
@@ -174,18 +216,34 @@ def save_palace_object(
 
 
 def distill_all(
-    db_path: Path, limit: int | None = None, model: str | None = None
+    db_path: Path,
+    limit: int | None = None,
+    model: str | None = None,
+    on_progress: Callable[..., None] | None = None,
+    project_root: str | None = None,
 ) -> int:
-    """未蒸留の exchange を処理する。Returns: 処理した exchange 数"""
+    """未蒸留の exchange を処理する。
+
+    on_progress: (current, total, error=None) を受け取るコールバック
+    Returns: 処理した exchange 数
+    """
     from codeatrium.db import get_connection
 
     con = get_connection(db_path)
+
+    # 1-exchange セッションの exchange は蒸留対象外 → skipped にマーク
+    con.execute("""
+        UPDATE exchanges SET distilled_at = 'skipped'
+        WHERE distilled_at IS NULL
+          AND (SELECT COUNT(*) FROM exchanges e2
+               WHERE e2.conversation_id = exchanges.conversation_id) < 2
+    """)
+    con.commit()
+
     query = """
         SELECT e.id, e.user_content, e.agent_content, e.ply_start, e.ply_end
         FROM exchanges e
         WHERE e.distilled_at IS NULL
-          AND (SELECT COUNT(*) FROM exchanges e2
-               WHERE e2.conversation_id = e.conversation_id) >= 2
     """
     if limit is not None:
         query += f" LIMIT {limit}"
@@ -195,20 +253,31 @@ def distill_all(
     if not rows:
         return 0
 
+    total = len(rows)
     embedder = Embedder()
     count = 0
+    errors = 0
     for row in rows:
-        palace = distill_exchange(
-            row["id"],
-            row["user_content"],
-            row["agent_content"],
-            row["ply_start"],
-            row["ply_end"],
-            model=model,
-        )
-        distill_text = palace.exchange_core + "\n" + palace.specific_context
-        vec = embedder.embed_passage(distill_text)
-        save_palace_object(db_path, row["id"], palace, vec)
-        count += 1
+        try:
+            palace = distill_exchange(
+                row["id"],
+                row["user_content"],
+                row["agent_content"],
+                row["ply_start"],
+                row["ply_end"],
+                model=model,
+                project_root=project_root,
+            )
+            distill_text = palace.exchange_core + "\n" + palace.specific_context
+            vec = embedder.embed_passage(distill_text)
+            save_palace_object(db_path, row["id"], palace, vec)
+            count += 1
+        except Exception as e:
+            errors += 1
+            if on_progress is not None:
+                on_progress(count, total, error=str(e))
+            continue
+        if on_progress is not None:
+            on_progress(count, total)
 
     return count

@@ -41,9 +41,21 @@ def distill(
         except (ValueError, ProcessLookupError, PermissionError):
             pass
 
+    def _on_progress(cur: int, tot: int, error: str | None = None) -> None:
+        if error:
+            typer.echo(f"  [{cur}/{tot}] error: {error}", err=True)
+        else:
+            typer.echo(f"  [{cur}/{tot}] distilled", err=True)
+
     lock_path.write_text(str(os.getpid()))
     try:
-        count = distill_all(db, limit=limit, model=cfg.distill_model)
+        count = distill_all(
+            db,
+            limit=limit,
+            model=cfg.distill_model,
+            on_progress=_on_progress,
+            project_root=str(root),
+        )
         typer.echo(f"Distilled {count} exchange(s).")
     finally:
         lock_path.unlink(missing_ok=True)
