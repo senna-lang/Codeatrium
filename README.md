@@ -1,106 +1,113 @@
 # Codeatrium
 
-AI コーディングエージェントに**記憶の宮殿**を。
+A **memory palace** for AI coding agents.
 
-Codeatrium は過去の会話を *palace object* に蒸留し、検索可能なインデックスに保存することで、エージェントに長期記憶を与えます。過去の意思決定・実装・コード位置を 0.2 秒で想起できます。
+English · [日本語](README.ja.md)
 
-CLI コマンド `loci`（[Method of Loci＝記憶の宮殿](https://ja.wikipedia.org/wiki/%E5%A0%B4%E6%89%80%E6%B3%95)に由来）は**エージェント自身が呼び出す**ことを想定しています。`loci search "..." --json` をプロンプト内から実行します。
+Codeatrium distills past conversations into *palace objects* and stores them in a searchable index, giving agents long-term memory. Past decisions, implementations, and code locations can be recalled in under 0.2 seconds.
 
-アーキテクチャは [arXiv:2603.13017](https://arxiv.org/abs/2603.13017) の会話記憶モデルを、コーディングエージェント向けに拡張したものです。
+The CLI command `loci` (from [Method of Loci](https://en.wikipedia.org/wiki/Method_of_loci)) is designed to be **called by the agent itself** — running `loci search "..." --json` from within a prompt.
 
-> **Note:** 現在は [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 専用です。セッションログ形式（`.jsonl`）と蒸留（`claude --print`）が Claude Code に依存しています。
+The architecture extends the conversational memory model from [arXiv:2603.13017](https://arxiv.org/abs/2603.13017) for coding agents.
 
-## シンプルなインターフェース
+> **Note:** Currently [Claude Code](https://docs.anthropic.com/en/docs/claude-code) only. Session log format (`.jsonl`) and distillation (`claude --print`) depend on Claude Code.
 
-エージェントが使用するコマンドは基本２つ。
+## Simple Interface
 
-- **セマンティック検索** — `loci search "クエリ"` でセマンティック類似度から過去の会話を検索
-- **コードから逆引き** — `loci context --symbol "名前"` で特定のコードシンボルに関する過去の会話を想起。tree-sitter（Python / TypeScript / Go）のシンボル解決により、エージェントは編集前に実装意図を把握できる
+Agents use two core commands:
 
-<img src="assets/interface.svg" alt="Simple Interface" width="600">
+- **Semantic search** — `loci search "query"` retrieves past conversations by semantic similarity
+- **Reverse lookup from code** — `loci context --symbol "name"` recalls past conversations about a specific code symbol
+  - tree-sitter symbol resolution (Python / TypeScript / Go) lets agents understand implementation intent before editing
 
-## 仕組み
+<img src="assets/interface.en.svg" alt="Simple Interface" width="600">
+
+## How It Works
 
 <img src="assets/architecture.svg" alt="Codeatrium Architecture" width="600">
 
-1. **Index** — エージェントのセッションログを exchange（ユーザー発話 + エージェント応答のペア）に分割し、`multilingual-e5-small` で埋め込み
-2. **Distill** — LLM（`claude --print`、デフォルトは `claude-haiku-4-5`）が各 exchange を palace object に要約: `exchange_core`（何をしたか）、`specific_context`（具体的な詳細）、`room_assignments`（トピックタグ）。tree-sitter で触れたファイルをシンボルレベル（関数・クラス・メソッド + ファイル + 行 + シグネチャ）に解決
-3. **Search** — 会話原文の BM25 と蒸留済み埋め込みの HNSW を RRF で融合するクロスレイヤー検索
+1. **Index** — Splits agent session logs into exchanges (user utterance + agent response pairs) and indexes them with FTS5 for keyword search
+2. **Distill** — An LLM (`claude --print`, default `claude-haiku-4-5`) summarizes each exchange into a palace object: `exchange_core` (what was done), `specific_context` (concrete details), `room_assignments` (topic tags). tree-sitter resolves touched files to symbol level (function/class/method + file + line + signature)
+3. **Search** — Cross-layer search fusing BM25 on verbatim text with HNSW on distilled embeddings via RRF
 
-埋め込みモデル（`multilingual-e5-small`、384次元）は **Unix ソケットサーバー**で常駐し、初回以降の検索は **0.2 秒以内**で返ります。
+Raw conversations are not embedded — only the condensed distilled text is embedded with `multilingual-e5-small` (384-dim), balancing semantic search quality with embedding cost. The embedding model runs as a **Unix socket server**, keeping search latency **under 0.2 seconds** after the first load.
 
-## インストール
+## Installation
 
 ```bash
 pipx install codeatrium
 ```
 
-Python 3.11 以上が必要です。
+Requires Python 3.11+.
 
-## クイックスタート
+## Quick Start
 
 ```bash
-# プロジェクトルートで初期化
+# Initialize in project root
 loci init
 
-# 自動インデックスのフックをインストール
+# Install hooks for automatic indexing
 loci hook install
 ```
 
-`loci init` を実行すると、過去のセッションログが検出された場合に以下の質問が表示されます:
+When running `loci init`, if past session logs are detected, you'll be prompted with:
 
-1. **Min chars threshold** — exchange の最小文字数フィルタ（デフォルト: 50文字）。この閾値で蒸留の母数（対象 exchange 数）が決まります。値を大きくすると短い会話が除外され蒸留対象が減り、小さくするとほぼ全ての会話が蒸留対象になりトークン消費が増えます。
-2. **既存 exchange の扱い** — 過去のセッションをどこまで蒸留するか選択:
-   - Skip all（過去のセッション蒸留なし）
-   - Distill last 30（直近の履歴のみ）
-   - Distill all（全件、トークン消費あり）
-   - Custom（件数を指定）
-3. **蒸留を今すぐ実行するか** — No を選ぶと次回セッション開始時に自動実行されます
+> [!IMPORTANT]
+> When adopting this tool mid-project, a large number of exchanges may already exist. Distilling all of them will consume significant `claude --print` (Haiku) tokens. We recommend starting with `Skip all` or `Distill last 50`.
 
-## エージェント向けインストラクション
+1. **Min chars threshold** — Minimum character filter for exchanges (default: 50). This controls how many exchanges become distillation candidates. Higher values exclude short conversations and reduce token usage; lower values include nearly everything.
+2. **Handling existing exchanges** — Choose how much past history to distill:
+   - Skip all (no past session distillation)
+   - Distill last 50 (recent history only)
+   - Distill all (everything — high token cost)
+   - Custom (specify a number)
+3. **Run distillation now?** — Choose No to defer to the next session start
 
-エージェントへのインストラクションは自動挿入されるので手動で書く必要はありません:
+## Agent Instructions
 
-- **`loci init`** — `CLAUDE.md` にマーカー付きセクション（`<!-- BEGIN CODEATRIUM -->...<!-- END CODEATRIUM -->`）を挿入。
-- **`loci prime`** — SessionStart Hook で毎セッション開始時にコマンドの使い方をコンテキストウィンドウに動的注入。
+Agent instructions are injected automatically — no manual setup required:
 
-## CLI コマンド
+- **`loci init`** — Inserts a marker section (`<!-- BEGIN CODEATRIUM -->...<!-- END CODEATRIUM -->`) into `CLAUDE.md`
+- **`loci prime`** — Dynamically injects command usage into the context window at every session start via SessionStart Hook
 
-| コマンド | 説明 |
-|---------|------|
-| `loci init` | プロジェクトルートに `.codeatrium/` を初期化 |
-| `loci index` | 新しいセッションログをインデックス |
-| `loci distill [--limit N]` | 未蒸留の exchange を LLM で蒸留 |
-| `loci search "クエリ" --json` | セマンティック検索（エージェント向け） |
-| `loci context --symbol "名前" --json` | コードシンボル → 過去の会話 |
-| `loci show "<ref>" --json` | 会話原文を取得 |
-| `loci status` | インデックス状態を表示 |
-| `loci server start/stop/status` | 埋め込みサーバー管理 |
-| `loci hook install` | Claude Code の設定にフックを登録 |
+## CLI Commands
 
-## 自動化（Claude Code フック）
+| Command | Description |
+|---------|-------------|
+| `loci init` | Initialize `.codeatrium/` in project root |
+| `loci index` | Index new session logs |
+| `loci distill [--limit N]` | Distill undistilled exchanges via LLM |
+| `loci search "query" --json` | Semantic search (agent-facing) |
+| `loci context --symbol "name" --json` | Code symbol → past conversations |
+| `loci show "<ref>" --json` | Retrieve verbatim conversation |
+| `loci status` | Show index state |
+| `loci server start/stop/status` | Embedding server management |
+| `loci hook install` | Register hooks in Claude Code settings |
 
-`loci hook install` 後、すべて自動で動作します:
+## Automation (Claude Code Hooks)
 
-| フック | トリガー | コマンド |
-|--------|---------|---------|
-| Stop (async) | 毎ラリー後 | `loci index` |
-| SessionStart | 起動時 / `/clear` / `/resume` | `loci server start` |
-| SessionStart | 起動時 / `/clear` / `/resume` | `loci distill` |
+After `loci hook install`, everything runs automatically:
 
-- **`loci index`** — 毎ラリー後に非同期で実行。セッション途中でも差分のみインデックスするので高速
-- **`loci distill`** — セッション開始時に未蒸留の exchange を `claude --print` で蒸留。ユーザーの Claude Code で Haiku を呼び出します（デフォルト: `claude-haiku-4-5`）
-- **`loci server start`** — 埋め込みモデル（約500MB）をメモリに常駐させ、以降の検索を 0.2 秒以内に
+| Hook | Trigger | Command |
+|------|---------|---------|
+| Stop (async) | After every turn | `loci index` |
+| SessionStart | startup / `/clear` / `/resume` / `compact` | `loci prime` |
+| SessionStart | startup / `/clear` / `/resume` / `compact` | `loci server start` |
+| SessionStart | startup / `/clear` / `/resume` / `compact` | `loci distill` |
 
-## 検索出力
+- **`loci index`** — Runs asynchronously after every turn. Indexes only new exchanges, so it's fast even mid-session
+- **`loci distill`** — Distills undistilled exchanges at session start via `claude --print`. Calls Haiku through the user's Claude Code (default: `claude-haiku-4-5`)
+- **`loci server start`** — Keeps the embedding model (~500MB) resident in memory for sub-0.2s search latency
+
+## Search Output
 
 ```json
 [
   {
-    "exchange_core": "pool_size=5 でコネクションプールを追加した",
+    "exchange_core": "Added connection pool with pool_size=5",
     "specific_context": "pool_size=5, max_overflow=10",
     "rooms": [
-      { "room_type": "concept", "room_key": "db-pool", "room_label": "DB コネクションプーリング" }
+      { "room_type": "concept", "room_key": "db-pool", "room_label": "DB connection pooling" }
     ],
     "symbols": [
       { "name": "create_pool", "file": "src/db.py", "line": 42, "signature": "def create_pool(...)" }
@@ -110,27 +117,27 @@ loci hook install
 ]
 ```
 
-## 設定
+## Configuration
 
-`.codeatrium/config.toml`（`loci init` で生成）:
+`.codeatrium/config.toml` (generated by `loci init`):
 
 ```toml
 [distill]
-model = "claude-haiku-4-5-20251001"   # 蒸留に使うモデル（デフォルト）
-batch_limit = 20                       # 1回あたりの蒸留上限
+model = "claude-haiku-4-5-20251001"   # Model for distillation (default)
+batch_limit = 20                       # Max distillations per hook run
 
 [index]
-min_chars = 50                         # この文字数未満の exchange をスキップ
+min_chars = 50                         # Skip exchanges shorter than this
 ```
 
 ## Acknowledgments
 
-Palace object モデル、room ベースのトピックグルーピング、BM25+HNSW 融合検索は以下の論文に基づいています:
+The palace object model, room-based topic grouping, and BM25+HNSW fusion search are based on:
 
 > *Structured Distillation for Personalized Agent Memory*
 > (arXiv:2603.13017)
 
 
-## ライセンス
+## License
 
 MIT
