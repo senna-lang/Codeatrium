@@ -46,6 +46,42 @@ wheels = [
 ]
 
 [[package]]
+name = "codeatrium"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "sentence-transformers" },
+    { name = "sqlite-vec" },
+    { name = "tree-sitter" },
+    { name = "tree-sitter-go" },
+    { name = "tree-sitter-python" },
+    { name = "tree-sitter-typescript" },
+    { name = "typer" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
+    { name = "sentence-transformers", specifier = ">=3.0.0" },
+    { name = "sqlite-vec", specifier = ">=0.1.0" },
+    { name = "tree-sitter", specifier = ">=0.23.0,<0.24.0" },
+    { name = "tree-sitter-go", specifier = ">=0.23.0,<0.24.0" },
+    { name = "tree-sitter-python", specifier = ">=0.23.0,<0.24.0" },
+    { name = "tree-sitter-typescript", specifier = ">=0.23.0,<0.24.0" },
+    { name = "typer", extras = ["all"], specifier = ">=0.12.0" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -270,42 +306,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/41/f2/d34e8b3a08a9cc79a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7b/91/984aca2ec129e2757d1e4e3c81c3fcda9d0f85b74670a094cc443d9ee949/joblib-1.5.3-py3-none-any.whl", hash = "sha256:5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713", size = 309071, upload-time = "2025-12-15T08:41:44.973Z" },
 ]
-
-[[package]]
-name = "logosyncs"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "sentence-transformers" },
-    { name = "sqlite-vec" },
-    { name = "tree-sitter" },
-    { name = "tree-sitter-go" },
-    { name = "tree-sitter-python" },
-    { name = "tree-sitter-typescript" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pyright", marker = "extra == 'dev'", specifier = ">=1.1.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
-    { name = "sentence-transformers", specifier = ">=3.0.0" },
-    { name = "sqlite-vec", specifier = ">=0.1.0" },
-    { name = "tree-sitter", specifier = ">=0.23.0,<0.24.0" },
-    { name = "tree-sitter-go", specifier = ">=0.23.0,<0.24.0" },
-    { name = "tree-sitter-python", specifier = ">=0.23.0,<0.24.0" },
-    { name = "tree-sitter-typescript", specifier = ">=0.23.0,<0.24.0" },
-    { name = "typer", extras = ["all"], specifier = ">=0.12.0" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "markdown-it-py"
