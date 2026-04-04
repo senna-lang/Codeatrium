@@ -28,6 +28,7 @@ def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool,
     index_cmd = f"{loci} index"
     distill_cmd = f"nohup {loci} distill --limit {batch_limit} > /dev/null 2>&1 &"
     server_cmd = f"nohup {loci} server start > /dev/null 2>&1 &"
+    prime_cmd = f"{loci} prime"
     changed = False
 
     # --- Stop hook: loci index (async: true) ---
@@ -93,6 +94,35 @@ def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool,
             hooks_list.append({"type": "command", "command": distill_cmd})
             changed = True
 
+    # --- SessionStart hook: loci prime (blocking, stdout をコンテキストに注入) ---
+    prime_installed = False
+    for entry in session_start_hooks:
+        if entry.get("matcher") != "startup|clear|resume|compact":
+            continue
+        for h in entry.get("hooks", []):
+            if "loci" in h.get("command", "") and "prime" in h.get("command", ""):
+                prime_installed = True
+                if h.get("command") != prime_cmd:
+                    h["command"] = prime_cmd
+                    changed = True
+
+    if not prime_installed:
+        target_entry = next(
+            (
+                e
+                for e in session_start_hooks
+                if e.get("matcher") == "startup|clear|resume|compact"
+            ),
+            None,
+        )
+        if target_entry is None:
+            target_entry = {"matcher": "startup|clear|resume|compact", "hooks": []}
+            session_start_hooks.append(target_entry)
+        cast(list[dict[str, Any]], target_entry["hooks"]).append(
+            {"type": "command", "command": prime_cmd}
+        )
+        changed = True
+
     # 古い SessionEnd の loci distill エントリがあれば削除
     if "SessionEnd" in hooks:
         hooks["SessionEnd"] = [
@@ -119,6 +149,7 @@ def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool,
         f"  Stop (async):       {index_cmd}",
         f"  SessionStart:       {server_cmd}",
         f"  SessionStart:       {distill_cmd}",
+        f"  SessionStart:       {prime_cmd}",
         "  (matcher: startup|clear|resume|compact)",
     ]
     return True, "\n".join(lines)

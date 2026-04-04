@@ -138,6 +138,9 @@ def test_hook_install_adds_command(tmp_path, monkeypatch):
     ]
     assert any("loci distill" in h.get("command", "") for h in session_start_commands)
 
+    # SessionStart hook: loci prime
+    assert any("loci prime" in h.get("command", "") for h in session_start_commands)
+
 
 def test_hook_install_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
@@ -149,6 +152,29 @@ def test_hook_install_idempotent(tmp_path, monkeypatch):
     all_hooks = [h for entry in data["hooks"]["Stop"] for h in entry.get("hooks", [])]
     loci_hooks = [h for h in all_hooks if "loci index" in h.get("command", "")]
     assert len(loci_hooks) == 1
+
+
+def test_hook_install_prime_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    runner.invoke(app, ["hook", "install"])
+    runner.invoke(app, ["hook", "install"])
+    settings_path = tmp_path / ".claude" / "settings.json"
+    data = json.loads(settings_path.read_text())
+    session_start_commands = [
+        h
+        for entry in data["hooks"]["SessionStart"]
+        for h in entry.get("hooks", [])
+    ]
+    prime_hooks = [h for h in session_start_commands if "loci prime" in h.get("command", "")]
+    assert len(prime_hooks) == 1
+
+
+def test_prime_outputs_instructions():
+    result = runner.invoke(app, ["prime"])
+    assert result.exit_code == 0
+    assert "loci search" in result.output
+    assert "loci context" in result.output
+    assert "loci show" in result.output
 
 
 def test_hook_install_merges_existing_settings(tmp_path, monkeypatch):

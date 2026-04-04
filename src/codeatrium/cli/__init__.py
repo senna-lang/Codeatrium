@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -154,5 +155,6 @@ app.command()(context)
 app.command()(status)
 app.command()(show)
 app.command()(dump)
+app.command()(prime)
 app.add_typer(hook_app, name="hook")
 app.add_typer(server_app, name="server")
