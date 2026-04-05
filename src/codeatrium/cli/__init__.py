@@ -91,6 +91,7 @@ def init(
             "[distill]\n"
             '# model = "claude-haiku-4-5-20251001"\n'
             "# batch_limit = 20\n"
+            "# min_chars = 100   # この文字数未満の exchange は蒸留スキップ\n"
             "\n"
             "[index]\n"
             "# min_chars = 50   # trivial フィルタ閾値（文字数）\n"
@@ -156,6 +157,7 @@ def init(
             model=cfg.distill_model,
             on_progress=_on_progress,
             project_root=str(root),
+            distill_min_chars=cfg.distill_min_chars,
         )
         typer.echo(f"Distilled {count} exchange(s).")
 

@@ -221,9 +221,11 @@ def distill_all(
     model: str | None = None,
     on_progress: Callable[..., None] | None = None,
     project_root: str | None = None,
+    distill_min_chars: int = 100,
 ) -> int:
     """未蒸留の exchange を処理する。
 
+    distill_min_chars: この文字数未満の exchange は蒸留スキップ（デフォルト100）
     on_progress: (current, total, error=None) を受け取るコールバック
     Returns: 処理した exchange 数
     """
@@ -231,13 +233,16 @@ def distill_all(
 
     con = get_connection(db_path)
 
-    # 1-exchange セッションの exchange は蒸留対象外 → skipped にマーク
+    # 蒸留対象外の exchange を skipped にマーク:
+    # - 1-exchange セッション
+    # - distill_min_chars 未満（ワンフレーズ指示・システムメッセージ等）
     con.execute("""
         UPDATE exchanges SET distilled_at = 'skipped'
         WHERE distilled_at IS NULL
-          AND (SELECT COUNT(*) FROM exchanges e2
-               WHERE e2.conversation_id = exchanges.conversation_id) < 2
-    """)
+          AND ((SELECT COUNT(*) FROM exchanges e2
+                WHERE e2.conversation_id = exchanges.conversation_id) < 2
+               OR LENGTH(user_content) + LENGTH(agent_content) < ?)
+    """, (distill_min_chars,))
     con.commit()
 
     query = """

@@ -55,6 +55,7 @@ def distill(
             model=cfg.distill_model,
             on_progress=_on_progress,
             project_root=str(root),
+            distill_min_chars=cfg.distill_min_chars,
         )
         typer.echo(f"Distilled {count} exchange(s).")
     finally:
