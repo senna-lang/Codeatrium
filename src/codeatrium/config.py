@@ -14,6 +14,7 @@ CONFIG_FILENAME = "config.toml"
 DEFAULT_DISTILL_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_DISTILL_BATCH_LIMIT = 20
 DEFAULT_INDEX_MIN_CHARS = 50
+DEFAULT_DISTILL_MIN_CHARS = 100
 
 
 @dataclass
@@ -23,6 +24,7 @@ class Config:
     distill_model: str = DEFAULT_DISTILL_MODEL
     distill_batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT
     index_min_chars: int = DEFAULT_INDEX_MIN_CHARS
+    distill_min_chars: int = DEFAULT_DISTILL_MIN_CHARS
 
 
 def load_config(project_root: Path) -> Config:
@@ -76,8 +78,19 @@ def load_config(project_root: Path) -> Config:
         )
         min_chars = DEFAULT_INDEX_MIN_CHARS
 
+    distill_min_chars = distill.get("min_chars", DEFAULT_DISTILL_MIN_CHARS)
+    if not isinstance(distill_min_chars, int) or distill_min_chars < 1:
+        import sys
+
+        print(
+            "Warning: distill.min_chars must be a positive integer, using default.",
+            file=sys.stderr,
+        )
+        distill_min_chars = DEFAULT_DISTILL_MIN_CHARS
+
     return Config(
         distill_model=model,
         distill_batch_limit=batch_limit,
         index_min_chars=min_chars,
+        distill_min_chars=distill_min_chars,
     )

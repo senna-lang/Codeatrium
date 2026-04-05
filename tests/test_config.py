@@ -6,6 +6,7 @@ from pathlib import Path
 
 from codeatrium.config import (
     DEFAULT_DISTILL_BATCH_LIMIT,
+    DEFAULT_DISTILL_MIN_CHARS,
     DEFAULT_DISTILL_MODEL,
     DEFAULT_INDEX_MIN_CHARS,
     Config,
@@ -87,3 +88,30 @@ def test_load_config_invalid_min_chars_fallback(tmp_path: Path) -> None:
     (codeatrium_dir / "config.toml").write_text("[index]\nmin_chars = 0\n")
     cfg = load_config(tmp_path)
     assert cfg.index_min_chars == DEFAULT_INDEX_MIN_CHARS
+
+
+def test_load_config_distill_min_chars(tmp_path: Path) -> None:
+    """distill.min_chars が正しく読まれる"""
+    codeatrium_dir = tmp_path / ".codeatrium"
+    codeatrium_dir.mkdir()
+    (codeatrium_dir / "config.toml").write_text("[distill]\nmin_chars = 200\n")
+    cfg = load_config(tmp_path)
+    assert cfg.distill_min_chars == 200
+
+
+def test_load_config_distill_min_chars_default(tmp_path: Path) -> None:
+    """distill.min_chars 未設定時はデフォルト100"""
+    codeatrium_dir = tmp_path / ".codeatrium"
+    codeatrium_dir.mkdir()
+    (codeatrium_dir / "config.toml").write_text("[distill]\n")
+    cfg = load_config(tmp_path)
+    assert cfg.distill_min_chars == DEFAULT_DISTILL_MIN_CHARS
+
+
+def test_load_config_distill_min_chars_invalid_fallback(tmp_path: Path) -> None:
+    """不正な distill.min_chars はデフォルトにフォールバック"""
+    codeatrium_dir = tmp_path / ".codeatrium"
+    codeatrium_dir.mkdir()
+    (codeatrium_dir / "config.toml").write_text("[distill]\nmin_chars = -5\n")
+    cfg = load_config(tmp_path)
+    assert cfg.distill_min_chars == DEFAULT_DISTILL_MIN_CHARS
