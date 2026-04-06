@@ -119,6 +119,7 @@ def run_server(sock_path: Path) -> None:
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(str(sock_path))
+    os.chmod(sock_path, 0o600)  # owner-only access
     server.listen(BACKLOG)
     server.settimeout(1.0)  # accept の timeout（idle チェック用）
 
