@@ -1,5 +1,9 @@
 # Codeatrium
 
+[![CI](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml/badge.svg)](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/codeatrium)](https://pypi.org/project/codeatrium/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A **memory palace** for AI coding agents.
 
 English · [日本語](README.ja.md)
