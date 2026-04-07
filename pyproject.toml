@@ -76,6 +76,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.pyright]
+typeCheckingMode = "standard"
 pythonVersion = "3.11"
 venvPath = "."
 venv = ".venv"
