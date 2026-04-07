@@ -128,7 +128,7 @@ If not in context, run `loci prime`.
 ### Rules
 
 1. **Search before implementing** — always check if something was discussed or built before starting work.
-2. **Check symbols before editing** — run `loci context --symbol` for any non-trivial function you are about to change.
+2. **Check symbols when you lack context** — run `loci context --symbol` before changing a function you don't have enough background on.
 3. **Use technical terms** — queries with exact symbol names, error messages, or parameter names yield better results.
 4. **Follow up with `loci show`** — when `exchange_core` is ambiguous, fetch the full verbatim conversation.
 <!-- END CODEATRIUM -->
