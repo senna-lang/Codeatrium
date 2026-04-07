@@ -255,6 +255,7 @@ def _resolve_skip_count(
     typer.echo(
         f"\nFound {total} existing exchanges from past sessions.\n"
         "Distillation uses claude --print (Haiku) and consumes tokens.\n"
+        "⚠ Skipped exchanges cannot be distilled later.\n"
     )
     typer.echo("How should existing exchanges be handled?")
     typer.echo("  [1] Skip all — only distill future sessions")
