@@ -48,9 +48,13 @@ def distill(
         except (ValueError, ProcessLookupError, PermissionError):
             # stale lock — 再取得
             lock_path.unlink(missing_ok=True)
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+            except FileExistsError:
+                typer.echo("loci distill: lost lock race after stale cleanup. Exiting.", err=True)
+                raise typer.Exit(0)
 
     def _on_progress(cur: int, tot: int, error: str | None = None) -> None:
         if error:

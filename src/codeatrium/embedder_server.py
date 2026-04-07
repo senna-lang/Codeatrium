@@ -118,8 +118,11 @@ def run_server(sock_path: Path) -> None:
     embedder = _load_embedder()
 
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(sock_path))
-    os.chmod(sock_path, 0o600)  # owner-only access
+    old_umask = os.umask(0o177)  # enforce 0o600 on the socket, no TOCTOU
+    try:
+        server.bind(str(sock_path))
+    finally:
+        os.umask(old_umask)
     server.listen(BACKLOG)
     server.settimeout(1.0)  # accept の timeout（idle チェック用）
 
