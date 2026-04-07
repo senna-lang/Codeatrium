@@ -236,6 +236,48 @@ def test_index_file_incremental(tmp_path: Path) -> None:
     con.close()
 
 
+def test_parse_exchanges_excludes_compaction_content(tmp_path: Path) -> None:
+    """コンパクション要約とその直後の assistant 応答は exchange content から除外される"""
+    f = tmp_path / "session.jsonl"
+    compaction_text = (
+        "This session is being continued from a previous conversation "
+        "that ran out of context. The summary below covers the earlier portion."
+    )
+    compaction_response = (
+        "I'll continue from where we left off. "
+        "Previously we discussed connection pooling and database optimization. " * 5
+    )
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "connection pool の修正を教えてください。" * 5),
+            make_assistant_entry(
+                "a1", "pool_size=5 を DATABASE_URL に追加してください。" * 5, "u1"
+            ),
+            # コンパクション要約（exchange 境界にならない）
+            make_user_entry("u_compact", compaction_text, "a1"),
+            # コンパクション直後の assistant 応答（除外されるべき）
+            make_assistant_entry("a_compact", compaction_response, "u_compact"),
+            # 次の実質的な exchange
+            make_user_entry("u2", "次にインデックスの最適化について教えて。" * 5, "a_compact"),
+            make_assistant_entry(
+                "a2", "CREATE INDEX を使うと検索が高速化されます。" * 5, "u2"
+            ),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 2
+
+    # exchange 1: コンパクション要約と応答が agent_content に含まれない
+    assert "pool_size" in exchanges[0].agent_content
+    assert "continued from" not in exchanges[0].agent_content
+    assert "Previously we discussed" not in exchanges[0].agent_content
+
+    # exchange 2: 通常通り
+    assert "インデックス" in exchanges[1].user_content
+    assert "CREATE INDEX" in exchanges[1].agent_content
+
+
 def test_index_file_fts_populated(tmp_path: Path) -> None:
     """FTS インデックスに内容が入る"""
     db_path = tmp_path / ".codeatrium" / "memory.db"
