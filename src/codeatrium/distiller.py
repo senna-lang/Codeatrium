@@ -250,9 +250,11 @@ def distill_all(
         FROM exchanges e
         WHERE e.distilled_at IS NULL
     """
+    params: list[int] = []
     if limit is not None:
-        query += f" LIMIT {limit}"
-    rows = con.execute(query).fetchall()
+        query += " LIMIT ?"
+        params.append(int(limit))
+    rows = con.execute(query, params).fetchall()
     con.close()
 
     if not rows:

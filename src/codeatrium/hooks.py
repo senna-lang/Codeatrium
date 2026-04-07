@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any, cast
 
@@ -24,9 +25,9 @@ def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool,
         settings = {}
 
     hooks = settings.setdefault("hooks", {})
-    loci = loci_bin()
+    loci = shlex.quote(loci_bin())
     index_cmd = f"{loci} index"
-    distill_cmd = f"nohup {loci} distill --limit {batch_limit} > /dev/null 2>&1 &"
+    distill_cmd = f"nohup {loci} distill --limit {int(batch_limit)} > /dev/null 2>&1 &"
     server_cmd = f"nohup {loci} server start > /dev/null 2>&1 &"
     prime_cmd = f"{loci} prime"
     changed = False
