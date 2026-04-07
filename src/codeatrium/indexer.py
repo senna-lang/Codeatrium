@@ -136,10 +136,17 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50) -> list[Exchange]:
         user_entry = entries[start]
         user_text = _extract_text(user_entry["message"]["content"])
 
-        # assistant の発話を連結
+        # assistant の発話を連結（コンパクション要約ゾーンは除外）
         agent_parts: list[str] = []
+        in_compaction_zone = False
         for e in entries[start + 1 : end + 1]:
-            if e.get("type") == "assistant":
+            if e.get("type") == "user":
+                msg = e.get("message", {})
+                if isinstance(msg, dict):
+                    text = _extract_text(msg.get("content", ""))
+                    in_compaction_zone = _is_compaction_summary(text)
+                continue
+            if e.get("type") == "assistant" and not in_compaction_zone:
                 msg = e.get("message", {})
                 if isinstance(msg, dict):
                     text = _extract_text(msg.get("content", ""))
