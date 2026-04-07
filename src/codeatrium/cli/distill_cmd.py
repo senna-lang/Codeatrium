@@ -29,7 +29,14 @@ def distill(
         raise typer.Exit(1)
 
     lock_path = db.parent / "distill.lock"
-    if lock_path.exists():
+
+    # ロック取得: O_CREAT | O_EXCL で原子的に作成（TOCTOU 防止）
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    except FileExistsError:
+        # 既存ロックのプロセスが生きているか確認
         try:
             existing_pid = int(lock_path.read_text().strip())
             os.kill(existing_pid, 0)
@@ -39,7 +46,15 @@ def distill(
             )
             raise typer.Exit(0)
         except (ValueError, ProcessLookupError, PermissionError):
-            pass
+            # stale lock — 再取得
+            lock_path.unlink(missing_ok=True)
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+            except FileExistsError:
+                typer.echo("loci distill: lost lock race after stale cleanup. Exiting.", err=True)
+                raise typer.Exit(0)
 
     def _on_progress(cur: int, tot: int, error: str | None = None) -> None:
         if error:
@@ -47,7 +62,6 @@ def distill(
         else:
             typer.echo(f"  [{cur}/{tot}] distilled", err=True)
 
-    lock_path.write_text(str(os.getpid()))
     try:
         count = distill_all(
             db,
