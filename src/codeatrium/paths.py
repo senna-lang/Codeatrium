@@ -11,7 +11,7 @@ DB_NAME = "memory.db"
 
 
 def git_root() -> Path | None:
-    """git rev-parse --show-toplevel でリポジトリルートを返す。git 外なら None"""
+    """git rev-parse --show-toplevel でリポジトリルートを返す。git 外/未インストールなら None"""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -20,7 +20,7 @@ def git_root() -> Path | None:
             check=True,
         )
         return Path(result.stdout.strip())
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return None
 
 
@@ -31,13 +31,19 @@ def find_project_root() -> Path:
     """
     cwd = Path.cwd()
     root = git_root()
-    candidates = [cwd, *cwd.parents]
-    for p in candidates:
-        if (p / CODEATRIUM_DIR).exists():
-            return p
-        if root and p == root:
-            break
-    return root or cwd
+    if root:
+        candidates = [cwd, *cwd.parents]
+        for p in candidates:
+            if (p / CODEATRIUM_DIR).exists():
+                return p
+            if p == root:
+                break
+        return root
+    else:
+        # git 外: cwd のみ探索（親を遡ると別プロジェクトの DB を拾う）
+        if (cwd / CODEATRIUM_DIR).exists():
+            return cwd
+        return cwd
 
 
 def db_path(project_root: Path) -> Path:

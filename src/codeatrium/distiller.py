@@ -20,7 +20,7 @@ from typing import Any
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-from codeatrium.embedder import Embedder
+from codeatrium.embedder import Embedder, EmbedderSetupError
 from codeatrium.llm import DISTILL_PROMPT_TEMPLATE, call_claude
 from codeatrium.models import PalaceObject
 
@@ -279,6 +279,9 @@ def distill_all(
             vec = embedder.embed_passage(distill_text)
             save_palace_object(db_path, row["id"], palace, vec)
             count += 1
+        except EmbedderSetupError:
+            # 環境レベルの失敗: per-row でなくループ全体を中断する
+            raise
         except Exception as e:
             errors += 1
             if on_progress is not None:

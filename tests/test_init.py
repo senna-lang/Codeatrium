@@ -5,12 +5,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from codeatrium.cli import app
 from codeatrium.db import get_connection
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home(tmp_path, monkeypatch):
+    """$HOME を tmp に隔離して install_hooks が実環境の ~/.claude を触らないようにする"""
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 def _create_jsonl(
@@ -90,7 +97,7 @@ def _setup_project_with_sessions(
     # resolve_claude_projects_path をモックして直接 projects_dir を返す
     monkeypatch.setattr(
         "codeatrium.paths.resolve_claude_projects_path",
-        lambda root: projects_dir,
+        lambda _root: projects_dir,
     )
 
     return projects_dir
@@ -105,6 +112,17 @@ def test_init_creates_db(tmp_path, monkeypatch):
     result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
     assert (tmp_path / ".codeatrium" / "memory.db").exists()
+
+
+def test_init_prints_banner(tmp_path, monkeypatch):
+    """init 実行時に ASCII アートバナーとサブタイトルが表示される"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0
+    # pagga figlet バナー特有の文字列
+    assert "░█▀▀░█▀█░█▀▄" in result.output
+    assert "memory palace for AI coding agents" in result.output
 
 
 def test_init_creates_claude_md_section(tmp_path, monkeypatch):
@@ -153,6 +171,24 @@ def test_init_already_initialized(tmp_path, monkeypatch):
     runner.invoke(app, ["init"])
     result = runner.invoke(app, ["init"])
     assert "Already initialized" in result.output
+
+
+def test_init_non_git_does_not_traverse_parent(tmp_path, monkeypatch):
+    """git 外ディレクトリで init すると親の .codeatrium を拾わない"""
+    # 親に .codeatrium を配置
+    parent_db = tmp_path / ".codeatrium" / "memory.db"
+    parent_db.parent.mkdir()
+    parent_db.touch()
+
+    # 子ディレクトリ（git なし）で init
+    child = tmp_path / "child_project"
+    child.mkdir()
+    monkeypatch.chdir(child)
+
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0
+    assert "Initialized" in result.output
+    assert (child / ".codeatrium" / "memory.db").exists()
 
 
 # ---- skip-existing ----
@@ -359,3 +395,246 @@ def test_init_distill_priority_recent(tmp_path, monkeypatch):
     assert len(target) == 1
     # 最新の ply_start が残っている（skipped のどれよりも大きい）
     assert all(target[0]["ply_start"] > s["ply_start"] for s in skipped)
+
+
+# ---- invalid input handling (re-prompt) ----
+
+
+def test_init_prompt_invalid_choice_reprompts(tmp_path, monkeypatch):
+    """_resolve_skip_count で無効入力 → 再プロンプト → 有効値で続行"""
+    _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
+
+    # min_chars [1]=50 → skip_count "99"(無効) → 再入力 [1]=Skip all
+    result = runner.invoke(app, ["init"], input="1\n99\n1\n")
+    assert result.exit_code == 0
+    assert "Invalid choice" in result.output
+
+    db = tmp_path / ".codeatrium" / "memory.db"
+    con = get_connection(db)
+    skipped = con.execute(
+        "SELECT COUNT(*) FROM exchanges WHERE distilled_at = 'skipped'"
+    ).fetchone()[0]
+    null_count = con.execute(
+        "SELECT COUNT(*) FROM exchanges WHERE distilled_at IS NULL"
+    ).fetchone()[0]
+    con.close()
+    # 無効入力で暴発せず、正しく全件 skipped になっている
+    assert skipped > 0
+    assert null_count == 0
+
+
+def test_init_distill_now_accepts_n_alias(tmp_path, monkeypatch):
+    """_ask_run_distill_now が 'n' を No として受け付ける"""
+    _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
+
+    # min_chars [1]=50 → skip [3]=全件蒸留 → distill now "n"=No
+    result = runner.invoke(app, ["init"], input="1\n3\nn\n")
+    assert result.exit_code == 0
+    # "n" が受理されたので再プロンプトは出ない & 蒸留も走らない
+    assert "Invalid choice. Please enter 1/2/y/n" not in result.output
+    assert "Running distillation" not in result.output
+
+
+def test_init_custom_count_out_of_range_reprompts(tmp_path, monkeypatch):
+    """Custom 件数プロンプトで範囲外 → 再入力 → 有効値で続行"""
+    _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
+
+    # min_chars [1]=50 → skip [4]=custom → "0"(範囲外) → "2"(有効) → priority [1]=recent → distill now "n"
+    result = runner.invoke(app, ["init"], input="1\n4\n0\n2\n1\nn\n")
+    assert result.exit_code == 0
+    assert "Must be ≥ 1" in result.output
+
+    db = tmp_path / ".codeatrium" / "memory.db"
+    con = get_connection(db)
+    null_count = con.execute(
+        "SELECT COUNT(*) FROM exchanges WHERE distilled_at IS NULL"
+    ).fetchone()[0]
+    con.close()
+    # 最終的に 2 件が蒸留対象になっている
+    assert null_count == 2
+
+
+def test_init_custom_count_over_total_reprompts(tmp_path, monkeypatch):
+    """Custom 件数プロンプトで total 超え → 再入力"""
+    _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
+
+    # total=3 なのに 99 を指定 → 再入力 → 3 で全件蒸留扱い
+    result = runner.invoke(app, ["init"], input="1\n4\n99\n3\nn\n")
+    assert result.exit_code == 0
+    assert "Must be ≤ 3" in result.output
+
+
+# ---- execution-phase cleanup ----
+
+
+def test_init_cleanup_on_execution_failure(tmp_path, monkeypatch):
+    """実行フェーズで例外が出たら .codeatrium/ がクリーンアップされる"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    def _boom(_root):
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_claude_md", _boom)
+
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 1
+    assert "init failed" in result.output
+    assert "simulated failure" in result.output
+    # 部分状態が掃除されている
+    assert not (tmp_path / ".codeatrium").exists()
+
+
+def test_init_cleanup_on_keyboard_interrupt(tmp_path, monkeypatch):
+    """Ctrl-C で .codeatrium/ がクリーンアップされる"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    def _interrupt(_root):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_claude_md", _interrupt)
+
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 130
+    assert "Interrupted" in result.output
+    assert not (tmp_path / ".codeatrium").exists()
+
+
+def test_init_per_file_index_error_continues(tmp_path, monkeypatch):
+    """1ファイルの index_file 失敗で init 全体は落ちず、DB は残る"""
+    _setup_project_with_sessions(
+        tmp_path, monkeypatch, num_files=2, exchanges_per_file=3
+    )
+
+    import codeatrium.indexer as idx_mod
+
+    original = idx_mod.index_file
+    call_count = {"n": 0}
+
+    def _flaky(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("flaky fs error")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr("codeatrium.indexer.index_file", _flaky)
+
+    # --skip-existing でも min_chars プロンプトは出る → "1"=50
+    result = runner.invoke(app, ["init", "--skip-existing"], input="1\n")
+    assert result.exit_code == 0
+    assert "flaky fs error" in result.output
+    # 2ファイル目は成功し DB は残っている
+    assert (tmp_path / ".codeatrium" / "memory.db").exists()
+
+
+# ---- hook auto-install ----
+
+
+def test_init_installs_hooks_by_default(tmp_path, monkeypatch):
+    """init 完了時に install_hooks が呼ばれる"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    calls = []
+
+    def _spy(batch_limit: int = 20):
+        calls.append(batch_limit)
+        return True, "Installed hooks."
+
+    monkeypatch.setattr("codeatrium.hooks.install_hooks", _spy)
+
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert "Installed hooks." in result.output
+
+
+def test_init_no_hooks_flag_skips_install(tmp_path, monkeypatch):
+    """--no-hooks で install_hooks が呼ばれない"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    calls = []
+
+    def _spy(batch_limit: int = 20):
+        calls.append(batch_limit)
+        return True, "Installed hooks."
+
+    monkeypatch.setattr("codeatrium.hooks.install_hooks", _spy)
+
+    result = runner.invoke(app, ["init", "--no-hooks"])
+    assert result.exit_code == 0
+    assert calls == []
+    assert "Installed hooks." not in result.output
+
+
+def test_init_hook_install_failure_warns_but_succeeds(tmp_path, monkeypatch):
+    """install_hooks が例外を投げても init は成功する（警告のみ）"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    def _boom(batch_limit: int = 20):
+        raise RuntimeError("permission denied")
+
+    monkeypatch.setattr("codeatrium.hooks.install_hooks", _boom)
+
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 0  # init 自体は成功
+    assert "Hook install failed" in result.output
+    assert "permission denied" in result.output
+    # DB は残っている
+    assert (tmp_path / ".codeatrium" / "memory.db").exists()
+
+
+# ---- EmbedderSetupError 環境エラーの友好的ハンドリング ----
+
+
+def test_embedder_setup_error_wraps_import_failure(monkeypatch):
+    """sentence_transformers ロード失敗が EmbedderSetupError に包まれる"""
+    import sys
+    import types
+
+    from codeatrium.embedder import Embedder, EmbedderSetupError
+
+    fake = types.ModuleType("sentence_transformers")
+
+    class _Broken:
+        def __init__(self, *args, **kwargs):
+            raise AttributeError("_ARRAY_API not found")
+
+    fake.SentenceTransformer = _Broken  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake)
+    # ソケットを無効化して必ず直接ロード経路に入れる
+    monkeypatch.setenv("CODEATRIUM_NO_SOCK", "1")
+
+    with pytest.raises(EmbedderSetupError, match="numpy"):
+        Embedder().embed_passage("test")
+
+
+def test_init_distill_embedder_setup_error_friendly_message(tmp_path, monkeypatch):
+    """init 中の蒸留で EmbedderSetupError が出たら友好的メッセージが出る"""
+    _setup_project_with_sessions(
+        tmp_path, monkeypatch, num_files=1, exchanges_per_file=3
+    )
+
+    from codeatrium.embedder import EmbedderSetupError
+
+    def _raising_distill_all(*_args, **_kwargs):
+        raise EmbedderSetupError(
+            "Embedding model failed to load: _ARRAY_API not found\n"
+            "  Likely cause: numpy / pyarrow binary incompatibility.\n"
+            "  Fix: pip install 'numpy<2'  or  pip install -U pyarrow"
+        )
+
+    monkeypatch.setattr("codeatrium.distiller.distill_all", _raising_distill_all)
+
+    # min_chars=50, Distill all, Yes-run-now
+    result = runner.invoke(app, ["init"], input="1\n3\ny\n")
+    assert result.exit_code == 1
+    # 友好的メッセージ
+    assert "Embedding model failed to load" in result.output
+    assert "numpy<2" in result.output
+    assert "loci distill" in result.output
+    # DB はクリーンアップされず残っている（索引済み）
+    assert (tmp_path / ".codeatrium" / "memory.db").exists()

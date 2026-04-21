@@ -110,6 +110,8 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50) -> list[Exchange]:
     trivial（min_chars 文字未満）は除外する。
     """
     entries: list[dict] = []
+    if not jsonl_path.exists():
+        return []
     with jsonl_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
