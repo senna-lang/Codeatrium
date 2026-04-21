@@ -37,6 +37,10 @@ CONNECT_TIMEOUT = 2.0  # ソケット接続タイムアウト
 RECV_TIMEOUT = 30.0  # 埋め込み受信タイムアウト
 
 
+class EmbedderSetupError(Exception):
+    """モデル/依存セットアップ失敗。per-row ではなく環境レベルの問題を示す。"""
+
+
 def _sock_path_from_env() -> Path | None:
     """環境変数 CODEATRIUM_SOCK_PATH があれば優先使用（テスト用）。
     CODEATRIUM_NO_SOCK=1 の場合はソケット無効（サーバー内自己接続デッドロック防止）。
@@ -130,9 +134,16 @@ class Embedder:
     def _ensure_model(self) -> None:
         """直接モデルをロードする（ソケット不使用時のフォールバック）"""
         if self._model is None:
-            from sentence_transformers import SentenceTransformer
+            try:
+                from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(MODEL_NAME)
+                self._model = SentenceTransformer(MODEL_NAME)
+            except Exception as exc:
+                raise EmbedderSetupError(
+                    f"Embedding model failed to load: {exc}\n"
+                    "  Likely cause: numpy / pyarrow binary incompatibility.\n"
+                    "  Fix: pip install 'numpy<2'  or  pip install -U pyarrow"
+                ) from exc
 
     def _embed_via_socket_or_direct(
         self, text: str, req_type: str, prefix: str

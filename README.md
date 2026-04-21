@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="codeatrium — memory palace for AI coding agents" width="560">
+</p>
+
 # Codeatrium
 
 [![CI](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml/badge.svg)](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml)
@@ -47,12 +51,11 @@ Requires Python 3.11+.
 ## Quick Start
 
 ```bash
-# Initialize in project root
+# Initialize in project root (also registers Claude Code hooks)
 loci init
-
-# Install hooks for automatic indexing
-loci hook install
 ```
+
+`loci init` now handles everything in one step — database setup, existing session detection, and Claude Code hook registration. Pass `--no-hooks` to skip hook registration. If init fails partway through, `.codeatrium/` is cleaned up automatically so re-running is safe.
 
 When running `loci init`, if past session logs are detected, you'll be prompted with:
 
@@ -65,7 +68,9 @@ When running `loci init`, if past session logs are detected, you'll be prompted 
    - Distill last 50 (recent history only)
    - Distill all (everything — high token cost)
    - Custom (specify a number)
-3. **Run distillation now?** — Choose No to defer to the next session start
+3. **Run distillation now?** — Accepts `1`/`2`/`y`/`n`/`yes`/`no`. Choose No to defer to the next session start.
+
+Invalid input on any prompt re-prompts instead of silently falling back to a default.
 
 ## Agent Instructions
 
@@ -78,7 +83,7 @@ Agent instructions are injected automatically — no manual setup required:
 
 | Command | Description |
 |---------|-------------|
-| `loci init` | Initialize `.codeatrium/` in project root |
+| `loci init` | Initialize `.codeatrium/` and register Claude Code hooks (`--no-hooks` to skip) |
 | `loci index` | Index new session logs |
 | `loci distill [--limit N]` | Distill undistilled exchanges via LLM |
 | `loci search "query" --json` | Semantic search (agent-facing) |
@@ -86,11 +91,11 @@ Agent instructions are injected automatically — no manual setup required:
 | `loci show "<ref>" --json` | Retrieve verbatim conversation |
 | `loci status` | Show index state |
 | `loci server start/stop/status` | Embedding server management |
-| `loci hook install` | Register hooks in Claude Code settings |
+| `loci hook install` | Re-register hooks (normally already done by `loci init`) |
 
 ## Automation (Claude Code Hooks)
 
-After `loci hook install`, everything runs automatically:
+After `loci init` (or `loci hook install`), everything runs automatically:
 
 | Hook | Trigger | Command |
 |------|---------|---------|

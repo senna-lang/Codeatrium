@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codeatrium"
-version = "0.1.0"
+version = "0.2.0"
 description = "Memory palace for AI coding agents — index sessions, recall code context in <0.2s"
 readme = "README.md"
 license = { text = "MIT" }

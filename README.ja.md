@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="codeatrium — memory palace for AI coding agents" width="560">
+</p>
+
 # Codeatrium
 
 [![CI](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml/badge.svg)](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml)
@@ -47,12 +51,11 @@ Python 3.11 以上が必要です。
 ## クイックスタート
 
 ```bash
-# プロジェクトルートで初期化
+# プロジェクトルートで初期化（Claude Code フックも自動登録）
 loci init
-
-# 自動インデックスのフックをインストール
-loci hook install
 ```
+
+`loci init` は DB 初期化・既存セッション検出・Claude Code フック登録をすべて一度に済ませます。`--no-hooks` を付けるとフック登録をスキップします。途中で失敗した場合は `.codeatrium/` が自動で掃除されるので、再実行して問題ありません。
 
 `loci init` を実行すると、過去のセッションログが検出された場合に以下の質問が表示されます:
 
@@ -65,7 +68,9 @@ loci hook install
    - Distill last 50（直近の履歴のみ）
    - Distill all（全件、トークン消費あり）
    - Custom（件数を指定）
-3. **蒸留を今すぐ実行するか** — No を選ぶと次回セッション開始時に自動実行されます
+3. **蒸留を今すぐ実行するか** — `1`/`2`/`y`/`n`/`yes`/`no` を受理。No を選ぶと次回セッション開始時に自動実行されます。
+
+各プロンプトで無効な入力をした場合、サイレントにデフォルトへ倒れず再入力を求めます。
 
 ## エージェント向けインストラクション
 
@@ -78,7 +83,7 @@ loci hook install
 
 | コマンド | 説明 |
 |---------|------|
-| `loci init` | プロジェクトルートに `.codeatrium/` を初期化 |
+| `loci init` | `.codeatrium/` を初期化し Claude Code フックを登録（`--no-hooks` で省略可） |
 | `loci index` | 新しいセッションログをインデックス |
 | `loci distill [--limit N]` | 未蒸留の exchange を LLM で蒸留 |
 | `loci search "クエリ" --json` | セマンティック検索（エージェント向け） |
@@ -86,11 +91,11 @@ loci hook install
 | `loci show "<ref>" --json` | 会話原文を取得 |
 | `loci status` | インデックス状態を表示 |
 | `loci server start/stop/status` | 埋め込みサーバー管理 |
-| `loci hook install` | Claude Code の設定にフックを登録 |
+| `loci hook install` | フックを再登録（通常は `loci init` で済む） |
 
 ## 自動化（Claude Code フック）
 
-`loci hook install` 後、すべて自動で動作します:
+`loci init`（または `loci hook install`）後、すべて自動で動作します:
 
 | フック | トリガー | コマンド |
 |--------|---------|---------|
