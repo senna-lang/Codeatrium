@@ -485,6 +485,30 @@ def test_init_cleanup_on_execution_failure(tmp_path, monkeypatch):
     assert not (tmp_path / ".codeatrium").exists()
 
 
+def test_init_preserves_preexisting_dir_on_failure(tmp_path, monkeypatch):
+    """実行フェーズ失敗時、.codeatrium/ が既存なら削除しない"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    # ユーザーが事前に .codeatrium/ と config.toml を作成しておく
+    codeatrium_dir = tmp_path / ".codeatrium"
+    codeatrium_dir.mkdir()
+    custom_config = codeatrium_dir / "config.toml"
+    custom_config.write_text("[distill]\nmodel = \"claude-opus-4-7\"\n")
+
+    def _boom(_root):
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_claude_md", _boom)
+
+    result = runner.invoke(app, ["init"])
+    assert result.exit_code == 1
+    # pre-existing .codeatrium/ とその中の config.toml は削除されていない
+    assert codeatrium_dir.exists()
+    assert custom_config.exists()
+    assert custom_config.read_text() == "[distill]\nmodel = \"claude-opus-4-7\"\n"
+
+
 def test_init_cleanup_on_keyboard_interrupt(tmp_path, monkeypatch):
     """Ctrl-C で .codeatrium/ がクリーンアップされる"""
     monkeypatch.chdir(tmp_path)

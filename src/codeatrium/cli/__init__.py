@@ -120,6 +120,7 @@ def init(
     # --- 実行フェーズ（ここから DB・ファイルを作成） ---
     # 失敗時は作成した .codeatrium/ を掃除して次回再実行できる状態に戻す
     codeatrium_dir = db.parent
+    dir_preexisted = codeatrium_dir.exists()
     try:
         init_db(db)
 
@@ -191,12 +192,14 @@ def init(
         typer.echo(
             "\n⚠ Interrupted. Cleaning up partial state...", err=True
         )
-        shutil.rmtree(codeatrium_dir, ignore_errors=True)
+        if not dir_preexisted:
+            shutil.rmtree(codeatrium_dir, ignore_errors=True)
         raise typer.Exit(code=130) from None
     except Exception as exc:  # noqa: BLE001
         typer.echo(f"\n⚠ init failed: {exc}", err=True)
         typer.echo("Cleaning up partial state...", err=True)
-        shutil.rmtree(codeatrium_dir, ignore_errors=True)
+        if not dir_preexisted:
+            shutil.rmtree(codeatrium_dir, ignore_errors=True)
         raise typer.Exit(code=1) from None
 
     # --- Hook 自動登録（opt-out 可、失敗は警告のみで続行） ---
