@@ -42,7 +42,7 @@ def _print_banner() -> None:
     for line, color in zip(_BANNER.split("\n"), _GRADIENT_BLUE, strict=True):
         content.append(line + "\n", style=f"bold {color}")
     content.append("\n")
-    content.append("⦿ ", style="bright_cyan")
+    content.append("● ", style="bright_cyan")
     content.append("memory palace for AI coding agents", style="dim")
     content.append("   ")
     content.append(f"v{__version__}", style="dim cyan")
