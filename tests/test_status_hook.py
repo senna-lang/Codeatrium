@@ -177,6 +177,14 @@ def test_prime_outputs_instructions():
     assert "loci show" in result.output
 
 
+def test_prime_silent_when_uninitialized(tmp_path, monkeypatch):
+    """.codeatrium/ がないディレクトリでは何も出力せず exit 0 で抜ける"""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["prime"])
+    assert result.exit_code == 0
+    assert result.output == ""
+
+
 def test_hook_install_merges_existing_settings(tmp_path, monkeypatch):
     monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
     settings_path = tmp_path / ".claude" / "settings.json"

@@ -59,7 +59,15 @@ def prime() -> None:
 
     SessionStart Hook で自動実行され、エージェントのコンテキストウィンドウに
     使い方を注入する。CLAUDE.md にテンプレートを貼る必要がなくなる。
+
+    未初期化プロジェクト（.codeatrium/ なし）では hook を無音で抜ける。
+    エージェントのコンテキストや stderr を汚さないため。
     """
+    from codeatrium.paths import CODEATRIUM_DIR, find_project_root
+
+    root = find_project_root()
+    if not (root / CODEATRIUM_DIR).exists():
+        return
     typer.echo(PRIME_TEXT)
 
 
