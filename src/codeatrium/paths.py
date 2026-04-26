@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -24,10 +25,14 @@ def git_root() -> Path | None:
         return None
 
 
-def find_project_root() -> Path:
+def find_project_root(notify: bool = True) -> Path:
     """.codeatrium/ を探してプロジェクトルートを返す。
     検索順: cwd → 親ディレクトリ（git root まで）
     git root を超えて遡らないことでプロジェクト外の DB を拾わない。
+
+    cwd 以外（親）で `.codeatrium/` を発見した場合は stderr に注意書きを出す。
+    意図せず親プロジェクトの DB を共有していることに気付けるようにするため。
+    notify=False で抑止可能（テスト・機械処理用途）。
     """
     cwd = Path.cwd()
     root = git_root()
@@ -35,6 +40,11 @@ def find_project_root() -> Path:
         candidates = [cwd, *cwd.parents]
         for p in candidates:
             if (p / CODEATRIUM_DIR).exists():
+                if notify and p != cwd:
+                    print(
+                        f"Note: using .codeatrium/ from parent directory: {p}",
+                        file=sys.stderr,
+                    )
                 return p
             if p == root:
                 break
