@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from codeatrium.cli import app
@@ -197,3 +199,133 @@ def test_hook_install_merges_existing_settings(tmp_path, monkeypatch):
     # 既存設定が保持されている
     assert data.get("model") == "opus"
     assert "hooks" in data
+
+
+# ---- hook install atomic + backup ----
+
+
+def test_write_settings_atomic_bak(tmp_path, monkeypatch):
+    """install 時に既存 settings.json を .bak にバックアップする"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"model": "opus"}))
+
+    result = runner.invoke(app, ["hook", "install"])
+    assert result.exit_code == 0
+
+    bak_path = settings_path.with_suffix(".json.bak")
+    assert bak_path.exists()
+    bak_data = json.loads(bak_path.read_text())
+    assert bak_data.get("model") == "opus"
+
+
+def test_write_settings_failure_keeps_original_intact(tmp_path, monkeypatch):
+    """書き込み失敗(例外注入)時に元 settings.json が無傷であることを確認"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    initial_content = {"model": "opus", "existing": True}
+    settings_path.write_text(json.dumps(initial_content))
+
+    # os.replace を例外を投げる mock に patch する
+    with patch("codeatrium.hooks.os.replace", side_effect=OSError("disk full")):
+        from codeatrium.hooks import install_hooks
+        # install_hooks() が OSError を送出することを確認
+        with pytest.raises(OSError):
+            install_hooks()
+
+    # 元の settings.json が無傷であることを assert
+    assert settings_path.exists()
+    original_data = json.loads(settings_path.read_text())
+    assert original_data == initial_content
+
+
+def test_write_settings_atomic_no_bak_when_missing(tmp_path, monkeypatch):
+    """settings.json が存在しない場合は .bak は作成されない"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+
+    result = runner.invoke(app, ["hook", "install"])
+    assert result.exit_code == 0
+
+    bak_path = settings_path.with_suffix(".json.bak")
+    assert not bak_path.exists()
+
+
+# ---- hook uninstall ----
+
+
+def test_hook_uninstall_removes_codeatrium_hooks(tmp_path, monkeypatch):
+    """uninstall は codeatrium フックを削除する"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+
+    runner.invoke(app, ["hook", "install"])
+    result = runner.invoke(app, ["hook", "uninstall"])
+    assert result.exit_code == 0
+
+    data = json.loads(settings_path.read_text())
+    # hooks がないか、Stop/SessionStart/SessionEnd に loci コマンドを含むエントリが無いこと
+    if "hooks" in data:
+        for hook_type in ["Stop", "SessionStart", "SessionEnd"]:
+            if hook_type in data["hooks"]:
+                entries = data["hooks"][hook_type]
+                for entry in entries:
+                    for h in entry.get("hooks", []):
+                        assert "loci" not in h.get("command", "")
+
+
+def test_hook_uninstall_preserves_user_hooks(tmp_path, monkeypatch):
+    """uninstall はユーザーフックを保持する"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(
+        json.dumps({
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "my-tool run"}]}]
+            }
+        })
+    )
+
+    runner.invoke(app, ["hook", "install"])
+    runner.invoke(app, ["hook", "uninstall"])
+
+    data = json.loads(settings_path.read_text())
+    assert "Stop" in data["hooks"]
+    stop_entries = data["hooks"]["Stop"]
+    all_commands = [h for entry in stop_entries for h in entry.get("hooks", [])]
+    assert any("my-tool run" in h.get("command", "") for h in all_commands)
+
+
+def test_hook_uninstall_idempotent(tmp_path, monkeypatch):
+    """uninstall は複数回実行しても安全（べき等）"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+
+    # install なしで直接 uninstall
+    result1 = runner.invoke(app, ["hook", "uninstall"])
+    assert result1.exit_code == 0
+    assert "Nothing to uninstall" in result1.output or "No" in result1.output
+
+    # 2回目も同じ
+    result2 = runner.invoke(app, ["hook", "uninstall"])
+    assert result2.exit_code == 0
+    assert "Nothing to uninstall" in result2.output or "No" in result2.output
+
+
+def test_hook_uninstall_empty_matcher_removed(tmp_path, monkeypatch):
+    """uninstall 後、空の matcher を持つエントリは削除される"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+
+    runner.invoke(app, ["hook", "install"])
+    runner.invoke(app, ["hook", "uninstall"])
+
+    data = json.loads(settings_path.read_text())
+    if "hooks" in data and "SessionStart" in data["hooks"]:
+        entries = data["hooks"]["SessionStart"]
+        for entry in entries:
+            # 各エントリは空でない hooks を持つこと
+            hooks = entry.get("hooks", [])
+            assert len(hooks) > 0

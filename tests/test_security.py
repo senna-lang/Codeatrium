@@ -24,9 +24,10 @@ def test_hooks_quotes_loci_path_with_spaces() -> None:
     fake_path = "/Users/test user/venvs/my env/bin/loci"
     with patch("codeatrium.hooks.loci_bin", return_value=fake_path):
         with patch("codeatrium.hooks.Path") as mock_path_cls:
-            mock_settings = mock_path_cls.home.return_value / ".claude" / "settings.json"
-            mock_settings.exists.return_value = False
-            _, msg = install_hooks()
+            with patch("codeatrium.hooks._write_settings"):
+                mock_settings = mock_path_cls.home.return_value / ".claude" / "settings.json"
+                mock_settings.exists.return_value = False
+                _, msg = install_hooks()
     # shlex.quote はシングルクオートでラップする
     assert "'" in msg or "\\" in msg
 
@@ -35,9 +36,10 @@ def test_hooks_batch_limit_cast_to_int() -> None:
     """batch_limit が int にキャストされることを確認"""
     with patch("codeatrium.hooks.loci_bin", return_value="/usr/bin/loci"):
         with patch("codeatrium.hooks.Path") as mock_path_cls:
-            mock_settings = mock_path_cls.home.return_value / ".claude" / "settings.json"
-            mock_settings.exists.return_value = False
-            _, msg = install_hooks(batch_limit=20)
+            with patch("codeatrium.hooks._write_settings"):
+                mock_settings = mock_path_cls.home.return_value / ".claude" / "settings.json"
+                mock_settings.exists.return_value = False
+                _, msg = install_hooks(batch_limit=20)
     assert "--limit 20" in msg
 
 
