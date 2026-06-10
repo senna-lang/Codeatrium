@@ -94,6 +94,7 @@ def extract_files_touched(
 
 def distill_exchange(
     exchange_id: str,
+    db_path: Path,
     user_content: str,
     agent_content: str,
     ply_start: int,
@@ -101,7 +102,20 @@ def distill_exchange(
     model: str | None = None,
     project_root: str | None = None,
 ) -> PalaceObject:
-    """1つの exchange を蒸留して PalaceObject を返す"""
+    """1つの exchange を蒸留して PalaceObject を返す
+
+    Parameters:
+        exchange_id: exchange の ID
+        db_path: データベースファイルパス
+        user_content: ユーザーコンテンツ
+        agent_content: エージェントコンテンツ
+        ply_start: 開始ply
+        ply_end: 終了ply
+        model: 蒸留に使うモデル（デフォルトはconfig.toml から）
+        project_root: プロジェクトルート（ファイルパスフィルタ用）
+    """
+    from codeatrium.db import get_connection
+
     messages_text = (user_content + "\n" + agent_content)[:4000]
     prompt = DISTILL_PROMPT_TEMPLATE.format(
         ply_start=ply_start,
@@ -109,9 +123,35 @@ def distill_exchange(
         messages_text=messages_text,
     )
     raw = call_claude(prompt, model=model)
-    files_touched = extract_files_touched(
+
+    # PRIMARY: exchange_files から読み込み
+    con = get_connection(db_path)
+    rows = con.execute(
+        "SELECT file_path FROM exchange_files WHERE exchange_id=?", (exchange_id,)
+    ).fetchall()
+    con.close()
+    primary_paths = [row["file_path"] for row in rows]
+
+    # FALLBACK: regex 抽出
+    fallback_paths = extract_files_touched(
         user_content, agent_content, project_root=project_root
     )
+
+    # Merge: primary パスをフィルタして、fallback との重複排除
+    root_prefix = (project_root.rstrip("/") + "/") if project_root else None
+    seen: set[str] = set()
+    files_touched: list[str] = []
+
+    for path in primary_paths:
+        if path not in seen and not _is_external_path(path, root_prefix):
+            seen.add(path)
+            files_touched.append(path)
+
+    for path in fallback_paths:
+        if path not in seen:
+            seen.add(path)
+            files_touched.append(path)
+
     return PalaceObject(
         exchange_core=raw["exchange_core"],
         specific_context=raw["specific_context"],
@@ -140,40 +180,53 @@ def save_palace_object(
     con = get_connection(db_path)
     con.execute("BEGIN")
     try:
-        con.execute(
-            """
-            INSERT OR IGNORE INTO palace_objects
-                (id, exchange_id, exchange_core, specific_context, distill_text)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                palace_id,
-                exchange_id,
-                palace.exchange_core,
-                palace.specific_context,
-                distill_text,
-            ),
-        )
+        existing = con.execute(
+            "SELECT 1 FROM palace_objects WHERE id = ?", (palace_id,)
+        ).fetchone()
+        if existing is None:
+            con.execute(
+                """
+                INSERT INTO palace_objects
+                    (id, exchange_id, exchange_core, specific_context, distill_text)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    palace_id,
+                    exchange_id,
+                    palace.exchange_core,
+                    palace.specific_context,
+                    distill_text,
+                ),
+            )
+        verify = con.execute(
+            "SELECT 1 FROM palace_objects WHERE id = ?", (palace_id,)
+        ).fetchone()
+        if verify is None:
+            raise RuntimeError(f"palace_objects INSERT failed for id={palace_id}")
 
         for room in palace.room_assignments:
             dedup = _sha256(f"{room['room_type']}:{room['room_key']}")
             room_id = _sha256(f"{palace_id}:{dedup}")
-            con.execute(
-                """
-                INSERT OR IGNORE INTO rooms
-                    (id, palace_object_id, room_type, room_key, room_label, relevance, dedup_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    room_id,
-                    palace_id,
-                    room["room_type"],
-                    room["room_key"],
-                    room["room_label"],
-                    room["relevance"],
-                    dedup,
-                ),
-            )
+            room_exists = con.execute(
+                "SELECT 1 FROM rooms WHERE id = ?", (room_id,)
+            ).fetchone()
+            if room_exists is None:
+                con.execute(
+                    """
+                    INSERT INTO rooms
+                        (id, palace_object_id, room_type, room_key, room_label, relevance, dedup_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        room_id,
+                        palace_id,
+                        room["room_type"],
+                        room["room_key"],
+                        room["room_label"],
+                        room["relevance"],
+                        dedup,
+                    ),
+                )
 
         blob = embedding.astype(np.float32).tobytes()
         exists = con.execute(
@@ -189,6 +242,18 @@ def save_palace_object(
         if resolver is None:
             from codeatrium.resolver import SymbolResolver
             resolver = SymbolResolver()
+
+        # Fetch exchange body text for symbol body-mention filter
+        ex_row = con.execute(
+            "SELECT user_content, agent_content FROM exchanges WHERE id = ?",
+            (exchange_id,),
+        ).fetchone()
+        body_text = (
+            (ex_row["user_content"] + ex_row["agent_content"])
+            if ex_row is not None
+            else ""
+        )
+
         for file_str in palace.files_touched:
             if symbol_cache is not None and file_str in symbol_cache:
                 syms = symbol_cache[file_str]
@@ -197,25 +262,36 @@ def save_palace_object(
                 if symbol_cache is not None:
                     symbol_cache[file_str] = syms
             for sym in syms:
-                sym_id = _sha256(f"{sym.symbol_name}:{sym.file_path}")
-                con.execute(
-                    """
-                    INSERT OR IGNORE INTO symbols
-                        (id, palace_object_id, symbol_name, symbol_kind,
-                         file_path, signature, line, dedup_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        sym_id,
-                        palace_id,
-                        sym.symbol_name,
-                        sym.symbol_kind,
-                        sym.file_path,
-                        sym.signature,
-                        sym.line,
-                        sym_id,
-                    ),
-                )
+                # Body-mention filter: skip symbol if not mentioned in exchange
+                if sym.symbol_name not in body_text:
+                    continue
+
+                # Compute sym_id with palace_id, dedup_hash separate
+                sym_id = _sha256(f"{sym.symbol_name}:{sym.file_path}:{palace_id}")
+                dedup_hash = _sha256(f"{sym.symbol_name}:{sym.file_path}")
+
+                sym_exists = con.execute(
+                    "SELECT 1 FROM symbols WHERE id = ?", (sym_id,)
+                ).fetchone()
+                if sym_exists is None:
+                    con.execute(
+                        """
+                        INSERT INTO symbols
+                            (id, palace_object_id, symbol_name, symbol_kind,
+                             file_path, signature, line, dedup_hash)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            sym_id,
+                            palace_id,
+                            sym.symbol_name,
+                            sym.symbol_kind,
+                            sym.file_path,
+                            sym.signature,
+                            sym.line,
+                            dedup_hash,
+                        ),
+                    )
 
         con.execute(
             "UPDATE exchanges SET distilled_at = ?, distill_status = 'distilled' WHERE id = ?",
@@ -286,6 +362,7 @@ def distill_all(
         try:
             palace = distill_exchange(
                 row["id"],
+                db_path,
                 row["user_content"],
                 row["agent_content"],
                 row["ply_start"],

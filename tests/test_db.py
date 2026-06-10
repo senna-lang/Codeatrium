@@ -2,6 +2,7 @@
 DB 初期化・スキーマのテスト
 """
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -415,7 +416,7 @@ def test_init_db_idempotent_user_version_4(tmp_path: Path) -> None:
 
     con = sqlite3.connect(db_path)
     user_version = con.execute("PRAGMA user_version").fetchone()[0]
-    assert user_version == 4
+    assert user_version == len(_MIGRATIONS)
     con.close()
 
 
@@ -484,3 +485,455 @@ def test_init_db_chmod_600(tmp_path: Path) -> None:
 
     mode_str = oct(db_path.stat().st_mode)[-3:]
     assert mode_str == "600"
+
+
+def test_migration_v5_creates_exchange_files(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+
+    # Create a raw sqlite3 DB with user_version=4 (post-v4, pre-v5)
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending'
+        )"""
+    )
+    raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
+    )
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
+    )
+    raw_con.execute(
+        """CREATE TABLE palace_objects (
+            id               TEXT PRIMARY KEY,
+            exchange_id      TEXT NOT NULL,
+            exchange_core    TEXT NOT NULL,
+            specific_context TEXT NOT NULL,
+            distill_text     TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE rooms (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            room_type        TEXT NOT NULL,
+            room_key         TEXT NOT NULL,
+            room_label       TEXT NOT NULL,
+            relevance        REAL NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE symbols (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,
+            symbol_kind      TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute("PRAGMA user_version = 4")
+    raw_con.commit()
+    raw_con.close()
+
+    # Run init_db which should run v5 migration
+    init_db(db_path)
+
+    # Verify exchange_files table exists
+    con = sqlite3.connect(db_path)
+    exchange_files_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='exchange_files'"
+    ).fetchone()
+    assert exchange_files_exists is not None
+
+    # Verify exchange_files columns
+    table_info = con.execute("PRAGMA table_info(exchange_files)").fetchall()
+    column_names = [col[1] for col in table_info]
+    assert "exchange_id" in column_names
+    assert "file_path" in column_names
+    con.close()
+
+
+def test_migration_v6_recomputes_symbol_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+
+    # Create a raw sqlite3 DB with user_version=5 (so only v6 and v7 run)
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending'
+        )"""
+    )
+    raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
+    )
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
+    )
+    raw_con.execute(
+        """CREATE TABLE palace_objects (
+            id               TEXT PRIMARY KEY,
+            exchange_id      TEXT NOT NULL,
+            exchange_core    TEXT NOT NULL,
+            specific_context TEXT NOT NULL,
+            distill_text     TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE rooms (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            room_type        TEXT NOT NULL,
+            room_key         TEXT NOT NULL,
+            room_label       TEXT NOT NULL,
+            relevance        REAL NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE symbols (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,
+            symbol_kind      TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+
+    # Insert palace_objects row so v7 doesn't delete the symbol as orphan
+    raw_con.execute(
+        "INSERT INTO palace_objects VALUES ('po1', 'ex1', 'c', 's', 'c\ns')"
+    )
+
+    # Insert symbol with OLD id formula: sha256("Sym:file.py")
+    old_id = hashlib.sha256(b"Sym:file.py").hexdigest()
+    raw_con.execute(
+        "INSERT INTO symbols VALUES (?, 'po1', 'Sym', 'function', 'file.py', 'def Sym', 1, ?)",
+        (old_id, old_id),
+    )
+
+    raw_con.execute("PRAGMA user_version = 5")
+    raw_con.commit()
+    raw_con.close()
+
+    # Run init_db which should run v6 and v7 migrations
+    init_db(db_path)
+
+    # Verify symbol id was recomputed with NEW formula: sha256("Sym:file.py:po1")
+    con = sqlite3.connect(db_path)
+    expected_new_id = hashlib.sha256(b"Sym:file.py:po1").hexdigest()
+    row = con.execute(
+        "SELECT id FROM symbols WHERE symbol_name='Sym'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == expected_new_id
+    con.close()
+
+
+def test_migration_v7_resets_orphan_distilled(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+
+    # Create a raw sqlite3 DB with user_version=6 (so only v7 runs)
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending'
+        )"""
+    )
+    raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
+    )
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
+    )
+    raw_con.execute(
+        """CREATE TABLE palace_objects (
+            id               TEXT PRIMARY KEY,
+            exchange_id      TEXT NOT NULL,
+            exchange_core    TEXT NOT NULL,
+            specific_context TEXT NOT NULL,
+            distill_text     TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE rooms (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            room_type        TEXT NOT NULL,
+            room_key         TEXT NOT NULL,
+            room_label       TEXT NOT NULL,
+            relevance        REAL NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE symbols (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,
+            symbol_kind      TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+
+    # Insert exchanges row with no palace_objects referencing it
+    raw_con.execute(
+        "INSERT INTO exchanges VALUES ('exX', 'conv1', 0, 1, 'user', 'agent', '2026-01-01', 'distilled')"
+    )
+
+    raw_con.execute("PRAGMA user_version = 6")
+    raw_con.commit()
+    raw_con.close()
+
+    # Run init_db which should run v7 migration
+    init_db(db_path)
+
+    # Verify exchanges row distill_status and distilled_at were reset
+    con = sqlite3.connect(db_path)
+    row = con.execute(
+        "SELECT distill_status, distilled_at FROM exchanges WHERE id='exX'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "pending"
+    assert row[1] is None
+    con.close()
+
+
+def test_migration_v7_removes_orphan_symbols(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+
+    # Create a raw sqlite3 DB with user_version=6 (so only v7 runs)
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending'
+        )"""
+    )
+    raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
+    )
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
+    )
+    raw_con.execute(
+        """CREATE TABLE palace_objects (
+            id               TEXT PRIMARY KEY,
+            exchange_id      TEXT NOT NULL,
+            exchange_core    TEXT NOT NULL,
+            specific_context TEXT NOT NULL,
+            distill_text     TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE rooms (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            room_type        TEXT NOT NULL,
+            room_key         TEXT NOT NULL,
+            room_label       TEXT NOT NULL,
+            relevance        REAL NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE symbols (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,
+            symbol_kind      TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+
+    # Insert symbol with palace_object_id="ghost" but NO palace_objects row with that id
+    ghost_id = hashlib.sha256(b"Ghost:test.py").hexdigest()
+    raw_con.execute(
+        "INSERT INTO symbols VALUES (?, 'ghost', 'Ghost', 'function', 'test.py', 'def Ghost', 1, ?)",
+        (ghost_id, ghost_id),
+    )
+
+    raw_con.execute("PRAGMA user_version = 6")
+    raw_con.commit()
+    raw_con.close()
+
+    # Run init_db which should run v7 migration
+    init_db(db_path)
+
+    # Verify orphan symbol was deleted
+    con = sqlite3.connect(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    assert count == 0
+    con.close()
+
+
+def test_migration_v7_removes_bm25_text_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+
+    # Create a raw sqlite3 DB with user_version=6 (so only v7 runs)
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending'
+        )"""
+    )
+    raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
+    )
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
+    )
+    raw_con.execute(
+        """CREATE TABLE palace_objects (
+            id               TEXT PRIMARY KEY,
+            exchange_id      TEXT NOT NULL,
+            exchange_core    TEXT NOT NULL,
+            specific_context TEXT NOT NULL,
+            distill_text     TEXT NOT NULL,
+            bm25_text        TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE rooms (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            room_type        TEXT NOT NULL,
+            room_key         TEXT NOT NULL,
+            room_label       TEXT NOT NULL,
+            relevance        REAL NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE symbols (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,
+            symbol_kind      TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+
+    # Insert palace_objects row with bm25_text
+    raw_con.execute(
+        "INSERT INTO palace_objects VALUES ('po1', 'ex1', 'c', 's', 'c\ns', 'legacy')"
+    )
+
+    raw_con.execute("PRAGMA user_version = 6")
+    raw_con.commit()
+    raw_con.close()
+
+    # Run init_db which should run v7 migration
+    init_db(db_path)
+
+    # Verify bm25_text column was removed
+    con = sqlite3.connect(db_path)
+    table_info = con.execute("PRAGMA table_info(palace_objects)").fetchall()
+    column_names = [col[1] for col in table_info]
+    assert "bm25_text" not in column_names
+
+    # Verify palace_objects row still exists
+    row = con.execute(
+        "SELECT id FROM palace_objects WHERE id='po1'"
+    ).fetchone()
+    assert row is not None
+    con.close()

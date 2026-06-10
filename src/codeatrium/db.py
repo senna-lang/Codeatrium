@@ -13,6 +13,7 @@ SQLite DB の初期化・スキーマ定義・接続管理
   _MIGRATIONS    - 逐次マイグレーション関数リスト（user_version ベース）
 """
 
+import hashlib
 import os
 import sqlite3
 from collections.abc import Callable
@@ -93,11 +94,81 @@ def _migrate_v4_add_indexes(con: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v5_add_exchange_files(con: sqlite3.Connection) -> None:
+    """Migration v5: exchange_files テーブルを新設する"""
+    table_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchange_files'").fetchone()
+    if table_exists is None:
+        con.execute(
+            "CREATE TABLE exchange_files (exchange_id TEXT, file_path TEXT, PRIMARY KEY(exchange_id, file_path))"
+        )
+
+
+def _migrate_v6_recompute_symbol_ids(con: sqlite3.Connection) -> None:
+    """Migration v6: symbols テーブルの id カラムを hash 再計算する"""
+    symbols_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'").fetchone()
+    if symbols_exists is None:
+        return
+
+    rows = con.execute("SELECT rowid, symbol_name, file_path, palace_object_id FROM symbols").fetchall()
+    for rowid, symbol_name, file_path, palace_object_id in rows:
+        new_id = hashlib.sha256((symbol_name + ":" + file_path + ":" + palace_object_id).encode()).hexdigest()
+        con.execute("UPDATE symbols SET id=? WHERE rowid=?", (new_id, rowid))
+
+
+def _migrate_v7_repair_distill(con: sqlite3.Connection) -> None:
+    """Migration v7: palace_objects テーブルから bm25_text を削除・distill ステータス修復・orphan クリーンアップ"""
+    # STEP1: bm25_text カラム削除
+    palace_objects_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'").fetchone()
+    if palace_objects_exists is not None:
+        columns = con.execute("PRAGMA table_info(palace_objects)").fetchall()
+        column_names = [col[1] for col in columns]
+        if "bm25_text" in column_names:
+            con.execute(
+                "CREATE TABLE palace_objects_new (id TEXT PRIMARY KEY, exchange_id TEXT NOT NULL, exchange_core TEXT NOT NULL, specific_context TEXT NOT NULL, distill_text TEXT NOT NULL)"
+            )
+            con.execute(
+                "INSERT INTO palace_objects_new (id, exchange_id, exchange_core, specific_context, distill_text) SELECT id, exchange_id, exchange_core, specific_context, distill_text FROM palace_objects"
+            )
+            con.execute("DROP TABLE palace_objects")
+            con.execute("ALTER TABLE palace_objects_new RENAME TO palace_objects")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_palace_objects_exchange_id ON palace_objects(exchange_id)")
+
+    # STEP2: re-distill reset
+    exchanges_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'").fetchone()
+    palace_objects_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'").fetchone()
+    if exchanges_exists is not None and palace_objects_exists is not None:
+        con.execute(
+            "UPDATE exchanges SET distill_status='pending', distilled_at=NULL WHERE distill_status='distilled' AND id NOT IN (SELECT exchange_id FROM palace_objects)"
+        )
+
+    # STEP3: orphan cleanup
+    rooms_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='rooms'").fetchone()
+    if rooms_exists is not None:
+        con.execute(
+            "DELETE FROM rooms WHERE palace_object_id NOT IN (SELECT id FROM palace_objects)"
+        )
+
+    symbols_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'").fetchone()
+    if symbols_exists is not None:
+        con.execute(
+            "DELETE FROM symbols WHERE palace_object_id NOT IN (SELECT id FROM palace_objects)"
+        )
+
+    vec_palace_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vec_palace'").fetchone()
+    if vec_palace_exists is not None:
+        con.execute(
+            "DELETE FROM vec_palace WHERE palace_id NOT IN (SELECT id FROM palace_objects)"
+        )
+
+
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_add_last_ply_end,
     _migrate_v2_add_distill_status,
     _migrate_v3_add_meta,
     _migrate_v4_add_indexes,
+    _migrate_v5_add_exchange_files,
+    _migrate_v6_recompute_symbol_ids,
+    _migrate_v7_repair_distill,
 ]
 
 
@@ -215,6 +286,12 @@ def init_db(db_path: Path) -> None:
                 signature        TEXT NOT NULL,
                 line             INT  NOT NULL,
                 dedup_hash       TEXT NOT NULL        -- sha256(symbol_name + file_path)
+            );
+
+            CREATE TABLE IF NOT EXISTS exchange_files (
+                exchange_id TEXT,
+                file_path   TEXT,
+                PRIMARY KEY (exchange_id, file_path)
             );
 
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);

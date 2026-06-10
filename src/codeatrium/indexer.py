@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,13 +30,90 @@ class Exchange:
     ply_end: int
     user_content: str
     agent_content: str
+    files: list[str] = field(default_factory=list)
 
 
 # ---- 内部ヘルパー ----
 
+# 外部パス（サイトパッケージ等）の判定用マーカー
+_EXTERNAL_PATH_MARKERS = (
+    'site-packages/',
+    'dist-packages/',
+    '/lib/python',
+    '/opt/',
+    '/usr/lib/',
+    '/usr/local/lib/',
+    '.venv/',
+    '/venv/',
+    'node_modules/',
+)
+
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _is_external_path_indexer(path: str) -> bool:
+    """パスが外部ライブラリ（site-packages など）を指しているか判定する"""
+    return any(marker in path for marker in _EXTERNAL_PATH_MARKERS)
+
+
+def _extract_tool_use_files(entries: list[dict | None]) -> list[str]:
+    """
+    assistant エントリから tool_use ブロックの file_path を抽出する。
+    外部パスは除外し、重複をトリムしたリストを返す（順序保持）。
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+
+    for entry in entries:
+        if entry is None:
+            continue
+        if entry.get("type") != "assistant":
+            continue
+
+        msg = entry.get("message")
+        if not isinstance(msg, dict):
+            continue
+
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use":
+                continue
+
+            name = block.get("name")
+            if name not in {'Edit', 'Write', 'Read', 'MultiEdit', 'NotebookEdit'}:
+                continue
+
+            input_dict = block.get("input")
+            if not isinstance(input_dict, dict):
+                continue
+
+            # NotebookEdit の場合は notebook_path、その他は file_path
+            path = None
+            if name == 'NotebookEdit':
+                path = input_dict.get("notebook_path")
+            else:
+                path = input_dict.get("file_path")
+
+            if not path or not isinstance(path, str):
+                continue
+
+            # 外部パスはスキップ
+            if _is_external_path_indexer(path):
+                continue
+
+            # 重複排除（順序保持）
+            if path not in seen:
+                seen.add(path)
+                result.append(path)
+
+    return result
 
 
 def _extract_text(content: Any) -> str:
@@ -176,6 +253,9 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -
         user_uuid = user_entry.get("uuid", f"{start}")
         exchange_id = _sha256(f"{conversation_id}:{user_uuid}")
 
+        # tool_use から file パスを抽出
+        tool_files = _extract_tool_use_files(raw_entries[start : end + 1])
+
         exchanges.append(
             Exchange(
                 id=exchange_id,
@@ -184,6 +264,7 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -
                 ply_end=end,
                 user_content=user_text,
                 agent_content=agent_text,
+                files=tool_files,
             )
         )
 
@@ -244,6 +325,14 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
                 ex.agent_content,
             ),
         )
+
+    # exchange_files を登録
+    for ex in new_exchanges:
+        for file_path in ex.files:
+            con.execute(
+                "INSERT OR IGNORE INTO exchange_files (exchange_id, file_path) VALUES (?, ?)",
+                (ex.id, file_path),
+            )
 
     con.commit()
     con.close()

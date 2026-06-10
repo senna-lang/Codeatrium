@@ -38,6 +38,23 @@ def make_assistant_entry(uuid: str, text: str, parent_uuid: str) -> dict:
     }
 
 
+def make_assistant_entry_with_tool_use(
+    uuid: str, file_path: str, parent_uuid: str | None = None, tool_name: str = "Edit"
+) -> dict:
+    """Assistant entry with a tool_use block (no text content)"""
+    key = "notebook_path" if tool_name == "NotebookEdit" else "file_path"
+    return {
+        "type": "assistant",
+        "uuid": uuid,
+        "parentUuid": parent_uuid,
+        "timestamp": "2026-03-26T00:00:01.000Z",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": tool_name, "input": {key: file_path}}],
+        },
+    }
+
+
 def write_jsonl(path: Path, entries: list[dict]) -> None:
     with path.open("w") as f:
         for e in entries:
@@ -325,4 +342,102 @@ def test_index_file_fts_populated(tmp_path: Path) -> None:
         "SELECT rowid FROM exchanges_fts WHERE exchanges_fts MATCH 'pool_size'"
     ).fetchall()
     assert len(rows) == 1
+    con.close()
+
+
+# ---- tool_use ファイル抽出テスト ----
+
+
+def test_parse_exchanges_captures_tool_use_files(tmp_path: Path) -> None:
+    """tool_use Edit ブロックのファイルパスが exchange.files に含まれる"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use("a1", "src/foo.py", "u1"),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 1
+    assert "src/foo.py" in exchanges[0].files
+
+
+def test_parse_exchanges_tool_use_dedup(tmp_path: Path) -> None:
+    """複数の assistant エントリが同じファイルを参照する場合、重複を除外する"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use("a1", "src/foo.py", "u1"),
+            make_assistant_entry_with_tool_use("a2", "src/foo.py", "a1"),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 1
+    assert exchanges[0].files.count("src/foo.py") == 1
+    assert len(exchanges[0].files) == 1
+
+
+def test_parse_exchanges_tool_use_excludes_external(tmp_path: Path) -> None:
+    """外部パス（.venv など）は除外される"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use(
+                "a1", "/Users/u/.venv/lib/python3.12/site-packages/foo.py", "u1"
+            ),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 1
+    assert "/Users/u/.venv/lib/python3.12/site-packages/foo.py" not in exchanges[0].files
+    assert len(exchanges[0].files) == 0
+
+
+def test_index_file_writes_exchange_files(tmp_path: Path) -> None:
+    """index_file が exchange_files テーブルに書き込む"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use("a1", "src/bar.py", "u1"),
+        ],
+    )
+
+    index_file(jsonl, db_path)
+
+    con = get_connection(db_path)
+    rows = con.execute("SELECT file_path FROM exchange_files").fetchall()
+    assert "src/bar.py" in [r[0] for r in rows]
+    con.close()
+
+
+def test_index_file_exchange_files_dedup(tmp_path: Path) -> None:
+    """同じ exchange 内の複数の tool_use ブロックでも exchange_files は重複しない"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use("a1", "src/baz.py", "u1"),
+            make_assistant_entry_with_tool_use("a2", "src/baz.py", "a1"),
+        ],
+    )
+
+    index_file(jsonl, db_path)
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM exchange_files").fetchone()[0]
+    assert count == 1
     con.close()
