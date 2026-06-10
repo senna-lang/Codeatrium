@@ -9,12 +9,19 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import stat
 from pathlib import Path
 from unittest.mock import patch
 
+from typer.testing import CliRunner
+
+from codeatrium.cli import app
+from codeatrium.db import init_db
 from codeatrium.hooks import install_hooks
+
+runner = CliRunner()
 
 # --- #1: hooks.py — shlex.quote でパスをクオート ---
 
@@ -146,41 +153,41 @@ def test_embedder_server_socket_permissions() -> None:
 
 
 def test_distill_lock_atomic_creation(tmp_path: Path) -> None:
-    """ロックファイルが O_CREAT | O_EXCL で原子的に作成される"""
+    """2つ目の flock(LOCK_NB) は BlockingIOError になる"""
     lock_path = tmp_path / "distill.lock"
 
-    # O_CREAT | O_EXCL で作成
-    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    os.write(fd, b"12345")
-    os.close(fd)
+    fd1 = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd1, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-    assert lock_path.exists()
-    assert lock_path.read_text() == "12345"
-
-    # 2回目は FileExistsError
+    fd2 = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
-        raise AssertionError("Expected FileExistsError")
-    except FileExistsError:
+        fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        raise AssertionError("Expected BlockingIOError")
+    except BlockingIOError:
         pass
+    finally:
+        fcntl.flock(fd1, fcntl.LOCK_UN)
+        os.close(fd1)
+        os.close(fd2)
 
 
-def test_distill_lock_stale_cleanup(tmp_path: Path) -> None:
-    """死んだプロセスの stale lock を検出してクリーンアップできる"""
-    lock_path = tmp_path / "distill.lock"
-    # 存在しない PID を書き込む
-    lock_path.write_text("999999999")
+def test_distill_lock_already_running(tmp_path: Path, monkeypatch) -> None:
+    """ロック保持中の distill は already running で exit 0"""
+    codeatrium_dir = tmp_path / ".codeatrium"
+    codeatrium_dir.mkdir(parents=True)
+    init_db(codeatrium_dir / "memory.db")
+
+    lock_path = codeatrium_dir / "distill.lock"
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     try:
-        existing_pid = int(lock_path.read_text().strip())
-        os.kill(existing_pid, 0)
-        raise AssertionError("PID should not exist")
-    except ProcessLookupError:
-        # stale lock — 削除して再取得
-        lock_path.unlink()
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(app, ["distill"])
 
-    assert lock_path.read_text() == str(os.getpid())
+        assert result.exit_code == 0
+        output = result.output + (getattr(result, "stderr", "") or "")
+        assert "already running" in output
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)

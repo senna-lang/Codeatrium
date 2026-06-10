@@ -13,7 +13,6 @@ import datetime
 import hashlib
 import os
 import re
-import struct
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -176,8 +175,7 @@ def save_palace_object(
                 ),
             )
 
-        arr = embedding.astype(np.float32)
-        blob = struct.pack(f"{len(arr)}f", *arr.tolist())
+        blob = embedding.astype(np.float32).tobytes()
         exists = con.execute(
             "SELECT 1 FROM vec_palace WHERE palace_id = ?", (palace_id,)
         ).fetchone()
