@@ -29,7 +29,7 @@ Use `loci search` to find past implementations, decisions, and code locations.
 # Semantic search
 loci search "query" --json --limit 5
 
-# Reverse lookup: code symbol -> past conversations
+# Reverse lookup: code symbol -> past conversations (verbatim text via loci show <verbatim_ref>)
 loci context --symbol "symbol_name" --json
 
 # Retrieve verbatim conversation (use verbatim_ref from search results)
@@ -49,7 +49,7 @@ If not in context, run `loci prime`.
 1. **Search before implementing** — always check if something was discussed or built before starting work.
 2. **Check symbols when you lack context** — run `loci context --symbol` before changing a function you don't have enough background on.
 3. **Use technical terms** — queries with exact symbol names, error messages, or parameter names yield better results.
-4. **Follow up with `loci show`** — when `exchange_core` is ambiguous, fetch the full verbatim conversation.
+4. **Follow up with `loci show <verbatim_ref>`** — `context` returns a lightweight summary; full verbatim text is fetched via `loci show <verbatim_ref>`.
 {END_MARKER}\
 """
 
