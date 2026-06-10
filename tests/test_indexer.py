@@ -4,6 +4,7 @@
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from codeatrium.db import get_connection, init_db
 from codeatrium.indexer import index_file, parse_exchanges
@@ -124,6 +125,30 @@ def test_parse_exchanges_ply_range(tmp_path: Path) -> None:
     exchanges = parse_exchanges(f)
     assert exchanges[0].ply_start == 0
     assert exchanges[0].ply_end == 1
+
+
+def test_parse_exchanges_skips_json_loads_for_old_plies(tmp_path: Path) -> None:
+    """last_ply_end パラメータで古い ply のパースをスキップする"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "最初の質問です。よろしくお願いします。" * 5),
+            make_assistant_entry("a1", "了解しました。詳しく説明します。" * 5, "u1"),
+            make_user_entry("u2", "次の質問です。詳しく教えてください。" * 5, "a1"),
+            make_assistant_entry(
+                "a2", "詳しく説明します。ご参考になれば幸いです。" * 5, "u2"
+            ),
+        ],
+    )
+    with patch("codeatrium.indexer.json.loads", wraps=json.loads) as spy:
+        exchanges = parse_exchanges(f, last_ply_end=1)
+        # ply 0, 1 はスキップされ、ply 2, 3 のみパースされるので call_count == 2
+        assert spy.call_count == 2
+    # ply 2, 3 の1件の exchange が返される
+    assert len(exchanges) == 1
+    assert exchanges[0].ply_start == 2
+    assert exchanges[0].ply_end == 3
 
 
 def test_parse_exchanges_deterministic_id(tmp_path: Path) -> None:

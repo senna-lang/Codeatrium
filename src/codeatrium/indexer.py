@@ -104,44 +104,55 @@ def _is_real_user_entry(entry: dict) -> bool:
 # ---- 公開API ----
 
 
-def parse_exchanges(jsonl_path: Path, min_chars: int = 50) -> list[Exchange]:
+def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -1) -> list[Exchange]:
     """
     .jsonl ファイルを読んで exchange リストを返す。
     trivial（min_chars 文字未満）は除外する。
+    last_ply_end: ply インデックス以前の行はスキップ（デフォルト -1 = 全行パース、既にインデックスされた部分の再処理を避けるため）。
     """
-    entries: list[dict] = []
+    raw_entries: list[dict | None] = []
     if not jsonl_path.exists():
         return []
+    ply = 0
     with jsonl_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+            if ply <= last_ply_end:
+                raw_entries.append(None)
+                ply += 1
+            else:
+                try:
+                    raw_entries.append(json.loads(line))
+                    ply += 1
+                except json.JSONDecodeError:
+                    continue
 
     conversation_id = _sha256(str(jsonl_path))
 
     # exchange の境界インデックスを収集
-    boundaries: list[int] = [i for i, e in enumerate(entries) if _is_real_user_entry(e)]
+    boundaries: list[int] = [i for i, e in enumerate(raw_entries) if e is not None and _is_real_user_entry(e)]
 
     exchanges: list[Exchange] = []
     for b_idx, start in enumerate(boundaries):
         end = (
             boundaries[b_idx + 1] - 1
             if b_idx + 1 < len(boundaries)
-            else len(entries) - 1
+            else len(raw_entries) - 1
         )
 
-        user_entry = entries[start]
+        user_entry = raw_entries[start]
+        if user_entry is None:
+            continue
         user_text = _extract_text(user_entry["message"]["content"])
 
         # assistant の発話を連結（コンパクション要約ゾーンは除外）
         agent_parts: list[str] = []
         in_compaction_zone = False
-        for e in entries[start + 1 : end + 1]:
+        for e in raw_entries[start + 1 : end + 1]:
+            if e is None:
+                continue
             if e.get("type") == "user":
                 msg = e.get("message", {})
                 if isinstance(msg, dict):
@@ -196,7 +207,7 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
     ).fetchone()
     last_ply_end = row["last_ply_end"] if row is not None else -1
 
-    exchanges = parse_exchanges(jsonl_path, min_chars=min_chars)
+    exchanges = parse_exchanges(jsonl_path, min_chars=min_chars, last_ply_end=last_ply_end)
     new_exchanges = [ex for ex in exchanges if ex.ply_start > last_ply_end]
 
     if not new_exchanges:
