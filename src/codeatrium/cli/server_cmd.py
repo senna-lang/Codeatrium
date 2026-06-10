@@ -11,6 +11,7 @@ server_app = typer.Typer(help="embedding サーバー管理")
 def server_start() -> None:
     """embedding サーバーをバックグラウンドで起動する"""
     import json as _json
+    import os
     import socket as _socket
     import subprocess
 
@@ -36,8 +37,20 @@ def server_start() -> None:
                     return
         except Exception:
             sock.unlink(missing_ok=True)
+            server_pid_path(root).unlink(missing_ok=True)
 
     pid_path = server_pid_path(root)
+    if pid_path.exists():
+        try:
+            _pid = int(pid_path.read_text().strip())
+            os.kill(_pid, 0)
+        except (ProcessLookupError, ValueError):
+            # プロセス不在 or 不正な PID → stale とみなして除去
+            pid_path.unlink(missing_ok=True)
+        except PermissionError:
+            # 別ユーザーのプロセスが生存 → 触らない
+            pass
+
     proc = subprocess.Popen(
         [_loci_python(), "-m", "codeatrium.embedder_server", str(sock)],
         stdout=subprocess.DEVNULL,
