@@ -3,9 +3,11 @@ Embedder のテスト
 モデルロードを避けるため embed() は mock する
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
-from codeatrium.embedder import Embedder
+import pytest
+
+from codeatrium.embedder import Embedder, _try_socket_embed
 
 
 def test_embedder_returns_384_dim() -> None:
@@ -45,3 +47,34 @@ def test_embedder_returns_float32() -> None:
 
     vec = embedder.embed("テスト")
     assert vec.dtype == np.float32
+
+
+def test_embed_via_socket_or_direct_raises_when_model_none() -> None:
+    """_ensure_model 後も _model が None なら RuntimeError（assert 撤去・Q4）"""
+    embedder = Embedder.__new__(Embedder)
+    embedder._sock_path = None
+    embedder._model = None
+    # _ensure_model を no-op にして _model を None のままにする
+    embedder._ensure_model = MagicMock()  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        embedder._embed_via_socket_or_direct("テスト", "query", "query: ")
+
+
+def test_try_socket_embed_chunked_response() -> None:
+    """改行終端レスポンスが複数チャンクで届いても再構成される（H5 client）"""
+    import numpy as np
+
+    fake_sock = MagicMock()
+    fake_sock.__enter__.return_value = fake_sock
+    fake_sock.__exit__.return_value = False
+    fake_sock.recv.side_effect = [b'{"embedding":[0.1,0.2]}', b"\n", b""]
+
+    mock_path = MagicMock()
+    mock_path.exists.return_value = True
+
+    with patch("codeatrium.embedder.socket.socket", return_value=fake_sock):
+        vec = _try_socket_embed(mock_path, "query", "hello")
+
+    assert vec is not None
+    np.testing.assert_allclose(vec, np.array([0.1, 0.2], dtype=np.float32))
