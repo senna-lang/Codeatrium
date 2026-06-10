@@ -56,7 +56,8 @@ def test_status_json_output(tmp_path, monkeypatch):
     data = json.loads(result.output)
     assert "exchanges" in data
     assert "distilled" in data
-    assert "undistilled" in data
+    assert "skipped" in data
+    assert "pending" in data
     assert "palace_objects" in data
     assert "symbols" in data
     assert "db_size_kb" in data
@@ -83,8 +84,8 @@ def test_status_counts_exchanges(tmp_path, monkeypatch):
         (ex_id1, conv_id, 0, 1, "hello world", "hi there"),
     )
     con.execute(
-        "INSERT INTO exchanges (id, conversation_id, ply_start, ply_end, user_content, agent_content, distilled_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (ex_id2, conv_id, 2, 3, "foo bar", "baz qux", "2026-01-01T00:00:00"),
+        "INSERT INTO exchanges (id, conversation_id, ply_start, ply_end, user_content, agent_content, distilled_at, distill_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (ex_id2, conv_id, 2, 3, "foo bar", "baz qux", "2026-01-01T00:00:00", "distilled"),
     )
     con.commit()
     con.close()
@@ -93,7 +94,7 @@ def test_status_counts_exchanges(tmp_path, monkeypatch):
     data = json.loads(result.output)
     assert data["exchanges"] == 2
     assert data["distilled"] == 1
-    assert data["undistilled"] == 1
+    assert data["pending"] == 1
 
 
 # ---- hook install ----

@@ -82,7 +82,7 @@ def test_distill_all_limit_parameterized(tmp_path: Path) -> None:
         patch("codeatrium.distiller.call_claude", return_value=mock_response),
         patch("codeatrium.distiller.Embedder", return_value=mock_embedder),
     ):
-        count = distill_all(db_path, limit=1)
+        count, _ = distill_all(db_path, limit=1)
 
     assert count == 1
 

@@ -167,7 +167,7 @@ def init(
                 try:
                     con.execute(
                         f"""
-                        UPDATE exchanges SET distilled_at = 'skipped'
+                        UPDATE exchanges SET distilled_at = 'skipped', distill_status = 'skipped'
                         WHERE distilled_at IS NULL
                         AND id IN (
                             SELECT id FROM exchanges
@@ -237,7 +237,7 @@ def init(
                 else:
                     typer.echo(f"  [{cur}/{tot}] distilled", err=True)
 
-            count = distill_all(
+            count, err_count = distill_all(
                 db,
                 model=cfg.distill_model,
                 on_progress=_on_progress,
@@ -245,6 +245,8 @@ def init(
                 distill_min_chars=cfg.distill_min_chars,
             )
             typer.echo(f"Distilled {count} exchange(s).")
+            if err_count > 0:
+                typer.echo(f"{err_count} exchange(s) failed — see errors above.", err=True)
         except KeyboardInterrupt:
             typer.echo(
                 "\n⚠ Distillation interrupted. "

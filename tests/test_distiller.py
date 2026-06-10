@@ -45,10 +45,10 @@ def _make_exchange(db_path, ex_id, user_text=LONG_TEXT, agent_text=LONG_TEXT):
     con.execute(
         """
         INSERT OR IGNORE INTO exchanges
-            (id, conversation_id, ply_start, ply_end, user_content, agent_content, distilled_at)
-        VALUES (?,?,?,?,?,?,?)
+            (id, conversation_id, ply_start, ply_end, user_content, agent_content, distilled_at, distill_status)
+        VALUES (?,?,?,?,?,?,?,?)
         """,
-        ("_pad_conv1", "conv1", 0, 1, "padding", "padding", "2026-01-01"),
+        ("_pad_conv1", "conv1", 0, 1, "padding", "padding", "2026-01-01", "distilled"),
     )
     con.execute(
         """
@@ -290,7 +290,7 @@ def test_distill_all_processes_undistilled(mock_call, tmp_path) -> None:
     mock_embedder.embed_passage.return_value = np.zeros(384, dtype=np.float32)
 
     with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
-        count = distill_all(db_path)
+        count, _ = distill_all(db_path)
 
     assert count == 1
 
@@ -302,13 +302,13 @@ def test_distill_all_skips_distilled(mock_call, tmp_path) -> None:
     _make_exchange(db_path, "ex1")
 
     con = get_connection(db_path)
-    con.execute("UPDATE exchanges SET distilled_at = '2026-01-01' WHERE id = 'ex1'")
+    con.execute("UPDATE exchanges SET distilled_at = '2026-01-01', distill_status = 'distilled' WHERE id = 'ex1'")
     con.commit()
     con.close()
 
     mock_embedder = MagicMock()
     with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
-        count = distill_all(db_path)
+        count, _ = distill_all(db_path)
 
     assert count == 0
 
@@ -324,6 +324,98 @@ def test_distill_all_returns_count(mock_call, tmp_path) -> None:
     mock_embedder.embed_passage.return_value = np.zeros(384, dtype=np.float32)
 
     with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
-        count = distill_all(db_path)
+        count, _ = distill_all(db_path)
 
     assert count == 2
+
+
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+def test_distill_all_returns_tuple(mock_call, tmp_path) -> None:
+    """distill_all は tuple を返す"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_passage.return_value = np.zeros(384, dtype=np.float32)
+
+    with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
+        result = distill_all(db_path)
+
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+
+
+@patch("codeatrium.distiller.call_claude")
+def test_distill_all_error_count(mock_call, tmp_path) -> None:
+    """distill_all はエラー数をカウントして返す"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+    _make_exchange(db_path, "ex2")
+
+    # 1回目は失敗、2回目は成功
+    mock_call.side_effect = [RuntimeError("Test error"), MOCK_PALACE_RESPONSE]
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_passage.return_value = np.zeros(384, dtype=np.float32)
+
+    with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
+        count, errors = distill_all(db_path)
+
+    assert count == 1
+    assert errors == 1
+
+
+def test_save_palace_object_sets_distill_status_distilled(tmp_path) -> None:
+    """save_palace_object は distill_status を 'distilled' にセットする"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+
+    palace = PalaceObject(
+        exchange_core="蒸留済み",
+        specific_context="detail",
+        room_assignments=[],
+    )
+    save_palace_object(db_path, "ex1", palace, np.zeros(384, dtype=np.float32))
+
+    con = get_connection(db_path)
+    row = con.execute(
+        "SELECT distill_status FROM exchanges WHERE id=?", ("ex1",)
+    ).fetchone()
+    assert row["distill_status"] == "distilled"
+    con.close()
+
+
+def test_save_palace_object_rollback_on_error(tmp_path) -> None:
+    """save_palace_object がエラーで失敗した場合、distill_status は 'pending' で palace_objects は空"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+
+    palace = PalaceObject(
+        exchange_core="テスト",
+        specific_context="detail",
+        room_assignments=[],
+    )
+
+    # 不正な次元の embedding を渡して struct.pack を失敗させる
+    bad_embedding = np.zeros(100, dtype=np.float32)
+
+    try:
+        save_palace_object(db_path, "ex1", palace, bad_embedding)
+    except Exception:
+        pass  # エラーは予期されている
+
+    con = get_connection(db_path)
+    # distill_status は 'pending' のまま
+    row = con.execute(
+        "SELECT distill_status FROM exchanges WHERE id=?", ("ex1",)
+    ).fetchone()
+    assert row["distill_status"] == "pending"
+
+    # palace_objects テーブルは空
+    palace_rows = con.execute("SELECT * FROM palace_objects").fetchall()
+    assert len(palace_rows) == 0
+    con.close()

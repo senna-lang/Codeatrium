@@ -13,6 +13,7 @@ SQLite DB の初期化・スキーマ定義・接続管理
   _MIGRATIONS    - 逐次マイグレーション関数リスト（user_version ベース）
 """
 
+import os
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -31,8 +32,72 @@ def _migrate_v1_add_last_ply_end(con: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v2_add_distill_status(con: sqlite3.Connection) -> None:
+    """Migration v2: exchanges に distill_status カラムを追加し既存データを変換する"""
+    table_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'").fetchone()
+    if table_exists is None:
+        return
+    columns = con.execute("PRAGMA table_info(exchanges)").fetchall()
+    column_names = [col[1] for col in columns]
+
+    if "distill_status" not in column_names:
+        con.execute(
+            "ALTER TABLE exchanges ADD COLUMN distill_status TEXT NOT NULL DEFAULT 'pending'"
+        )
+
+    con.execute(
+        "UPDATE exchanges SET distill_status='skipped', distilled_at=NULL WHERE distilled_at='skipped'"
+    )
+    con.execute(
+        "UPDATE exchanges SET distill_status='distilled' WHERE distilled_at IS NOT NULL AND distilled_at != 'skipped'"
+    )
+
+
+def _migrate_v3_add_meta(con: sqlite3.Connection) -> None:
+    """Migration v3: meta テーブルを新設し embedding_model と prompt_version を初期化する"""
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
+    )
+
+    from codeatrium.embedder import MODEL_NAME
+    from codeatrium.llm import DISTILL_PROMPT_VERSION
+
+    con.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)",
+        ("embedding_model", MODEL_NAME),
+    )
+    con.execute(
+        "INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)",
+        ("prompt_version", DISTILL_PROMPT_VERSION),
+    )
+
+
+def _migrate_v4_add_indexes(con: sqlite3.Connection) -> None:
+    """Migration v4: rooms/symbols/palace_objects に検索用インデックスを追加する"""
+    rooms_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='rooms'").fetchone()
+    if rooms_exists is not None:
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rooms_palace_object_id ON rooms(palace_object_id)"
+        )
+
+    symbols_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'").fetchone()
+    if symbols_exists is not None:
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_symbols_palace_object_id ON symbols(palace_object_id)"
+        )
+
+    palace_objects_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'").fetchone()
+    if palace_objects_exists is not None:
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_palace_objects_exchange_id ON palace_objects(exchange_id)"
+        )
+
+
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_add_last_ply_end,
+    _migrate_v2_add_distill_status,
+    _migrate_v3_add_meta,
+    _migrate_v4_add_indexes,
 ]
 
 
@@ -68,6 +133,7 @@ def init_db(db_path: Path) -> None:
     """DB を初期化してスキーマを作成する（冪等）"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = get_connection(db_path)
+    os.chmod(db_path, 0o600)
 
     # Check if conversations table exists (indicates existing DB)
     table_exists = con.execute(
@@ -91,7 +157,8 @@ def init_db(db_path: Path) -> None:
                 ply_end         INT  NOT NULL,
                 user_content    TEXT NOT NULL,
                 agent_content   TEXT NOT NULL,
-                distilled_at    TIMESTAMP          -- NULL = 未蒸留
+                distilled_at    TIMESTAMP,         -- NULL = 未蒸留
+                distill_status  TEXT NOT NULL DEFAULT 'pending'
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
@@ -149,7 +216,26 @@ def init_db(db_path: Path) -> None:
                 line             INT  NOT NULL,
                 dedup_hash       TEXT NOT NULL        -- sha256(symbol_name + file_path)
             );
+
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+
+            CREATE INDEX IF NOT EXISTS idx_rooms_palace_object_id ON rooms(palace_object_id);
+            CREATE INDEX IF NOT EXISTS idx_symbols_palace_object_id ON symbols(palace_object_id);
+            CREATE INDEX IF NOT EXISTS idx_palace_objects_exchange_id ON palace_objects(exchange_id);
         """)
+
+        from codeatrium.embedder import MODEL_NAME
+        from codeatrium.llm import DISTILL_PROMPT_VERSION
+
+        con.execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)",
+            ("embedding_model", MODEL_NAME),
+        )
+        con.execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES (?,?)",
+            ("prompt_version", DISTILL_PROMPT_VERSION),
+        )
+
         con.execute(f"PRAGMA user_version = {len(_MIGRATIONS)}")
     else:
         # Existing DB: run migrations
@@ -173,3 +259,38 @@ def init_db(db_path: Path) -> None:
 
     con.commit()
     con.close()
+
+
+def check_drift(db_path: Path) -> list[tuple[str, str, str]]:
+    """meta テーブルの記録値と現行値を比較し不一致の (key, recorded, current) タプルリストを返す"""
+    con = get_connection(db_path)
+    try:
+        # Check if meta table exists
+        meta_exists = con.execute(
+            'SELECT name FROM sqlite_master WHERE type="table" AND name="meta"'
+        ).fetchone()
+
+        if meta_exists is None:
+            return []
+
+        from codeatrium.embedder import MODEL_NAME
+        from codeatrium.llm import DISTILL_PROMPT_VERSION
+
+        # Get recorded values from meta table
+        meta_rows = con.execute(
+            "SELECT key, value FROM meta WHERE key IN ('embedding_model', 'prompt_version')"
+        ).fetchall()
+        recorded = {row[0]: row[1] for row in meta_rows}
+
+        # Compare with current values
+        drifts: list[tuple[str, str, str]] = []
+
+        if "embedding_model" in recorded and recorded["embedding_model"] != MODEL_NAME:
+            drifts.append(("embedding_model", recorded["embedding_model"], MODEL_NAME))
+
+        if "prompt_version" in recorded and recorded["prompt_version"] != DISTILL_PROMPT_VERSION:
+            drifts.append(("prompt_version", recorded["prompt_version"], DISTILL_PROMPT_VERSION))
+
+        return drifts
+    finally:
+        con.close()

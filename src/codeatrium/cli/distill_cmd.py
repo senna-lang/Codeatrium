@@ -63,7 +63,16 @@ def distill(
             typer.echo(f"  [{cur}/{tot}] distilled", err=True)
 
     try:
-        count = distill_all(
+        from codeatrium.db import check_drift
+
+        drifts = check_drift(db)
+        for key, recorded, current in drifts:
+            typer.echo(
+                f"[warn] {key} changed ({recorded} -> {current}). Re-index recommended.",
+                err=True,
+            )
+
+        count, err_count = distill_all(
             db,
             limit=limit,
             model=cfg.distill_model,
@@ -72,5 +81,7 @@ def distill(
             distill_min_chars=cfg.distill_min_chars,
         )
         typer.echo(f"Distilled {count} exchange(s).")
+        if err_count > 0:
+            typer.echo(f"{err_count} exchange(s) failed — see errors above.", err=True)
     finally:
         lock_path.unlink(missing_ok=True)

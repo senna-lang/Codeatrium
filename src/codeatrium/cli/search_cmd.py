@@ -25,6 +25,11 @@ def search(
         typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
 
+    from codeatrium.db import check_drift
+    drifts = check_drift(db)
+    for key, recorded, current in drifts:
+        typer.echo(f"[warn] {key} changed ({recorded} -> {current}). Re-index recommended.", err=True)
+
     embedder = Embedder()
     query_vec = embedder.embed(query)
     results = search_combined(db, query, query_vec, limit=limit)

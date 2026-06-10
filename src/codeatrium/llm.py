@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -30,6 +31,9 @@ DISTILL_PROMPT_TEMPLATE = """\
 やり取り (メッセージ {ply_start}-{ply_end}): {messages_text}
 
 JSONのみで回答してください。"""
+
+# プロンプト sha256 先頭8桁（B5: drift 検出用）
+DISTILL_PROMPT_VERSION = hashlib.sha256(DISTILL_PROMPT_TEMPLATE.encode()).hexdigest()[:8]
 
 JSON_SCHEMA = json.dumps(
     {

@@ -25,11 +25,25 @@ def status(
     con = get_connection(db)
     total = con.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
     distilled = con.execute(
-        "SELECT COUNT(*) FROM exchanges WHERE distilled_at IS NOT NULL"
+        "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'distilled'"
+    ).fetchone()[0]
+    skipped = con.execute(
+        "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'skipped'"
+    ).fetchone()[0]
+    pending = con.execute(
+        "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'pending'"
     ).fetchone()[0]
     palace_count = con.execute("SELECT COUNT(*) FROM palace_objects").fetchone()[0]
     symbol_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
     con.close()
+
+    from codeatrium.db import check_drift
+    drifts = check_drift(db)
+    for key, recorded, current in drifts:
+        typer.echo(
+            f"[drift] {key}: recorded={recorded}, current={current} — re-index recommended",
+            err=True,
+        )
 
     db_size_bytes = db.stat().st_size
     db_size_kb = db_size_bytes / 1024
@@ -41,7 +55,8 @@ def status(
                     "db_path": str(db),
                     "exchanges": total,
                     "distilled": distilled,
-                    "undistilled": total - distilled,
+                    "skipped": skipped,
+                    "pending": pending,
                     "palace_objects": palace_count,
                     "symbols": symbol_count,
                     "db_size_kb": round(db_size_kb, 1),
@@ -53,7 +68,7 @@ def status(
     else:
         typer.echo(f"DB: {db} ({db_size_kb:.1f} KB)")
         typer.echo(
-            f"Exchanges : {total} total, {distilled} distilled, {total - distilled} pending"
+            f"Exchanges : {total} total | {distilled} distilled, {skipped} skipped, {pending} pending"
         )
         typer.echo(f"Palace    : {palace_count}")
         typer.echo(f"Symbols   : {symbol_count}")
