@@ -194,6 +194,13 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -
             if not line:
                 continue
             if ply <= last_ply_end:
+                # 既インデックス領域: 古い exchange は再構築しない（None プレースホルダ）。
+                # ただし malformed 行は位置に数えない — last_ply_end は成功パース行のみを
+                # 数えた座標系なので、検証パースして同じ座標系を維持する。
+                try:
+                    json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 raw_entries.append(None)
                 ply += 1
             else:

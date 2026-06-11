@@ -204,7 +204,13 @@ def init_db(db_path: Path) -> None:
     """DB を初期化してスキーマを作成する（冪等）"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = get_connection(db_path)
+    # memory.db 本体と WAL サイドカー（-wal / -shm）は会話・コードの逐語データを含むため
+    # 所有者のみ読み書き可（0o600）にする。WAL モードでサイドカーが生成される。
     os.chmod(db_path, 0o600)
+    for suffix in ("-wal", "-shm"):
+        sidecar = db_path.parent / (db_path.name + suffix)
+        if sidecar.exists():
+            os.chmod(sidecar, 0o600)
 
     # Check if conversations table exists (indicates existing DB)
     table_exists = con.execute(
