@@ -10,19 +10,21 @@ SPEC Section 6 DISTILLER フロー準拠:
 from __future__ import annotations
 
 import datetime
-import hashlib
 import os
 import re
-import struct
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from codeatrium.embedder import Embedder, EmbedderSetupError
 from codeatrium.llm import DISTILL_PROMPT_TEMPLATE, call_claude
 from codeatrium.models import PalaceObject
+from codeatrium.utils import sha256
+
+if TYPE_CHECKING:
+    from codeatrium.resolver import SymbolResolver
 
 # ---- ファイルパス抽出 ----
 
@@ -30,13 +32,6 @@ _FILES_PATTERN = re.compile(
     r"(/(?:[a-zA-Z0-9._\-]+/)*[a-zA-Z0-9._\-]+\.[a-zA-Z0-9]+)"  # 絶対パス
     r"|([a-zA-Z0-9._\-]+(?:/[a-zA-Z0-9._\-]+)+\.[a-zA-Z0-9]+)"  # 相対パス（1段以上のディレクトリ）
 )
-
-
-# ---- 内部ヘルパー ----
-
-
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
 
 
 # ---- 公開 API ----
@@ -92,6 +87,7 @@ def extract_files_touched(
 
 def distill_exchange(
     exchange_id: str,
+    db_path: Path,
     user_content: str,
     agent_content: str,
     ply_start: int,
@@ -99,7 +95,20 @@ def distill_exchange(
     model: str | None = None,
     project_root: str | None = None,
 ) -> PalaceObject:
-    """1つの exchange を蒸留して PalaceObject を返す"""
+    """1つの exchange を蒸留して PalaceObject を返す
+
+    Parameters:
+        exchange_id: exchange の ID
+        db_path: データベースファイルパス
+        user_content: ユーザーコンテンツ
+        agent_content: エージェントコンテンツ
+        ply_start: 開始ply
+        ply_end: 終了ply
+        model: 蒸留に使うモデル（デフォルトはconfig.toml から）
+        project_root: プロジェクトルート（ファイルパスフィルタ用）
+    """
+    from codeatrium.db import get_connection
+
     messages_text = (user_content + "\n" + agent_content)[:4000]
     prompt = DISTILL_PROMPT_TEMPLATE.format(
         ply_start=ply_start,
@@ -107,9 +116,35 @@ def distill_exchange(
         messages_text=messages_text,
     )
     raw = call_claude(prompt, model=model)
-    files_touched = extract_files_touched(
+
+    # PRIMARY: exchange_files から読み込み
+    con = get_connection(db_path)
+    rows = con.execute(
+        "SELECT file_path FROM exchange_files WHERE exchange_id=?", (exchange_id,)
+    ).fetchall()
+    con.close()
+    primary_paths = [row["file_path"] for row in rows]
+
+    # FALLBACK: regex 抽出
+    fallback_paths = extract_files_touched(
         user_content, agent_content, project_root=project_root
     )
+
+    # Merge: primary パスをフィルタして、fallback との重複排除
+    root_prefix = (project_root.rstrip("/") + "/") if project_root else None
+    seen: set[str] = set()
+    files_touched: list[str] = []
+
+    for path in primary_paths:
+        if path not in seen and not _is_external_path(path, root_prefix):
+            seen.add(path)
+            files_touched.append(path)
+
+    for path in fallback_paths:
+        if path not in seen:
+            seen.add(path)
+            files_touched.append(path)
+
     return PalaceObject(
         exchange_core=raw["exchange_core"],
         specific_context=raw["specific_context"],
@@ -123,96 +158,145 @@ def save_palace_object(
     exchange_id: str,
     palace: PalaceObject,
     embedding: Any,  # np.ndarray
+    resolver: SymbolResolver | None = None,
+    symbol_cache: dict[str, list[Any]] | None = None,
 ) -> None:
     """PalaceObject を DB に保存し exchange の distilled_at を更新する"""
     import numpy as np
 
     from codeatrium.db import get_connection
+    from codeatrium.resolver import SymbolResolver
 
-    palace_id = _sha256(f"palace:{exchange_id}")
+    palace_id = sha256(f"palace:{exchange_id}")
     distill_text = palace.exchange_core + "\n" + palace.specific_context
 
     con = get_connection(db_path)
-
-    con.execute(
-        """
-        INSERT OR IGNORE INTO palace_objects
-            (id, exchange_id, exchange_core, specific_context, distill_text)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            palace_id,
-            exchange_id,
-            palace.exchange_core,
-            palace.specific_context,
-            distill_text,
-        ),
-    )
-
-    for room in palace.room_assignments:
-        dedup = _sha256(f"{room['room_type']}:{room['room_key']}")
-        room_id = _sha256(f"{palace_id}:{dedup}")
-        con.execute(
-            """
-            INSERT OR IGNORE INTO rooms
-                (id, palace_object_id, room_type, room_key, room_label, relevance, dedup_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                room_id,
-                palace_id,
-                room["room_type"],
-                room["room_key"],
-                room["room_label"],
-                room["relevance"],
-                dedup,
-            ),
-        )
-
-    arr = embedding.astype(np.float32)
-    blob = struct.pack(f"{len(arr)}f", *arr.tolist())
-    exists = con.execute(
-        "SELECT 1 FROM vec_palace WHERE palace_id = ?", (palace_id,)
-    ).fetchone()
-    if not exists:
-        con.execute(
-            "INSERT INTO vec_palace (palace_id, embedding) VALUES (?, ?)",
-            (palace_id, blob),
-        )
-
-    # ⑤ tree-sitter シンボル解決
-    from codeatrium.resolver import SymbolResolver
-
-    resolver = SymbolResolver()
-    for file_str in palace.files_touched:
-        for sym in resolver.extract(Path(file_str)):
-            sym_id = _sha256(f"{sym.symbol_name}:{sym.file_path}")
+    con.execute("BEGIN")
+    try:
+        existing = con.execute(
+            "SELECT 1 FROM palace_objects WHERE id = ?", (palace_id,)
+        ).fetchone()
+        if existing is None:
             con.execute(
                 """
-                INSERT OR IGNORE INTO symbols
-                    (id, palace_object_id, symbol_name, symbol_kind,
-                     file_path, signature, line, dedup_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO palace_objects
+                    (id, exchange_id, exchange_core, specific_context, distill_text)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
-                    sym_id,
                     palace_id,
-                    sym.symbol_name,
-                    sym.symbol_kind,
-                    sym.file_path,
-                    sym.signature,
-                    sym.line,
-                    sym_id,
+                    exchange_id,
+                    palace.exchange_core,
+                    palace.specific_context,
+                    distill_text,
                 ),
             )
+        verify = con.execute(
+            "SELECT 1 FROM palace_objects WHERE id = ?", (palace_id,)
+        ).fetchone()
+        if verify is None:
+            raise RuntimeError(f"palace_objects INSERT failed for id={palace_id}")
 
-    con.execute(
-        "UPDATE exchanges SET distilled_at = ? WHERE id = ?",
-        (datetime.datetime.utcnow().isoformat(), exchange_id),
-    )
+        for room in palace.room_assignments:
+            dedup = sha256(f"{room['room_type']}:{room['room_key']}")
+            room_id = sha256(f"{palace_id}:{dedup}")
+            room_exists = con.execute(
+                "SELECT 1 FROM rooms WHERE id = ?", (room_id,)
+            ).fetchone()
+            if room_exists is None:
+                con.execute(
+                    """
+                    INSERT INTO rooms
+                        (id, palace_object_id, room_type, room_key, room_label, relevance, dedup_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        room_id,
+                        palace_id,
+                        room["room_type"],
+                        room["room_key"],
+                        room["room_label"],
+                        room["relevance"],
+                        dedup,
+                    ),
+                )
 
-    con.commit()
-    con.close()
+        blob = embedding.astype(np.float32).tobytes()
+        exists = con.execute(
+            "SELECT 1 FROM vec_palace WHERE palace_id = ?", (palace_id,)
+        ).fetchone()
+        if not exists:
+            con.execute(
+                "INSERT INTO vec_palace (palace_id, embedding) VALUES (?, ?)",
+                (palace_id, blob),
+            )
+
+        # ⑤ tree-sitter シンボル解決
+        if resolver is None:
+            from codeatrium.resolver import SymbolResolver
+            resolver = SymbolResolver()
+
+        # Fetch exchange body text for symbol body-mention filter
+        ex_row = con.execute(
+            "SELECT user_content, agent_content FROM exchanges WHERE id = ?",
+            (exchange_id,),
+        ).fetchone()
+        body_text = (
+            (ex_row["user_content"] + ex_row["agent_content"])
+            if ex_row is not None
+            else ""
+        )
+
+        for file_str in palace.files_touched:
+            if symbol_cache is not None and file_str in symbol_cache:
+                syms = symbol_cache[file_str]
+            else:
+                syms = resolver.extract(Path(file_str))
+                if symbol_cache is not None:
+                    symbol_cache[file_str] = syms
+            for sym in syms:
+                # Body-mention filter: skip symbol if not mentioned in exchange
+                if sym.symbol_name not in body_text:
+                    continue
+
+                # Compute sym_id with palace_id, dedup_hash separate
+                sym_id = sha256(f"{sym.symbol_name}:{sym.file_path}:{palace_id}")
+                dedup_hash = sha256(f"{sym.symbol_name}:{sym.file_path}")
+
+                sym_exists = con.execute(
+                    "SELECT 1 FROM symbols WHERE id = ?", (sym_id,)
+                ).fetchone()
+                if sym_exists is None:
+                    con.execute(
+                        """
+                        INSERT INTO symbols
+                            (id, palace_object_id, symbol_name, symbol_kind,
+                             file_path, signature, line, dedup_hash)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            sym_id,
+                            palace_id,
+                            sym.symbol_name,
+                            sym.symbol_kind,
+                            sym.file_path,
+                            sym.signature,
+                            sym.line,
+                            dedup_hash,
+                        ),
+                    )
+
+        con.execute(
+            "UPDATE exchanges SET distilled_at = ?, distill_status = 'distilled' WHERE id = ?",
+            (datetime.datetime.now(datetime.UTC).isoformat(), exchange_id),
+        )
+
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
+    finally:
+        con.close()
 
 
 def distill_all(
@@ -222,14 +306,15 @@ def distill_all(
     on_progress: Callable[..., None] | None = None,
     project_root: str | None = None,
     distill_min_chars: int = 100,
-) -> int:
+) -> tuple[int, int]:
     """未蒸留の exchange を処理する。
 
     distill_min_chars: この文字数未満の exchange は蒸留スキップ（デフォルト100）
     on_progress: (current, total, error=None) を受け取るコールバック
-    Returns: 処理した exchange 数
+    Returns: (処理した exchange 数, エラー数)
     """
     from codeatrium.db import get_connection
+    from codeatrium.resolver import SymbolResolver
 
     con = get_connection(db_path)
 
@@ -237,7 +322,7 @@ def distill_all(
     # - 1-exchange セッション
     # - distill_min_chars 未満（ワンフレーズ指示・システムメッセージ等）
     con.execute("""
-        UPDATE exchanges SET distilled_at = 'skipped'
+        UPDATE exchanges SET distilled_at = 'skipped', distill_status = 'skipped'
         WHERE distilled_at IS NULL
           AND ((SELECT COUNT(*) FROM exchanges e2
                 WHERE e2.conversation_id = exchanges.conversation_id) < 2
@@ -248,7 +333,7 @@ def distill_all(
     query = """
         SELECT e.id, e.user_content, e.agent_content, e.ply_start, e.ply_end
         FROM exchanges e
-        WHERE e.distilled_at IS NULL
+        WHERE e.distill_status = 'pending'
     """
     params: list[int] = []
     if limit is not None:
@@ -258,16 +343,19 @@ def distill_all(
     con.close()
 
     if not rows:
-        return 0
+        return 0, 0
 
     total = len(rows)
     embedder = Embedder()
+    resolver = SymbolResolver()
+    symbol_cache: dict[str, list[Any]] = {}
     count = 0
     errors = 0
     for row in rows:
         try:
             palace = distill_exchange(
                 row["id"],
+                db_path,
                 row["user_content"],
                 row["agent_content"],
                 row["ply_start"],
@@ -277,7 +365,7 @@ def distill_all(
             )
             distill_text = palace.exchange_core + "\n" + palace.specific_context
             vec = embedder.embed_passage(distill_text)
-            save_palace_object(db_path, row["id"], palace, vec)
+            save_palace_object(db_path, row["id"], palace, vec, resolver=resolver, symbol_cache=symbol_cache)
             count += 1
         except EmbedderSetupError:
             # 環境レベルの失敗: per-row でなくループ全体を中断する
@@ -290,4 +378,4 @@ def distill_all(
         if on_progress is not None:
             on_progress(count, total)
 
-    return count
+    return count, errors

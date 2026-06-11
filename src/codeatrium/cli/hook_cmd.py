@@ -22,3 +22,12 @@ def hook_install() -> None:
     cfg = load_config(find_project_root())
     _changed, message = install_hooks(batch_limit=cfg.distill_batch_limit)
     typer.echo(message)
+
+
+@hook_app.command("uninstall")
+def hook_uninstall() -> None:
+    """Claude Code の settings.json から codeatrium 関連フックをすべて除去する。"""
+    from codeatrium.hooks import uninstall_hooks
+
+    _changed, message = uninstall_hooks()
+    typer.echo(message)

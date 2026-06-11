@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,9 +39,7 @@ def load_config(project_root: Path) -> Config:
     try:
         with config_path.open("rb") as f:
             data = tomllib.load(f)
-    except Exception as e:
-        import sys
-
+    except (FileNotFoundError, tomllib.TOMLDecodeError, OSError) as e:
         print(f"Warning: failed to parse {config_path}: {e}", file=sys.stderr)
         return Config()
 
@@ -48,8 +47,6 @@ def load_config(project_root: Path) -> Config:
 
     model = distill.get("model", DEFAULT_DISTILL_MODEL)
     if not isinstance(model, str) or not model.strip():
-        import sys
-
         print(
             "Warning: distill.model must be a non-empty string, using default.",
             file=sys.stderr,
@@ -58,8 +55,6 @@ def load_config(project_root: Path) -> Config:
 
     batch_limit = distill.get("batch_limit", DEFAULT_DISTILL_BATCH_LIMIT)
     if not isinstance(batch_limit, int) or batch_limit < 1:
-        import sys
-
         print(
             "Warning: distill.batch_limit must be a positive integer, using default.",
             file=sys.stderr,
@@ -70,8 +65,6 @@ def load_config(project_root: Path) -> Config:
 
     min_chars = index.get("min_chars", DEFAULT_INDEX_MIN_CHARS)
     if not isinstance(min_chars, int) or min_chars < 1:
-        import sys
-
         print(
             "Warning: index.min_chars must be a positive integer, using default.",
             file=sys.stderr,
@@ -80,8 +73,6 @@ def load_config(project_root: Path) -> Config:
 
     distill_min_chars = distill.get("min_chars", DEFAULT_DISTILL_MIN_CHARS)
     if not isinstance(distill_min_chars, int) or distill_min_chars < 1:
-        import sys
-
         print(
             "Warning: distill.min_chars must be a positive integer, using default.",
             file=sys.stderr,

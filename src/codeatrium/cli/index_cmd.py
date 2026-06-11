@@ -32,6 +32,10 @@ def index(
         raise typer.Exit(1)
 
     init_db(db)
+    from codeatrium.db import check_drift
+    drifts = check_drift(db)
+    for key, recorded, current in drifts:
+        typer.echo(f"[warn] {key} changed ({recorded} -> {current}). Re-index recommended.", err=True)
     cfg = load_config(root)
 
     target_dir = path or resolve_claude_projects_path(root)

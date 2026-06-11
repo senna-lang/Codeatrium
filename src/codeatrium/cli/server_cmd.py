@@ -6,11 +6,14 @@ import typer
 
 server_app = typer.Typer(help="embedding サーバー管理")
 
+_SERVER_STARTUP_POLL_ATTEMPTS: int = 150  # サーバー起動確認のポーリング回数（0.2秒 × 150 = 最大30秒待機）
+
 
 @server_app.command("start")
 def server_start() -> None:
     """embedding サーバーをバックグラウンドで起動する"""
     import json as _json
+    import os
     import socket as _socket
     import subprocess
 
@@ -36,8 +39,20 @@ def server_start() -> None:
                     return
         except Exception:
             sock.unlink(missing_ok=True)
+            server_pid_path(root).unlink(missing_ok=True)
 
     pid_path = server_pid_path(root)
+    if pid_path.exists():
+        try:
+            _pid = int(pid_path.read_text().strip())
+            os.kill(_pid, 0)
+        except (ProcessLookupError, ValueError):
+            # プロセス不在 or 不正な PID → stale とみなして除去
+            pid_path.unlink(missing_ok=True)
+        except PermissionError:
+            # 別ユーザーのプロセスが生存 → 触らない
+            pass
+
     proc = subprocess.Popen(
         [_loci_python(), "-m", "codeatrium.embedder_server", str(sock)],
         stdout=subprocess.DEVNULL,
@@ -48,7 +63,7 @@ def server_start() -> None:
 
     import time
 
-    for i in range(150):
+    for i in range(_SERVER_STARTUP_POLL_ATTEMPTS):
         if sock.exists():
             typer.echo(f"Server started (PID {proc.pid})")
             return

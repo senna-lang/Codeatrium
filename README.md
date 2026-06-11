@@ -87,11 +87,12 @@ Agent instructions are injected automatically — no manual setup required:
 | `loci index` | Index new session logs |
 | `loci distill [--limit N]` | Distill undistilled exchanges via LLM |
 | `loci search "query" --json` | Semantic search (agent-facing) |
-| `loci context --symbol "name" --json` | Code symbol → past conversations |
+| `loci context --symbol "name" --json` | Code symbol → past conversations (lightweight; add `--full` for verbatim text) |
 | `loci show "<ref>" --json` | Retrieve verbatim conversation |
 | `loci status` | Show index state |
 | `loci server start/stop/status` | Embedding server management |
 | `loci hook install` | Re-register hooks (normally already done by `loci init`) |
+| `loci hook uninstall` | Remove codeatrium hooks from `settings.json` |
 
 ## Automation (Claude Code Hooks)
 

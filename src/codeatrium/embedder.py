@@ -157,7 +157,10 @@ class Embedder:
 
         # ② 直接ロード
         self._ensure_model()
-        assert self._model is not None
+        if self._model is None:
+            raise RuntimeError(
+                "モデルがロードされていません: _ensure_model() の呼び出しに失敗した可能性があります"
+            )
         result = self._model.encode(
             [f"{prefix}{text}"],
             normalize_embeddings=True,

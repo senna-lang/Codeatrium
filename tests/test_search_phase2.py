@@ -5,8 +5,10 @@ embedding は固定ベクトルで代替してモデルロードを避ける
 
 import struct
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from codeatrium.db import get_connection, init_db
 from codeatrium.search import (
@@ -16,6 +18,7 @@ from codeatrium.search import (
     rrf,
     search_bm25,
     search_combined,
+    search_hnsw_palace,
 )
 
 LONG_TEXT = "connection pool " * 10
@@ -288,3 +291,71 @@ def test_search_combined_with_palace(tmp_path: Path) -> None:
     vec = np.ones(384, dtype=np.float32)
     results = search_combined(db_path, "connection pool", vec, limit=5)
     assert any(r.exchange_id == "ex1" for r in results)
+
+
+# --- connection leak tests ---
+
+
+def test_search_bm25_connection_leak(tmp_path: Path) -> None:
+    """search_bm25 は例外時も connection を close する"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+
+    fake_con = MagicMock()
+    fake_con.execute.side_effect = RuntimeError("test error")
+
+    with patch("codeatrium.search.get_connection", return_value=fake_con):
+        with pytest.raises(RuntimeError):
+            search_bm25(db_path, "query")
+
+    assert fake_con.close.called
+
+
+def test_search_hnsw_connection_leak(tmp_path: Path) -> None:
+    """search_hnsw_palace は例外時も connection を close する"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+
+    fake_con = MagicMock()
+    fake_con.execute.side_effect = RuntimeError("test error")
+
+    with patch("codeatrium.search.get_connection", return_value=fake_con):
+        with pytest.raises(RuntimeError):
+            search_hnsw_palace(db_path, np.ones(384, dtype=np.float32))
+
+    assert fake_con.close.called
+
+
+def test_search_combined_enrich_connection_leak(tmp_path: Path) -> None:
+    """search_combined は enrich 時に exception が出ても enrich con を close する"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "ex1", LONG_TEXT, "pool response")
+    con.close()
+
+    fake_enrich_con = MagicMock()
+    stored_con = None
+
+    def mock_get_connection(path):
+        """最初の呼び出しは real con (search_bm25/search_hnsw 用)、
+        次の呼び出しで fake con (enrich 用) を返す"""
+        nonlocal stored_con
+        if stored_con is None:
+            stored_con = get_connection(path)
+            return stored_con
+        return fake_enrich_con
+
+    with patch(
+        "codeatrium.search.get_connection", side_effect=mock_get_connection
+    ), patch(
+        "codeatrium.search._enrich_results", side_effect=RuntimeError("enrich failed")
+    ):
+        with pytest.raises(RuntimeError):
+            search_combined(
+                db_path, "connection pool", np.ones(384, dtype=np.float32), limit=5
+            )
+
+    assert fake_enrich_con.close.called
+    if stored_con is not None:
+        stored_con.close()

@@ -37,6 +37,23 @@ def make_assistant_entry(uuid: str, text: str, parent_uuid: str) -> dict:
     }
 
 
+def make_assistant_entry_with_tool_use(
+    uuid: str, file_path: str, parent_uuid: str | None = None, tool_name: str = "Edit"
+) -> dict:
+    """Assistant entry with a tool_use block (no text content)"""
+    key = "notebook_path" if tool_name == "NotebookEdit" else "file_path"
+    return {
+        "type": "assistant",
+        "uuid": uuid,
+        "parentUuid": parent_uuid,
+        "timestamp": "2026-03-26T00:00:01.000Z",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": tool_name, "input": {key: file_path}}],
+        },
+    }
+
+
 def write_jsonl(path: Path, entries: list[dict]) -> None:
     with path.open("w") as f:
         for e in entries:
@@ -124,6 +141,57 @@ def test_parse_exchanges_ply_range(tmp_path: Path) -> None:
     exchanges = parse_exchanges(f)
     assert exchanges[0].ply_start == 0
     assert exchanges[0].ply_end == 1
+
+
+def test_parse_exchanges_skips_old_exchanges(tmp_path: Path) -> None:
+    """last_ply_end 以前の ply は exchange として再構築しない（None プレースホルダ）"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "最初の質問です。よろしくお願いします。" * 5),
+            make_assistant_entry("a1", "了解しました。詳しく説明します。" * 5, "u1"),
+            make_user_entry("u2", "次の質問です。詳しく教えてください。" * 5, "a1"),
+            make_assistant_entry(
+                "a2", "詳しく説明します。ご参考になれば幸いです。" * 5, "u2"
+            ),
+        ],
+    )
+    exchanges = parse_exchanges(f, last_ply_end=1)
+    # ply 0, 1 は再構築されず、ply 2, 3 の1件の exchange のみ返る
+    assert len(exchanges) == 1
+    assert exchanges[0].ply_start == 2
+    assert exchanges[0].ply_end == 3
+
+
+def test_parse_exchanges_malformed_line_in_indexed_region_no_drift(
+    tmp_path: Path,
+) -> None:
+    """既インデックス領域に壊れた JSON 行があってもスキップ境界がズレない（回帰）。
+
+    壊れた行は成功パース座標系に位置を持たないため、skip 領域でも数えてはならない。
+    """
+    f = tmp_path / "session.jsonl"
+    # ply 0(user), 1(assistant) を全行パース時の last_ply_end とする。
+    # 行頭に壊れた JSON を 1 行混ぜると、座標系を誤ると境界が 1 つ早くズレる。
+    lines = [
+        json.dumps(make_user_entry("u1", "最初の質問です。" * 6)),
+        "{ this is not valid json",
+        json.dumps(make_assistant_entry("a1", "了解しました。" * 6, "u1")),
+        json.dumps(make_user_entry("u2", "次の質問です。" * 6, "a1")),
+        json.dumps(make_assistant_entry("a2", "説明します。" * 6, "u2")),
+    ]
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # 全行パース（last_ply_end=-1）での境界を基準にする
+    full = parse_exchanges(f, last_ply_end=-1)
+    # 壊れた行は無視され、u1/a1 と u2/a2 の 2 exchange になる
+    assert [(e.ply_start, e.ply_end) for e in full] == [(0, 1), (2, 3)]
+
+    # 最初の exchange(ply 0,1)までインデックス済みとして再パース
+    incremental = parse_exchanges(f, last_ply_end=1)
+    # 2 番目の exchange(ply 2,3)だけが返り、座標がドリフトしない
+    assert [(e.ply_start, e.ply_end) for e in incremental] == [(2, 3)]
 
 
 def test_parse_exchanges_deterministic_id(tmp_path: Path) -> None:
@@ -300,4 +368,102 @@ def test_index_file_fts_populated(tmp_path: Path) -> None:
         "SELECT rowid FROM exchanges_fts WHERE exchanges_fts MATCH 'pool_size'"
     ).fetchall()
     assert len(rows) == 1
+    con.close()
+
+
+# ---- tool_use ファイル抽出テスト ----
+
+
+def test_parse_exchanges_captures_tool_use_files(tmp_path: Path) -> None:
+    """tool_use Edit ブロックのファイルパスが exchange.files に含まれる"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use("a1", "src/foo.py", "u1"),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 1
+    assert "src/foo.py" in exchanges[0].files
+
+
+def test_parse_exchanges_tool_use_dedup(tmp_path: Path) -> None:
+    """複数の assistant エントリが同じファイルを参照する場合、重複を除外する"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use("a1", "src/foo.py", "u1"),
+            make_assistant_entry_with_tool_use("a2", "src/foo.py", "a1"),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 1
+    assert exchanges[0].files.count("src/foo.py") == 1
+    assert len(exchanges[0].files) == 1
+
+
+def test_parse_exchanges_tool_use_excludes_external(tmp_path: Path) -> None:
+    """外部パス（.venv など）は除外される"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use(
+                "a1", "/Users/u/.venv/lib/python3.12/site-packages/foo.py", "u1"
+            ),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 1
+    assert "/Users/u/.venv/lib/python3.12/site-packages/foo.py" not in exchanges[0].files
+    assert len(exchanges[0].files) == 0
+
+
+def test_index_file_writes_exchange_files(tmp_path: Path) -> None:
+    """index_file が exchange_files テーブルに書き込む"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use("a1", "src/bar.py", "u1"),
+        ],
+    )
+
+    index_file(jsonl, db_path)
+
+    con = get_connection(db_path)
+    rows = con.execute("SELECT file_path FROM exchange_files").fetchall()
+    assert "src/bar.py" in [r[0] for r in rows]
+    con.close()
+
+
+def test_index_file_exchange_files_dedup(tmp_path: Path) -> None:
+    """同じ exchange 内の複数の tool_use ブロックでも exchange_files は重複しない"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Edit the source file please. " * 10),
+            make_assistant_entry_with_tool_use("a1", "src/baz.py", "u1"),
+            make_assistant_entry_with_tool_use("a2", "src/baz.py", "a1"),
+        ],
+    )
+
+    index_file(jsonl, db_path)
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM exchange_files").fetchone()[0]
+    assert count == 1
     con.close()

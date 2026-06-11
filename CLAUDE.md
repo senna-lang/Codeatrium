@@ -122,15 +122,8 @@ loci hook install                            # Register hooks to ~/.claude/setti
 <!-- BEGIN CODEATRIUM -->
 ## Past Memory Search (codeatrium)
 
-IMPORTANT: Command usage is injected automatically at session start via `loci prime` (SessionStart hook).
+IMPORTANT: Full usage instructions are injected automatically at session start via `loci prime` (SessionStart hook).
 If not in context, run `loci prime`.
-
-### Rules
-
-1. **Search before implementing** — always check if something was discussed or built before starting work.
-2. **Check symbols when you lack context** — run `loci context --symbol` before changing a function you don't have enough background on.
-3. **Use technical terms** — queries with exact symbol names, error messages, or parameter names yield better results.
-4. **Follow up with `loci show`** — when `exchange_core` is ambiguous, fetch the full verbatim conversation.
 <!-- END CODEATRIUM -->
 
 ---

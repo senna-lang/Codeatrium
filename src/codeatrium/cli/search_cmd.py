@@ -25,6 +25,11 @@ def search(
         typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
 
+    from codeatrium.db import check_drift
+    drifts = check_drift(db)
+    for key, recorded, current in drifts:
+        typer.echo(f"[warn] {key} changed ({recorded} -> {current}). Re-index recommended.", err=True)
+
     embedder = Embedder()
     query_vec = embedder.embed(query)
     results = search_combined(db, query, query_vec, limit=limit)
@@ -62,6 +67,7 @@ def context(
     ],
     limit: Annotated[int, typer.Option("--limit", "-n", help="返す件数")] = 5,
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
+    full: Annotated[bool, typer.Option("--full", help="全文（user_content / agent_content）を含める")] = False,
 ) -> None:
     """シンボル名から関連する過去会話を逆引きする"""
     from codeatrium.db import get_connection
@@ -87,10 +93,13 @@ def context(
             e.user_content,
             e.agent_content,
             p.exchange_core,
-            p.specific_context
+            p.specific_context,
+            c.source_path,
+            e.ply_start
         FROM symbols s
         JOIN palace_objects p ON p.id = s.palace_object_id
         JOIN exchanges e ON e.id = p.exchange_id
+        JOIN conversations c ON c.id = e.conversation_id
         WHERE s.symbol_name LIKE ?
         LIMIT ?
         """,
@@ -103,8 +112,9 @@ def context(
         return
 
     if json_output:
-        output = [
-            {
+        output = []
+        for r in rows:
+            base = {
                 "symbol_name": r["symbol_name"],
                 "symbol_kind": r["symbol_kind"],
                 "file_path": r["file_path"],
@@ -113,11 +123,12 @@ def context(
                 "exchange_id": r["exchange_id"],
                 "exchange_core": r["exchange_core"],
                 "specific_context": r["specific_context"],
-                "user_content": r["user_content"],
-                "agent_content": r["agent_content"],
+                "verbatim_ref": f"{r['source_path']}:ply={r['ply_start']}",
             }
-            for r in rows
-        ]
+            if full:
+                base["user_content"] = r["user_content"]
+                base["agent_content"] = r["agent_content"]
+            output.append(base)
         typer.echo(json.dumps(output, ensure_ascii=False, indent=2))
     else:
         for i, r in enumerate(rows, 1):
@@ -126,3 +137,4 @@ def context(
             typer.echo(f"    {r['signature']}")
             if r["exchange_core"]:
                 typer.echo(f"    Core: {r['exchange_core']}")
+            typer.echo(f"    {r['source_path']}:ply={r['ply_start']}")

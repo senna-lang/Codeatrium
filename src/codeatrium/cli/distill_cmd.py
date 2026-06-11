@@ -14,6 +14,7 @@ def distill(
     ] = None,
 ) -> None:
     """未蒸留の exchange を claude -p で蒸留して palace_objects を生成する"""
+    import fcntl
     import os
 
     from codeatrium.config import load_config
@@ -30,31 +31,14 @@ def distill(
 
     lock_path = db.parent / "distill.lock"
 
-    # ロック取得: O_CREAT | O_EXCL で原子的に作成（TOCTOU 防止）
+    # ロック取得: fcntl.flock で排他ロック（LOCK_NB: 非ブロッキング）
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
         os.close(fd)
-    except FileExistsError:
-        # 既存ロックのプロセスが生きているか確認
-        try:
-            existing_pid = int(lock_path.read_text().strip())
-            os.kill(existing_pid, 0)
-            typer.echo(
-                f"loci distill is already running (PID {existing_pid}). Exiting.",
-                err=True,
-            )
-            raise typer.Exit(0)
-        except (ValueError, ProcessLookupError, PermissionError):
-            # stale lock — 再取得
-            lock_path.unlink(missing_ok=True)
-            try:
-                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-            except FileExistsError:
-                typer.echo("loci distill: lost lock race after stale cleanup. Exiting.", err=True)
-                raise typer.Exit(0)
+        typer.echo("loci distill is already running. Exiting.", err=True)
+        raise typer.Exit(0)
 
     def _on_progress(cur: int, tot: int, error: str | None = None) -> None:
         if error:
@@ -63,7 +47,16 @@ def distill(
             typer.echo(f"  [{cur}/{tot}] distilled", err=True)
 
     try:
-        count = distill_all(
+        from codeatrium.db import check_drift
+
+        drifts = check_drift(db)
+        for key, recorded, current in drifts:
+            typer.echo(
+                f"[warn] {key} changed ({recorded} -> {current}). Re-index recommended.",
+                err=True,
+            )
+
+        count, err_count = distill_all(
             db,
             limit=limit,
             model=cfg.distill_model,
@@ -72,5 +65,8 @@ def distill(
             distill_min_chars=cfg.distill_min_chars,
         )
         typer.echo(f"Distilled {count} exchange(s).")
+        if err_count > 0:
+            typer.echo(f"{err_count} exchange(s) failed — see errors above.", err=True)
     finally:
-        lock_path.unlink(missing_ok=True)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)

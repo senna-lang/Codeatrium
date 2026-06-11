@@ -2,13 +2,44 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import os
 import shlex
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, cast
 
 from codeatrium.config import DEFAULT_DISTILL_BATCH_LIMIT
 from codeatrium.paths import loci_bin
+
+
+def _write_settings(settings_path: Path, settings: dict[str, Any]) -> None:
+    """settings.json をアトミックに書き込む。書き込み前に .bak を作成し os.replace で差し替える。"""
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    if settings_path.exists():
+        shutil.copy2(settings_path, settings_path.with_suffix(".json.bak"))
+
+    tmp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=settings_path.parent,
+        delete=False,
+        suffix=".tmp",
+        encoding="utf-8",
+    )
+    tmp_path = tmp_file.name
+    try:
+        json.dump(settings, tmp_file, ensure_ascii=False, indent=2)
+        tmp_file.flush()
+        os.fsync(tmp_file.fileno())
+        tmp_file.close()
+        os.replace(tmp_path, settings_path)
+    except Exception:
+        tmp_file.close()
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
 
 def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool, str]:
@@ -19,7 +50,7 @@ def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool,
     settings_path = Path.home() / ".claude" / "settings.json"
 
     if settings_path.exists():
-        with settings_path.open() as f:
+        with settings_path.open(encoding="utf-8") as f:
             settings: dict[str, Any] = json.load(f)
     else:
         settings = {}
@@ -141,9 +172,7 @@ def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool,
     if not changed:
         return False, "Hooks already up to date."
 
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    with settings_path.open("w") as f:
-        json.dump(settings, f, ensure_ascii=False, indent=2)
+    _write_settings(settings_path, settings)
 
     lines = [
         f"Hooks installed: {settings_path}",
@@ -154,3 +183,50 @@ def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool,
         "  (matcher: startup|clear|resume|compact)",
     ]
     return True, "\n".join(lines)
+
+
+def uninstall_hooks() -> tuple[bool, str]:
+    """codeatrium に関連する Claude Code フックを削除する。
+
+    Returns: (changed, message) — 変更の有無と結果メッセージ
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+
+    if not settings_path.exists():
+        return False, "No settings.json found. Nothing to uninstall."
+
+    with settings_path.open(encoding="utf-8") as f:
+        settings: dict[str, Any] = json.load(f)
+
+    settings_before = copy.deepcopy(settings)
+
+    hooks = settings.get("hooks", {})
+    if not hooks:
+        return False, "No hooks section found. Nothing to uninstall."
+
+    def _is_loci(h: dict[str, Any]) -> bool:
+        cmd = h.get("command", "")
+        return "loci" in cmd and any(
+            kw in cmd for kw in ("index", "server", "distill", "prime")
+        )
+
+    for section in ("Stop", "SessionStart", "SessionEnd"):
+        if section not in hooks:
+            continue
+        entries: list[dict[str, Any]] = hooks[section]
+        for entry in entries[:]:
+            hooks_list = entry.get("hooks", [])
+            entry["hooks"] = [h for h in hooks_list if not _is_loci(h)]
+        hooks[section] = [e for e in entries if e.get("hooks")]
+        if not hooks[section]:
+            del hooks[section]
+
+    if not hooks:
+        if "hooks" in settings:
+            del settings["hooks"]
+
+    if settings == settings_before:
+        return False, "No codeatrium hooks found. Nothing to uninstall."
+
+    _write_settings(settings_path, settings)
+    return True, f"Hooks uninstalled: {settings_path}"

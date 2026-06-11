@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from codeatrium.config import (
     DEFAULT_DISTILL_BATCH_LIMIT,
@@ -115,3 +116,26 @@ def test_load_config_distill_min_chars_invalid_fallback(tmp_path: Path) -> None:
     (codeatrium_dir / "config.toml").write_text("[distill]\nmin_chars = -5\n")
     cfg = load_config(tmp_path)
     assert cfg.distill_min_chars == DEFAULT_DISTILL_MIN_CHARS
+
+
+def test_load_config_toml_decode_error_fallback(tmp_path: Path, capsys) -> None:
+    """不正な TOML 内容（TOMLDecodeError）はデフォルトにフォールバック、警告出力"""
+    codeatrium_dir = tmp_path / ".codeatrium"
+    codeatrium_dir.mkdir()
+    (codeatrium_dir / "config.toml").write_text("not valid toml [")
+    cfg = load_config(tmp_path)
+    assert cfg == Config()
+    captured = capsys.readouterr()
+    assert "Warning" in captured.err
+
+
+def test_load_config_oserror_fallback(tmp_path: Path) -> None:
+    """OSError（ファイルアクセスエラー）はデフォルトにフォールバック"""
+    codeatrium_dir = tmp_path / ".codeatrium"
+    codeatrium_dir.mkdir()
+    config_file = codeatrium_dir / "config.toml"
+    config_file.write_text("[distill]\nmodel = 'test'\n")
+    # exists() は True のまま、open() だけ OSError を引き起こす
+    with patch("pathlib.Path.open", side_effect=OSError("disk error")):
+        cfg = load_config(tmp_path)
+    assert cfg == Config()

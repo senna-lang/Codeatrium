@@ -12,12 +12,13 @@ exchange 境界定義:
 
 from __future__ import annotations
 
-import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from codeatrium.utils import sha256
 
 
 @dataclass
@@ -30,13 +31,86 @@ class Exchange:
     ply_end: int
     user_content: str
     agent_content: str
+    files: list[str] = field(default_factory=list)
 
 
 # ---- 内部ヘルパー ----
 
+# 外部パス（サイトパッケージ等）の判定用マーカー
+_EXTERNAL_PATH_MARKERS = (
+    'site-packages/',
+    'dist-packages/',
+    '/lib/python',
+    '/opt/',
+    '/usr/lib/',
+    '/usr/local/lib/',
+    '.venv/',
+    '/venv/',
+    'node_modules/',
+)
 
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
+
+def _is_external_path_indexer(path: str) -> bool:
+    """パスが外部ライブラリ（site-packages など）を指しているか判定する"""
+    return any(marker in path for marker in _EXTERNAL_PATH_MARKERS)
+
+
+def _extract_tool_use_files(entries: list[dict | None]) -> list[str]:
+    """
+    assistant エントリから tool_use ブロックの file_path を抽出する。
+    外部パスは除外し、重複をトリムしたリストを返す（順序保持）。
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+
+    for entry in entries:
+        if entry is None:
+            continue
+        if entry.get("type") != "assistant":
+            continue
+
+        msg = entry.get("message")
+        if not isinstance(msg, dict):
+            continue
+
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use":
+                continue
+
+            name = block.get("name")
+            if name not in {'Edit', 'Write', 'Read', 'MultiEdit', 'NotebookEdit'}:
+                continue
+
+            input_dict = block.get("input")
+            if not isinstance(input_dict, dict):
+                continue
+
+            # NotebookEdit の場合は notebook_path、その他は file_path
+            path = None
+            if name == 'NotebookEdit':
+                path = input_dict.get("notebook_path")
+            else:
+                path = input_dict.get("file_path")
+
+            if not path or not isinstance(path, str):
+                continue
+
+            # 外部パスはスキップ
+            if _is_external_path_indexer(path):
+                continue
+
+            # 重複排除（順序保持）
+            if path not in seen:
+                seen.add(path)
+                result.append(path)
+
+    return result
 
 
 def _extract_text(content: Any) -> str:
@@ -104,44 +178,62 @@ def _is_real_user_entry(entry: dict) -> bool:
 # ---- 公開API ----
 
 
-def parse_exchanges(jsonl_path: Path, min_chars: int = 50) -> list[Exchange]:
+def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -1) -> list[Exchange]:
     """
     .jsonl ファイルを読んで exchange リストを返す。
     trivial（min_chars 文字未満）は除外する。
+    last_ply_end: ply インデックス以前の行はスキップ（デフォルト -1 = 全行パース、既にインデックスされた部分の再処理を避けるため）。
     """
-    entries: list[dict] = []
+    raw_entries: list[dict | None] = []
     if not jsonl_path.exists():
         return []
+    ply = 0
     with jsonl_path.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+            if ply <= last_ply_end:
+                # 既インデックス領域: 古い exchange は再構築しない（None プレースホルダ）。
+                # ただし malformed 行は位置に数えない — last_ply_end は成功パース行のみを
+                # 数えた座標系なので、検証パースして同じ座標系を維持する。
+                try:
+                    json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                raw_entries.append(None)
+                ply += 1
+            else:
+                try:
+                    raw_entries.append(json.loads(line))
+                    ply += 1
+                except json.JSONDecodeError:
+                    continue
 
-    conversation_id = _sha256(str(jsonl_path))
+    conversation_id = sha256(str(jsonl_path))
 
     # exchange の境界インデックスを収集
-    boundaries: list[int] = [i for i, e in enumerate(entries) if _is_real_user_entry(e)]
+    boundaries: list[int] = [i for i, e in enumerate(raw_entries) if e is not None and _is_real_user_entry(e)]
 
     exchanges: list[Exchange] = []
     for b_idx, start in enumerate(boundaries):
         end = (
             boundaries[b_idx + 1] - 1
             if b_idx + 1 < len(boundaries)
-            else len(entries) - 1
+            else len(raw_entries) - 1
         )
 
-        user_entry = entries[start]
+        user_entry = raw_entries[start]
+        if user_entry is None:
+            continue
         user_text = _extract_text(user_entry["message"]["content"])
 
         # assistant の発話を連結（コンパクション要約ゾーンは除外）
         agent_parts: list[str] = []
         in_compaction_zone = False
-        for e in entries[start + 1 : end + 1]:
+        for e in raw_entries[start + 1 : end + 1]:
+            if e is None:
+                continue
             if e.get("type") == "user":
                 msg = e.get("message", {})
                 if isinstance(msg, dict):
@@ -163,7 +255,10 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50) -> list[Exchange]:
             continue
 
         user_uuid = user_entry.get("uuid", f"{start}")
-        exchange_id = _sha256(f"{conversation_id}:{user_uuid}")
+        exchange_id = sha256(f"{conversation_id}:{user_uuid}")
+
+        # tool_use から file パスを抽出
+        tool_files = _extract_tool_use_files(raw_entries[start : end + 1])
 
         exchanges.append(
             Exchange(
@@ -173,6 +268,7 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50) -> list[Exchange]:
                 ply_end=end,
                 user_content=user_text,
                 agent_content=agent_text,
+                files=tool_files,
             )
         )
 
@@ -187,7 +283,7 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
     """
     from codeatrium.db import get_connection
 
-    conversation_id = _sha256(str(jsonl_path))
+    conversation_id = sha256(str(jsonl_path))
     con = get_connection(db_path)
 
     # 既存 conversation の last_ply_end を取得
@@ -196,7 +292,7 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
     ).fetchone()
     last_ply_end = row["last_ply_end"] if row is not None else -1
 
-    exchanges = parse_exchanges(jsonl_path, min_chars=min_chars)
+    exchanges = parse_exchanges(jsonl_path, min_chars=min_chars, last_ply_end=last_ply_end)
     new_exchanges = [ex for ex in exchanges if ex.ply_start > last_ply_end]
 
     if not new_exchanges:
@@ -233,6 +329,14 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
                 ex.agent_content,
             ),
         )
+
+    # exchange_files を登録
+    for ex in new_exchanges:
+        for file_path in ex.files:
+            con.execute(
+                "INSERT OR IGNORE INTO exchange_files (exchange_id, file_path) VALUES (?, ?)",
+                (ex.id, file_path),
+            )
 
     con.commit()
     con.close()

@@ -12,28 +12,31 @@ END_MARKER = "<!-- END CODEATRIUM -->"
 PRIME_TEXT = """\
 ## Past Memory Search (codeatrium)
 
-Use `loci search` to find past implementations, decisions, and code locations.
+codeatrium records every past conversation turn, decision, and code location. Retrieve that memory **before** acting — not after.
 
-### When to use
+### When to act (agent-initiated triggers)
 
-- When asked "where did we implement X?" or "where is X?"
-- When checking if a similar bug was fixed before
-- When verifying if a feature already exists
-- When looking up the reasoning behind a past design decision
-- Before editing code you lack context about — use `loci context --symbol` to review past discussions
-- Before refactoring or changing the behavior of a function — use `loci context --symbol` to check past design decisions
+- **Before editing or refactoring a function** — recall past design decisions and known constraints for that symbol.
+- **Before starting a new implementation** — check if similar work was done before; reuse decisions and avoid re-debating settled choices.
+- **When you encounter a known or recurring error** — search for past fixes; the solution may already be documented.
 
-### Commands
+### Search — semantic query over past conversations
 
 ```bash
-# Semantic search
-loci search "query" --json --limit 5
+# Find past discussions, decisions, or implementations
+loci search "BM25 RRF fusion ranking" --json --limit 5
 
-# Reverse lookup: code symbol -> past conversations
-loci context --symbol "symbol_name" --json
-
-# Retrieve verbatim conversation (use verbatim_ref from search results)
+# Retrieve verbatim exchange (use verbatim_ref from search results)
 loci show "<verbatim_ref>" --json
+```
+
+### Context — reverse lookup from code symbol to past conversations
+
+Touching a symbol = recalling memory about that symbol. Before changing any function or class, look up what was decided about it.
+
+```bash
+# Retrieve all past conversations that involved this symbol
+loci context --symbol "SymbolResolver.extract" --json
 ```\
 """
 
@@ -41,15 +44,8 @@ CLAUDE_MD_SECTION = f"""\
 {BEGIN_MARKER}
 ## Past Memory Search (codeatrium)
 
-IMPORTANT: Command usage is injected automatically at session start via `loci prime` (SessionStart hook).
+IMPORTANT: Full usage instructions are injected automatically at session start via `loci prime` (SessionStart hook).
 If not in context, run `loci prime`.
-
-### Rules
-
-1. **Search before implementing** — always check if something was discussed or built before starting work.
-2. **Check symbols when you lack context** — run `loci context --symbol` before changing a function you don't have enough background on.
-3. **Use technical terms** — queries with exact symbol names, error messages, or parameter names yield better results.
-4. **Follow up with `loci show`** — when `exchange_core` is ambiguous, fetch the full verbatim conversation.
 {END_MARKER}\
 """
 

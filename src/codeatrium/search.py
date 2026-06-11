@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 import struct
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -116,29 +117,28 @@ def search_bm25(
     db_path: Path, query_text: str, limit: int = 10, min_exchanges: int = 2
 ) -> list[BM25Result]:
     """FTS5 BM25 で exchanges_fts を検索する"""
-    con = get_connection(db_path)
     fts_query = _fts5_query(query_text)
-    try:
-        rows = con.execute(
-            """
-            SELECT
-                e.id          AS exchange_id,
-                e.user_content,
-                e.agent_content,
-                -bm25(exchanges_fts) AS score
-            FROM exchanges_fts
-            JOIN exchanges e ON e.rowid = exchanges_fts.rowid
-            WHERE exchanges_fts MATCH ?
-              AND (SELECT COUNT(*) FROM exchanges e2
-                   WHERE e2.conversation_id = e.conversation_id) >= ?
-            ORDER BY score DESC
-            LIMIT ?
-            """,
-            (fts_query, min_exchanges, limit),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
-    con.close()
+    with closing(get_connection(db_path)) as con:
+        try:
+            rows = con.execute(
+                """
+                SELECT
+                    e.id          AS exchange_id,
+                    e.user_content,
+                    e.agent_content,
+                    -bm25(exchanges_fts) AS score
+                FROM exchanges_fts
+                JOIN exchanges e ON e.rowid = exchanges_fts.rowid
+                WHERE exchanges_fts MATCH ?
+                  AND (SELECT COUNT(*) FROM exchanges e2
+                       WHERE e2.conversation_id = e.conversation_id) >= ?
+                ORDER BY score DESC
+                LIMIT ?
+                """,
+                (fts_query, min_exchanges, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
     return [
         BM25Result(
             exchange_id=row["exchange_id"],
@@ -157,37 +157,36 @@ def search_hnsw_palace(
     db_path: Path, query_vec: np.ndarray, limit: int = 10, min_exchanges: int = 2
 ) -> list[HNSWPalaceResult]:
     """sqlite-vec HNSW で vec_palace を検索する（distilled embedding）"""
-    con = get_connection(db_path)
-    blob = _serialize(query_vec)
 
-    try:
-        rows = con.execute(
-            """
-            SELECT
-                p.exchange_id,
-                e.user_content,
-                e.agent_content,
-                p.exchange_core,
-                p.specific_context,
-                v.distance
-            FROM (
-                SELECT palace_id, distance
-                FROM vec_palace
-                WHERE embedding MATCH ?
-                AND k = ?
-            ) v
-            JOIN palace_objects p ON p.id = v.palace_id
-            JOIN exchanges e ON e.id = p.exchange_id
-            WHERE (SELECT COUNT(*) FROM exchanges e2
-                   WHERE e2.conversation_id = e.conversation_id) >= ?
-            ORDER BY v.distance
-            """,
-            (blob, limit, min_exchanges),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
+    with closing(get_connection(db_path)) as con:
+        blob = _serialize(query_vec)
+        try:
+            rows = con.execute(
+                """
+                SELECT
+                    p.exchange_id,
+                    e.user_content,
+                    e.agent_content,
+                    p.exchange_core,
+                    p.specific_context,
+                    v.distance
+                FROM (
+                    SELECT palace_id, distance
+                    FROM vec_palace
+                    WHERE embedding MATCH ?
+                    AND k = ?
+                ) v
+                JOIN palace_objects p ON p.id = v.palace_id
+                JOIN exchanges e ON e.id = p.exchange_id
+                WHERE (SELECT COUNT(*) FROM exchanges e2
+                       WHERE e2.conversation_id = e.conversation_id) >= ?
+                ORDER BY v.distance
+                """,
+                (blob, limit, min_exchanges),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
 
-    con.close()
     return [
         HNSWPalaceResult(
             exchange_id=row["exchange_id"],
@@ -266,8 +265,7 @@ def search_combined(
     fused = rrf(bm25_results, hnsw_results, limit=limit)
 
     if fused:
-        con = get_connection(db_path)
-        _enrich_results(con, fused)
-        con.close()
+        with closing(get_connection(db_path)) as con:
+            _enrich_results(con, fused)
 
     return fused
