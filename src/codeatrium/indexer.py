@@ -32,6 +32,7 @@ class Exchange:
     user_content: str
     agent_content: str
     files: list[str] = field(default_factory=list)
+    git_branch: str | None = None
 
 
 # ---- 内部ヘルパー ----
@@ -255,6 +256,8 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -
             continue
 
         user_uuid = user_entry.get("uuid", f"{start}")
+        git_branch_raw = user_entry.get("gitBranch", "")
+        git_branch = git_branch_raw if isinstance(git_branch_raw, str) and git_branch_raw.strip() else None
         exchange_id = sha256(f"{conversation_id}:{user_uuid}")
 
         # tool_use から file パスを抽出
@@ -269,6 +272,7 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -
                 user_content=user_text,
                 agent_content=agent_text,
                 files=tool_files,
+                git_branch=git_branch,
             )
         )
 
@@ -317,8 +321,8 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
         con.execute(
             """
             INSERT OR IGNORE INTO exchanges
-                (id, conversation_id, ply_start, ply_end, user_content, agent_content)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (id, conversation_id, ply_start, ply_end, user_content, agent_content, git_branch)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ex.id,
@@ -327,6 +331,7 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
                 ex.ply_end,
                 ex.user_content,
                 ex.agent_content,
+                ex.git_branch,
             ),
         )
 

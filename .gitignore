@@ -21,6 +21,4 @@ build/
 
 # Internal docs (local only)
 docs/internal/
-
-# 論文資料（ローカルのみ）
-mem/
+.strata

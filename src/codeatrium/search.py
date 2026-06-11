@@ -97,10 +97,17 @@ def _enrich_results(con: sqlite3.Connection, results: list[FusedResult]) -> None
             }
         )
 
+    branch_rows = con.execute(
+        f'SELECT e.id, e.git_branch FROM exchanges e WHERE e.id IN ({placeholders})',
+        exchange_ids,
+    ).fetchall()
+    branch_map = {r['id']: r['git_branch'] for r in branch_rows}
+
     for r in results:
         r.verbatim_ref = ref_map.get(r.exchange_id)
         r.rooms = rooms_map.get(r.exchange_id, [])
         r.symbols = symbols_map.get(r.exchange_id, [])
+        r.git_branch = branch_map.get(r.exchange_id)
 
 
 # ---- BM25 verbatim ----
@@ -114,14 +121,16 @@ def _fts5_query(text: str) -> str:
 
 
 def search_bm25(
-    db_path: Path, query_text: str, limit: int = 10, min_exchanges: int = 2
+    db_path: Path, query_text: str, limit: int = 10, min_exchanges: int = 2, branch: str | None = None
 ) -> list[BM25Result]:
     """FTS5 BM25 で exchanges_fts を検索する"""
     fts_query = _fts5_query(query_text)
+    branch_clause = 'AND e.git_branch LIKE ?' if branch is not None else ''
+    branch_params: list = [f'%{branch}%'] if branch is not None else []
     with closing(get_connection(db_path)) as con:
         try:
             rows = con.execute(
-                """
+                f"""
                 SELECT
                     e.id          AS exchange_id,
                     e.user_content,
@@ -132,10 +141,11 @@ def search_bm25(
                 WHERE exchanges_fts MATCH ?
                   AND (SELECT COUNT(*) FROM exchanges e2
                        WHERE e2.conversation_id = e.conversation_id) >= ?
+                {branch_clause}
                 ORDER BY score DESC
                 LIMIT ?
                 """,
-                (fts_query, min_exchanges, limit),
+                (fts_query, min_exchanges, *branch_params, limit),
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
@@ -154,15 +164,17 @@ def search_bm25(
 
 
 def search_hnsw_palace(
-    db_path: Path, query_vec: np.ndarray, limit: int = 10, min_exchanges: int = 2
+    db_path: Path, query_vec: np.ndarray, limit: int = 10, min_exchanges: int = 2, branch: str | None = None
 ) -> list[HNSWPalaceResult]:
     """sqlite-vec HNSW で vec_palace を検索する（distilled embedding）"""
+    branch_clause = 'AND e.git_branch LIKE ?' if branch is not None else ''
+    branch_params: list = [f'%{branch}%'] if branch is not None else []
 
     with closing(get_connection(db_path)) as con:
         blob = _serialize(query_vec)
         try:
             rows = con.execute(
-                """
+                f"""
                 SELECT
                     p.exchange_id,
                     e.user_content,
@@ -180,9 +192,10 @@ def search_hnsw_palace(
                 JOIN exchanges e ON e.id = p.exchange_id
                 WHERE (SELECT COUNT(*) FROM exchanges e2
                        WHERE e2.conversation_id = e.conversation_id) >= ?
+                {branch_clause}
                 ORDER BY v.distance
                 """,
-                (blob, limit, min_exchanges),
+                (blob, limit, min_exchanges, *branch_params),
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
@@ -254,13 +267,14 @@ def search_combined(
     query_vec: np.ndarray,
     limit: int = 5,
     min_exchanges: int = 2,
+    branch: str | None = None,
 ) -> list[FusedResult]:
     """BM25(V) + HNSW(D) の RRF 融合検索。"""
     bm25_results = search_bm25(
-        db_path, query_text, limit=limit * 2, min_exchanges=min_exchanges
+        db_path, query_text, limit=limit * 2, min_exchanges=min_exchanges, branch=branch
     )
     hnsw_results = search_hnsw_palace(
-        db_path, query_vec, limit=limit * 2, min_exchanges=min_exchanges
+        db_path, query_vec, limit=limit * 2, min_exchanges=min_exchanges, branch=branch
     )
     fused = rrf(bm25_results, hnsw_results, limit=limit)
 

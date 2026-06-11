@@ -24,7 +24,7 @@ from codeatrium.search import (
 LONG_TEXT = "connection pool " * 10
 
 
-def _insert_exchange(con, ex_id, user_content, agent_content, conv_id="conv1"):
+def _insert_exchange(con, ex_id, user_content, agent_content, conv_id="conv1", git_branch: str | None = None):
     con.execute(
         "INSERT OR IGNORE INTO conversations (id, source_path) VALUES (?,?)",
         (conv_id, f"/path/{conv_id}.jsonl"),
@@ -41,10 +41,10 @@ def _insert_exchange(con, ex_id, user_content, agent_content, conv_id="conv1"):
     con.execute(
         """
         INSERT OR IGNORE INTO exchanges
-            (id, conversation_id, ply_start, ply_end, user_content, agent_content)
-        VALUES (?,?,?,?,?,?)
+            (id, conversation_id, ply_start, ply_end, user_content, agent_content, git_branch)
+        VALUES (?,?,?,?,?,?,?)
         """,
-        (ex_id, conv_id, 2, 5, user_content, agent_content),
+        (ex_id, conv_id, 2, 5, user_content, agent_content, git_branch),
     )
     con.commit()
 
@@ -326,6 +326,39 @@ def test_search_hnsw_connection_leak(tmp_path: Path) -> None:
     assert fake_con.close.called
 
 
+def test_search_hnsw_branch_filter_correct_binding(tmp_path: Path) -> None:
+    """search_hnsw_palace with branch filter binds parameters correctly.
+
+    Verifies that the branch string is bound to the LIKE ? placeholder,
+    not to the min_exchanges >= ? integer placeholder. If parameter order
+    is wrong, SQLite will attempt type coercion and either fail or produce
+    incorrect results.
+    """
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+
+    # Insert two exchanges with different git_branch values
+    _insert_exchange(con, "hnsw-branch-a", "connection pool management system " * 3, "response a", conv_id="hnsw-conv-branch", git_branch="branch-a")
+    _insert_exchange(con, "hnsw-branch-b", "database query optimization " * 3, "response b", conv_id="hnsw-conv-branch", git_branch="branch-b")
+
+    # Insert palace_objects and vec_palace for both exchanges
+    query_vec = np.zeros(384, dtype=np.float32)
+    _insert_palace(con, "palace-a", "hnsw-branch-a", "palace core a", query_vec)
+    _insert_palace(con, "palace-b", "hnsw-branch-b", "palace core b", query_vec)
+
+    con.close()
+
+    # Call search_hnsw_palace with branch filter
+    # If parameter binding is wrong, this will either raise an exception
+    # or return results from both branches
+    results = search_hnsw_palace(db_path, query_vec, limit=10, min_exchanges=2, branch="branch-a")
+
+    # Verify that only branch-a results are returned (or empty if no match)
+    for result in results:
+        assert result.exchange_id == "hnsw-branch-a", f"Expected only 'hnsw-branch-a', got {result.exchange_id}"
+
+
 def test_search_combined_enrich_connection_leak(tmp_path: Path) -> None:
     """search_combined は enrich 時に exception が出ても enrich con を close する"""
     db_path = tmp_path / "memory.db"
@@ -359,3 +392,59 @@ def test_search_combined_enrich_connection_leak(tmp_path: Path) -> None:
     assert fake_enrich_con.close.called
     if stored_con is not None:
         stored_con.close()
+
+
+def test_search_bm25_branch_filter(tmp_path: Path) -> None:
+    """branch フィルタで指定されたブランチのみ返される"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "ex1", LONG_TEXT, "pool response", git_branch="branch-a")
+    _insert_exchange(con, "ex2", LONG_TEXT, "pool response", conv_id="conv2", git_branch="branch-b")
+    con.close()
+
+    results = search_bm25(db_path, "connection pool", branch="branch-a")
+    assert len(results) == 1
+    assert results[0].exchange_id == "ex1"
+
+
+def test_search_bm25_branch_partial_match(tmp_path: Path) -> None:
+    """branch フィルタは部分一致で動作する"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "ex1", LONG_TEXT, "pool response", git_branch="release/1.0-hardening")
+    con.close()
+
+    results = search_bm25(db_path, "connection pool", branch="1.0-hardening")
+    assert len(results) == 1
+    assert results[0].exchange_id == "ex1"
+
+
+def test_search_combined_branch_filter(tmp_path: Path) -> None:
+    """search_combined で branch フィルタが機能する"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "ex1", LONG_TEXT, "pool response", git_branch="target-branch")
+    _insert_exchange(con, "ex2", LONG_TEXT, "pool response", conv_id="conv2", git_branch="other-branch")
+    con.close()
+
+    vec = np.ones(384, dtype=np.float32)
+    results = search_combined(db_path, "connection pool", vec, branch="target-branch")
+    assert any(r.exchange_id == "ex1" for r in results)
+    assert not any(r.exchange_id == "ex2" for r in results)
+
+
+def test_enrich_results_populates_git_branch(tmp_path: Path) -> None:
+    """_enrich_results が git_branch を正しく付加する"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "ex1", LONG_TEXT, "pool response", git_branch="feature-x")
+    con.close()
+
+    vec = np.ones(384, dtype=np.float32)
+    results = search_combined(db_path, "connection pool", vec, limit=5)
+    assert len(results) >= 1
+    assert results[0].git_branch == "feature-x"

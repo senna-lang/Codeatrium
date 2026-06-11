@@ -182,6 +182,15 @@ def test_prime_outputs_instructions(tmp_path, monkeypatch):
     assert "loci show" in result.output
 
 
+def test_prime_outputs_branch_usage(tmp_path, monkeypatch):
+    _setup_db(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["prime"])
+    assert result.exit_code == 0
+    assert "--branch" in result.output
+    assert "loci context --branch" in result.output
+
+
 def test_prime_silent_when_uninitialized(tmp_path, monkeypatch):
     """.codeatrium/ がないディレクトリでは何も出力せず exit 0 で抜ける"""
     monkeypatch.chdir(tmp_path)

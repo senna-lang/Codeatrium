@@ -91,7 +91,7 @@ def test_context_full_flag_includes_content(tmp_path, monkeypatch):
     assert "agent_content" in data[0]
 
 
-def test_context_default_nine_fields(tmp_path, monkeypatch):
+def test_context_default_symbol_fields(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db, con = _setup(tmp_path)
     _insert_fixture(con)
@@ -110,6 +110,7 @@ def test_context_default_nine_fields(tmp_path, monkeypatch):
         "exchange_core",
         "specific_context",
         "verbatim_ref",
+        "git_branch",
     }
 
 
@@ -123,3 +124,79 @@ def test_context_verbatim_ref_format(tmp_path, monkeypatch):
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert data[0]["verbatim_ref"] == "/fake/session.jsonl:ply=10"
+
+
+def test_context_branch_only_returns_results(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_fixture(con)
+    # Update git_branch directly
+    con.execute("UPDATE exchanges SET git_branch=? WHERE id=?", ("main", "ex1"))
+    con.commit()
+    con.close()
+
+    result = runner.invoke(app, ["context", "--branch", "main", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert len(data) > 0
+    assert data[0]["git_branch"] == "main"
+    assert "exchange_id" in data[0]
+
+
+def test_context_no_args_exits_1(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_fixture(con)
+    con.close()
+
+    result = runner.invoke(app, ["context", "--json"])
+    assert result.exit_code == 1
+
+
+def test_context_symbol_has_git_branch_field(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_fixture(con)
+    con.close()
+
+    result = runner.invoke(app, ["context", "--symbol", "MyFunc", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert "git_branch" in data[0]
+
+
+def test_search_json_has_git_branch_field(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from codeatrium.models import FusedResult
+
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_fixture(con)
+    con.close()
+
+    # Create a mock FusedResult with git_branch set
+    mock_result = FusedResult(
+        exchange_id="ex1",
+        user_content="user content",
+        agent_content="agent content",
+        score=0.95,
+        exchange_core="core summary",
+        specific_context="specific detail",
+        verbatim_ref="/fake/session.jsonl:ply=0",
+        rooms=[],
+        symbols=[],
+        git_branch="feature-branch",
+    )
+
+    # Embedder の実体はモデルロードが走り出力を汚すためモックする
+    with (
+        patch("codeatrium.embedder.Embedder", return_value=MagicMock()),
+        patch("codeatrium.search.search_combined", return_value=[mock_result]),
+    ):
+        result = runner.invoke(app, ["search", "test query", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) > 0
+        assert "git_branch" in data[0]
+        assert data[0]["git_branch"] == "feature-branch"

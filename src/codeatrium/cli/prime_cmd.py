@@ -19,6 +19,7 @@ codeatrium records every past conversation turn, decision, and code location. Re
 - **Before editing or refactoring a function** — recall past design decisions and known constraints for that symbol.
 - **Before starting a new implementation** — check if similar work was done before; reuse decisions and avoid re-debating settled choices.
 - **When you encounter a known or recurring error** — search for past fixes; the solution may already be documented.
+- **When asked about work on a specific branch** — recall what was done and discussed on that branch.
 
 ### Search — semantic query over past conversations
 
@@ -30,13 +31,16 @@ loci search "BM25 RRF fusion ranking" --json --limit 5
 loci show "<verbatim_ref>" --json
 ```
 
-### Context — reverse lookup from code symbol to past conversations
+### Context — reverse lookup from code symbol or git branch to past conversations
 
 Touching a symbol = recalling memory about that symbol. Before changing any function or class, look up what was decided about it.
 
 ```bash
 # Retrieve all past conversations that involved this symbol
 loci context --symbol "SymbolResolver.extract" --json
+
+# Retrieve past conversations from work on a specific branch
+loci context --branch "feature/foo" --json
 ```\
 """
 
