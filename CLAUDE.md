@@ -102,7 +102,7 @@ loci index                                   # Index new .jsonl files
 loci distill [--limit N]                     # Distill queued exchanges via claude --print
 loci search "query" --json --limit 5         # Semantic search (agent-facing)
 loci search "query" --branch NAME --json     # Branch-filtered semantic search
-loci context --symbol "Foo.bar" --json       # Reverse lookup: code -> past conversations (lightweight; use loci show <verbatim_ref> for full text)
+loci context --symbol "Foo.bar" --json       # Reverse lookup: code -> past conversations
 loci context --branch NAME --json            # Branch reverse lookup (undistilled exchanges included)
 loci show "~/.claude/.../abc.jsonl:ply=42"   # Fetch verbatim exchange
 loci status                                  # Show index state
@@ -124,15 +124,8 @@ loci hook install                            # Register hooks to ~/.claude/setti
 <!-- BEGIN CODEATRIUM -->
 ## Past Memory Search (codeatrium)
 
-IMPORTANT: Command usage is injected automatically at session start via `loci prime` (SessionStart hook).
+IMPORTANT: Full usage instructions are injected automatically at session start via `loci prime` (SessionStart hook).
 If not in context, run `loci prime`.
-
-### Rules
-
-1. **Search before implementing** — always check if something was discussed or built before starting work.
-2. **Check symbols when you lack context** — run `loci context --symbol` before changing a function you don't have enough background on.
-3. **Use technical terms** — queries with exact symbol names, error messages, or parameter names yield better results.
-4. **Follow up with `loci show <verbatim_ref>`** — `context` returns a lightweight summary; full verbatim text is fetched via `loci show <verbatim_ref>`.
 <!-- END CODEATRIUM -->
 
 ---
