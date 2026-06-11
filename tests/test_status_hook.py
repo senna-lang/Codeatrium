@@ -172,7 +172,9 @@ def test_hook_install_prime_idempotent(tmp_path, monkeypatch):
     assert len(prime_hooks) == 1
 
 
-def test_prime_outputs_instructions():
+def test_prime_outputs_instructions(tmp_path, monkeypatch):
+    _setup_db(tmp_path)
+    monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["prime"])
     assert result.exit_code == 0
     assert "loci search" in result.output
