@@ -6,6 +6,8 @@ import typer
 
 server_app = typer.Typer(help="embedding サーバー管理")
 
+_SERVER_STARTUP_POLL_ATTEMPTS: int = 150  # サーバー起動確認のポーリング回数（0.2秒 × 150 = 最大30秒待機）
+
 
 @server_app.command("start")
 def server_start() -> None:
@@ -61,7 +63,7 @@ def server_start() -> None:
 
     import time
 
-    for i in range(150):
+    for i in range(_SERVER_STARTUP_POLL_ATTEMPTS):
         if sock.exists():
             typer.echo(f"Server started (PID {proc.pid})")
             return

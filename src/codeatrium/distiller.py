@@ -10,7 +10,6 @@ SPEC Section 6 DISTILLER フロー準拠:
 from __future__ import annotations
 
 import datetime
-import hashlib
 import os
 import re
 from collections.abc import Callable
@@ -22,6 +21,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 from codeatrium.embedder import Embedder, EmbedderSetupError
 from codeatrium.llm import DISTILL_PROMPT_TEMPLATE, call_claude
 from codeatrium.models import PalaceObject
+from codeatrium.utils import sha256
 
 if TYPE_CHECKING:
     from codeatrium.resolver import SymbolResolver
@@ -32,13 +32,6 @@ _FILES_PATTERN = re.compile(
     r"(/(?:[a-zA-Z0-9._\-]+/)*[a-zA-Z0-9._\-]+\.[a-zA-Z0-9]+)"  # 絶対パス
     r"|([a-zA-Z0-9._\-]+(?:/[a-zA-Z0-9._\-]+)+\.[a-zA-Z0-9]+)"  # 相対パス（1段以上のディレクトリ）
 )
-
-
-# ---- 内部ヘルパー ----
-
-
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
 
 
 # ---- 公開 API ----
@@ -174,7 +167,7 @@ def save_palace_object(
     from codeatrium.db import get_connection
     from codeatrium.resolver import SymbolResolver
 
-    palace_id = _sha256(f"palace:{exchange_id}")
+    palace_id = sha256(f"palace:{exchange_id}")
     distill_text = palace.exchange_core + "\n" + palace.specific_context
 
     con = get_connection(db_path)
@@ -205,8 +198,8 @@ def save_palace_object(
             raise RuntimeError(f"palace_objects INSERT failed for id={palace_id}")
 
         for room in palace.room_assignments:
-            dedup = _sha256(f"{room['room_type']}:{room['room_key']}")
-            room_id = _sha256(f"{palace_id}:{dedup}")
+            dedup = sha256(f"{room['room_type']}:{room['room_key']}")
+            room_id = sha256(f"{palace_id}:{dedup}")
             room_exists = con.execute(
                 "SELECT 1 FROM rooms WHERE id = ?", (room_id,)
             ).fetchone()
@@ -267,8 +260,8 @@ def save_palace_object(
                     continue
 
                 # Compute sym_id with palace_id, dedup_hash separate
-                sym_id = _sha256(f"{sym.symbol_name}:{sym.file_path}:{palace_id}")
-                dedup_hash = _sha256(f"{sym.symbol_name}:{sym.file_path}")
+                sym_id = sha256(f"{sym.symbol_name}:{sym.file_path}:{palace_id}")
+                dedup_hash = sha256(f"{sym.symbol_name}:{sym.file_path}")
 
                 sym_exists = con.execute(
                     "SELECT 1 FROM symbols WHERE id = ?", (sym_id,)

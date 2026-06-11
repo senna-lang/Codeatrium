@@ -12,12 +12,13 @@ exchange 境界定義:
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from codeatrium.utils import sha256
 
 
 @dataclass
@@ -47,10 +48,6 @@ _EXTERNAL_PATH_MARKERS = (
     '/venv/',
     'node_modules/',
 )
-
-
-def _sha256(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _is_external_path_indexer(path: str) -> bool:
@@ -206,7 +203,7 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -
                 except json.JSONDecodeError:
                     continue
 
-    conversation_id = _sha256(str(jsonl_path))
+    conversation_id = sha256(str(jsonl_path))
 
     # exchange の境界インデックスを収集
     boundaries: list[int] = [i for i, e in enumerate(raw_entries) if e is not None and _is_real_user_entry(e)]
@@ -251,7 +248,7 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -
             continue
 
         user_uuid = user_entry.get("uuid", f"{start}")
-        exchange_id = _sha256(f"{conversation_id}:{user_uuid}")
+        exchange_id = sha256(f"{conversation_id}:{user_uuid}")
 
         # tool_use から file パスを抽出
         tool_files = _extract_tool_use_files(raw_entries[start : end + 1])
@@ -279,7 +276,7 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
     """
     from codeatrium.db import get_connection
 
-    conversation_id = _sha256(str(jsonl_path))
+    conversation_id = sha256(str(jsonl_path))
     con = get_connection(db_path)
 
     # 既存 conversation の last_ply_end を取得
