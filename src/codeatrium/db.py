@@ -161,6 +161,84 @@ def _migrate_v7_repair_distill(con: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v8_add_git_branch(con: sqlite3.Connection) -> None:
+    """Migration v8: exchanges に git_branch カラムを追加し既存 exchange を jsonl 再パースでバックフィルする"""
+    import json
+
+    # Guard: check if exchanges table exists
+    exchanges_table = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'").fetchone()
+    if exchanges_table is None:
+        return
+
+    # CHECK if git_branch column already exists
+    columns = con.execute("PRAGMA table_info(exchanges)").fetchall()
+    column_names = [col[1] for col in columns]
+
+    if "git_branch" not in column_names:
+        con.execute("ALTER TABLE exchanges ADD COLUMN git_branch TEXT")
+
+    # Nested function to extract git_branch from ply targets in a jsonl file
+    def _extract_git_branch_from_ply(jsonl_path_str: str, ply_targets: list[int]) -> dict[int, str | None]:
+        """
+        Open jsonl file, iterate lines counting only successful json.loads.
+        For each ply index in ply_targets, look for entry.get('gitBranch').
+        Return mapping ply_index -> gitBranch (None if missing or empty string).
+        """
+        result: dict[int, str | None] = {}
+        try:
+            with open(jsonl_path_str, encoding='utf-8') as f:
+                ply_index = 0
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                        if ply_index in ply_targets:
+                            git_branch_raw = entry.get('gitBranch', '')
+                            git_branch = git_branch_raw if isinstance(git_branch_raw, str) and git_branch_raw.strip() else None
+                            result[ply_index] = git_branch
+                        ply_index += 1
+                    except json.JSONDecodeError:
+                        # Skip malformed lines without incrementing ply_index
+                        pass
+        except Exception:
+            # If file cannot be read, silently return empty mapping
+            pass
+
+        return result
+
+    # QUERY existing exchanges with conversation info
+    exchanges_exist = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'").fetchone()
+    conversations_exist = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'").fetchone()
+
+    if exchanges_exist is None or conversations_exist is None:
+        return
+
+    rows = con.execute(
+        "SELECT e.id, e.conversation_id, e.ply_start, c.source_path FROM exchanges e JOIN conversations c ON c.id = e.conversation_id"
+    ).fetchall()
+
+    # GROUP by source_path and backfill
+    by_path: dict[str, list[tuple[str, int]]] = {}
+    for ex_id, conv_id, ply_start, source_path in rows:
+        if source_path not in by_path:
+            by_path[source_path] = []
+        by_path[source_path].append((ex_id, ply_start))
+
+    for source_path, exchanges_for_path in by_path.items():
+        ply_targets = [ply_start for _, ply_start in exchanges_for_path]
+        branch_map = _extract_git_branch_from_ply(source_path, ply_targets)
+
+        for ex_id, ply_start in exchanges_for_path:
+            try:
+                branch_value = branch_map.get(ply_start)
+                con.execute(
+                    "UPDATE exchanges SET git_branch = ? WHERE id = ?",
+                    (branch_value, ex_id),
+                )
+            except Exception:
+                # Silently continue on any exception so migration never aborts
+                pass
+
+
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_add_last_ply_end,
     _migrate_v2_add_distill_status,
@@ -169,6 +247,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v5_add_exchange_files,
     _migrate_v6_recompute_symbol_ids,
     _migrate_v7_repair_distill,
+    _migrate_v8_add_git_branch,
 ]
 
 
@@ -235,7 +314,8 @@ def init_db(db_path: Path) -> None:
                 user_content    TEXT NOT NULL,
                 agent_content   TEXT NOT NULL,
                 distilled_at    TIMESTAMP,         -- NULL = 未蒸留
-                distill_status  TEXT NOT NULL DEFAULT 'pending'
+                distill_status  TEXT NOT NULL DEFAULT 'pending',
+                git_branch      TEXT
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(

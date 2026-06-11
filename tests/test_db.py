@@ -937,3 +937,431 @@ def test_migration_v7_removes_bm25_text_column(tmp_path: Path) -> None:
     ).fetchone()
     assert row is not None
     con.close()
+
+
+def test_migration_v8_adds_git_branch_column(tmp_path: Path) -> None:
+    """Test that v8 migration adds git_branch column to exchanges table."""
+    db_path = tmp_path / "memory.db"
+
+    # Create a raw sqlite3 DB with user_version=7 (post-v7, pre-v8)
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending'
+        )"""
+    )
+    raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
+    )
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
+    )
+    raw_con.execute(
+        """CREATE TABLE palace_objects (
+            id               TEXT PRIMARY KEY,
+            exchange_id      TEXT NOT NULL,
+            exchange_core    TEXT NOT NULL,
+            specific_context TEXT NOT NULL,
+            distill_text     TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE rooms (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            room_type        TEXT NOT NULL,
+            room_key         TEXT NOT NULL,
+            room_label       TEXT NOT NULL,
+            relevance        REAL NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE symbols (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,
+            symbol_kind      TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        "CREATE TABLE exchange_files (exchange_id TEXT, file_path TEXT, PRIMARY KEY(exchange_id, file_path))"
+    )
+
+    raw_con.execute("PRAGMA user_version = 7")
+    raw_con.commit()
+    raw_con.close()
+
+    # Run init_db which should run v8 migration
+    init_db(db_path)
+
+    # Verify git_branch column exists
+    con = sqlite3.connect(db_path)
+    table_info = con.execute("PRAGMA table_info(exchanges)").fetchall()
+    column_names = [col[1] for col in table_info]
+    assert "git_branch" in column_names
+    con.close()
+
+
+def test_migration_v8_backfills_git_branch(tmp_path: Path) -> None:
+    """Test that v8 migration backfills git_branch from jsonl file."""
+    import json
+
+    db_path = tmp_path / "memory.db"
+    jsonl_path = tmp_path / "session.jsonl"
+
+    # Create a jsonl file with a user entry containing gitBranch
+    user_entry = {
+        "uuid": "user1",
+        "gitBranch": "main",
+        "type": "user",
+        "content": "This is a long user content string that should be stored in the database",
+    }
+    agent_entry = {
+        "type": "assistant",
+        "content": "This is a long agent response string that should be stored in the database",
+    }
+    jsonl_path.write_text(json.dumps(user_entry) + "\n" + json.dumps(agent_entry) + "\n")
+
+    # Create a v7 DB with a conversation pointing to the jsonl file
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', ?)",
+        (str(jsonl_path),),
+    )
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending'
+        )"""
+    )
+    # Insert an exchange at ply_start=0 (matching the user entry in jsonl)
+    raw_con.execute(
+        "INSERT INTO exchanges VALUES ('ex1', 'conv1', 0, 1, 'user', 'agent', NULL, 'pending')"
+    )
+    raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
+    )
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
+    )
+    raw_con.execute(
+        """CREATE TABLE palace_objects (
+            id               TEXT PRIMARY KEY,
+            exchange_id      TEXT NOT NULL,
+            exchange_core    TEXT NOT NULL,
+            specific_context TEXT NOT NULL,
+            distill_text     TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE rooms (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            room_type        TEXT NOT NULL,
+            room_key         TEXT NOT NULL,
+            room_label       TEXT NOT NULL,
+            relevance        REAL NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE symbols (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,
+            symbol_kind      TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        "CREATE TABLE exchange_files (exchange_id TEXT, file_path TEXT, PRIMARY KEY(exchange_id, file_path))"
+    )
+
+    raw_con.execute("PRAGMA user_version = 7")
+    raw_con.commit()
+    raw_con.close()
+
+    # Run init_db which should run v8 migration and backfill git_branch
+    init_db(db_path)
+
+    # Verify git_branch was backfilled to 'main'
+    con = sqlite3.connect(db_path)
+    row = con.execute(
+        "SELECT git_branch FROM exchanges WHERE id='ex1'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "main"
+    con.close()
+
+
+def test_migration_v8_missing_jsonl_stays_null(tmp_path: Path) -> None:
+    """Test that v8 migration handles missing jsonl file gracefully, leaving git_branch NULL."""
+    db_path = tmp_path / "memory.db"
+
+    # Create a v7 DB with a conversation pointing to a non-existent jsonl file
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/nonexistent/path.jsonl')"
+    )
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending'
+        )"""
+    )
+    # Insert an exchange at ply_start=0
+    raw_con.execute(
+        "INSERT INTO exchanges VALUES ('ex1', 'conv1', 0, 1, 'user', 'agent', NULL, 'pending')"
+    )
+    raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
+    )
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
+    )
+    raw_con.execute(
+        """CREATE TABLE palace_objects (
+            id               TEXT PRIMARY KEY,
+            exchange_id      TEXT NOT NULL,
+            exchange_core    TEXT NOT NULL,
+            specific_context TEXT NOT NULL,
+            distill_text     TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE rooms (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            room_type        TEXT NOT NULL,
+            room_key         TEXT NOT NULL,
+            room_label       TEXT NOT NULL,
+            relevance        REAL NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE symbols (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,
+            symbol_kind      TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        "CREATE TABLE exchange_files (exchange_id TEXT, file_path TEXT, PRIMARY KEY(exchange_id, file_path))"
+    )
+
+    raw_con.execute("PRAGMA user_version = 7")
+    raw_con.commit()
+    raw_con.close()
+
+    # Run init_db which should run v8 migration without raising an error
+    init_db(db_path)
+
+    # Verify git_branch is NULL (not filled in due to missing jsonl)
+    con = sqlite3.connect(db_path)
+    row = con.execute(
+        "SELECT git_branch FROM exchanges WHERE id='ex1'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] is None
+    con.close()
+
+
+def test_migration_v8_malformed_line_coordinate(tmp_path: Path) -> None:
+    """Test that malformed jsonl lines do NOT shift ply coordinates during backfill.
+
+    Verifies that when a malformed JSON line is at index 0 and a valid gitBranch
+    entry is at index 1, the exchange with ply_start=1 gets the correct gitBranch,
+    proving the malformed line did not consume a ply slot.
+    """
+    import json
+
+    db_path = tmp_path / "memory.db"
+    jsonl_path = tmp_path / "session.jsonl"
+
+    # Create a jsonl file with:
+    # Line 0: malformed JSON (not valid JSON)
+    # Line 1: valid JSON user entry with gitBranch='feature-x'
+    malformed_line = "not-json\n"
+    user_entry = {
+        "uuid": "user1",
+        "gitBranch": "feature-x",
+        "type": "human",
+        "content": "This is a long user content string that is valid for the database",
+    }
+    jsonl_path.write_text(malformed_line + json.dumps(user_entry) + "\n")
+
+    # Create a v7 DB with a conversation pointing to the jsonl file
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', ?)",
+        (str(jsonl_path),),
+    )
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending'
+        )"""
+    )
+    # Insert an exchange at ply_start=0 (after the malformed line)
+    raw_con.execute(
+        "INSERT INTO exchanges VALUES ('ex1', 'conv1', 0, 1, 'user', 'agent', NULL, 'pending')"
+    )
+    raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
+    )
+    raw_con.execute(
+        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
+    )
+    raw_con.execute(
+        """CREATE TABLE palace_objects (
+            id               TEXT PRIMARY KEY,
+            exchange_id      TEXT NOT NULL,
+            exchange_core    TEXT NOT NULL,
+            specific_context TEXT NOT NULL,
+            distill_text     TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE rooms (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            room_type        TEXT NOT NULL,
+            room_key         TEXT NOT NULL,
+            room_label       TEXT NOT NULL,
+            relevance        REAL NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        """CREATE TABLE symbols (
+            id               TEXT PRIMARY KEY,
+            palace_object_id TEXT NOT NULL,
+            symbol_name      TEXT NOT NULL,
+            symbol_kind      TEXT NOT NULL,
+            file_path        TEXT NOT NULL,
+            signature        TEXT NOT NULL,
+            line             INT NOT NULL,
+            dedup_hash       TEXT NOT NULL
+        )"""
+    )
+    raw_con.execute(
+        "CREATE TABLE exchange_files (exchange_id TEXT, file_path TEXT, PRIMARY KEY(exchange_id, file_path))"
+    )
+
+    raw_con.execute("PRAGMA user_version = 7")
+    raw_con.commit()
+    raw_con.close()
+
+    # Run init_db which should run v8 migration and backfill git_branch
+    init_db(db_path)
+
+    # Verify git_branch was backfilled to 'feature-x' (not NULL)
+    # This proves ply_index was 1 when the valid line was processed
+    con = sqlite3.connect(db_path)
+    row = con.execute(
+        "SELECT git_branch FROM exchanges WHERE id='ex1'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "feature-x"
+    con.close()
+
+
+def test_migration_v8_idempotent(tmp_path: Path) -> None:
+    """Test that v8 migration is idempotent (can be run multiple times)."""
+    db_path = tmp_path / "memory.db"
+
+    # Initialize a fresh DB (which runs v8)
+    init_db(db_path)
+
+    # Check user_version after first init
+    con = sqlite3.connect(db_path)
+    user_version_1 = con.execute("PRAGMA user_version").fetchone()[0]
+    con.close()
+
+    # Run init_db again (should be idempotent)
+    init_db(db_path)
+
+    # Check user_version after second init
+    con = sqlite3.connect(db_path)
+    user_version_2 = con.execute("PRAGMA user_version").fetchone()[0]
+    con.close()
+
+    # Verify user_version equals the number of migrations both times
+    assert user_version_1 == len(_MIGRATIONS)
+    assert user_version_2 == len(_MIGRATIONS)

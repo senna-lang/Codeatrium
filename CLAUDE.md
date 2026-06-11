@@ -101,7 +101,9 @@ loci init                                    # Initialize .codeatrium/ in projec
 loci index                                   # Index new .jsonl files
 loci distill [--limit N]                     # Distill queued exchanges via claude --print
 loci search "query" --json --limit 5         # Semantic search (agent-facing)
+loci search "query" --branch NAME --json     # Branch-filtered semantic search
 loci context --symbol "Foo.bar" --json       # Reverse lookup: code -> past conversations (lightweight; use loci show <verbatim_ref> for full text)
+loci context --branch NAME --json            # Branch reverse lookup (undistilled exchanges included)
 loci show "~/.claude/.../abc.jsonl:ply=42"   # Fetch verbatim exchange
 loci status                                  # Show index state
 loci server start / stop / status            # Embedding server management

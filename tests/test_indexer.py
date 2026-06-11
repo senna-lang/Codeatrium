@@ -12,9 +12,9 @@ from codeatrium.indexer import index_file, parse_exchanges
 
 
 def make_user_entry(
-    uuid: str, text: str, parent_uuid: str | None = None, is_meta: bool = False
+    uuid: str, text: str, parent_uuid: str | None = None, is_meta: bool = False, git_branch: str | None = None
 ) -> dict:
-    return {
+    entry = {
         "type": "user",
         "uuid": uuid,
         "parentUuid": parent_uuid,
@@ -22,6 +22,9 @@ def make_user_entry(
         "timestamp": "2026-03-26T00:00:00.000Z",
         "message": {"role": "user", "content": text},
     }
+    if git_branch is not None:
+        entry["gitBranch"] = git_branch
+    return entry
 
 
 def make_assistant_entry(uuid: str, text: str, parent_uuid: str) -> dict:
@@ -79,6 +82,102 @@ def test_parse_exchanges_single(tmp_path: Path) -> None:
     assert len(exchanges) == 1
     assert "connection pool" in exchanges[0].user_content
     assert "pool_size" in exchanges[0].agent_content
+
+
+def test_parse_exchanges_git_branch_captured(tmp_path: Path) -> None:
+    """git_branch が capture される"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "connection pool の修正を教えてください。" * 5, git_branch="main"),
+            make_assistant_entry(
+                "a1", "pool_size=5 を DATABASE_URL に追加してください。" * 5, "u1"
+            ),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 1
+    assert exchanges[0].git_branch == "main"
+
+
+def test_parse_exchanges_git_branch_missing_is_none(tmp_path: Path) -> None:
+    """git_branch が missing の場合は None になる"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "connection pool の修正を教えてください。" * 5),
+            make_assistant_entry(
+                "a1", "pool_size=5 を DATABASE_URL に追加してください。" * 5, "u1"
+            ),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 1
+    assert exchanges[0].git_branch is None
+
+
+def test_parse_exchanges_git_branch_empty_string_is_none(tmp_path: Path) -> None:
+    """git_branch が empty string の場合は None になる"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "connection pool の修正を教えてください。" * 5, git_branch=""),
+            make_assistant_entry(
+                "a1", "pool_size=5 を DATABASE_URL に追加してください。" * 5, "u1"
+            ),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 1
+    assert exchanges[0].git_branch is None
+
+
+def test_parse_exchanges_branch_per_exchange(tmp_path: Path) -> None:
+    """各 exchange が異なる git_branch を持つことができる"""
+    f = tmp_path / "session.jsonl"
+    write_jsonl(
+        f,
+        [
+            make_user_entry("u1", "最初の質問です。よろしくお願いします。" * 5, git_branch="main"),
+            make_assistant_entry("a1", "了解しました。詳しく説明します。" * 5, "u1"),
+            make_user_entry("u2", "次の質問です。詳しく教えてください。" * 5, "a1", git_branch="release/1.0-hardening"),
+            make_assistant_entry(
+                "a2", "詳しく説明します。ご参考になれば幸いです。" * 5, "u2"
+            ),
+        ],
+    )
+    exchanges = parse_exchanges(f)
+    assert len(exchanges) == 2
+    assert exchanges[0].git_branch == "main"
+    assert exchanges[1].git_branch == "release/1.0-hardening"
+
+
+def test_index_file_persists_git_branch(tmp_path: Path) -> None:
+    """index_file が git_branch を DB に保存する"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "connection pool の修正を教えてください。" * 5, git_branch="feature-x"),
+            make_assistant_entry(
+                "a1", "pool_size=5 を DATABASE_URL に追加してください。" * 5, "u1"
+            ),
+        ],
+    )
+
+    index_file(jsonl, db_path)
+
+    con = get_connection(db_path)
+    rows = con.execute("SELECT git_branch FROM exchanges").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["git_branch"] == "feature-x"
+    con.close()
 
 
 def test_parse_exchanges_multiple(tmp_path: Path) -> None:

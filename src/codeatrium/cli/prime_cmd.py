@@ -22,6 +22,7 @@ Use `loci search` to find past implementations, decisions, and code locations.
 - When looking up the reasoning behind a past design decision
 - Before editing code you lack context about — use `loci context --symbol` to review past discussions
 - Before refactoring or changing the behavior of a function — use `loci context --symbol` to check past design decisions
+- When recalling work done on a specific branch — use `loci context --branch` to find past conversations
 
 ### Commands
 
@@ -31,6 +32,9 @@ loci search "query" --json --limit 5
 
 # Reverse lookup: code symbol -> past conversations (verbatim text via loci show <verbatim_ref>)
 loci context --symbol "symbol_name" --json
+
+# Recall work on a specific branch
+loci context --branch "branch-name" --json
 
 # Retrieve verbatim conversation (use verbatim_ref from search results)
 loci show "<verbatim_ref>" --json

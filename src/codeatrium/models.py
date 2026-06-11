@@ -51,3 +51,4 @@ class FusedResult:
     verbatim_ref: str | None = None
     rooms: list[dict[str, Any]] = field(default_factory=list)
     symbols: list[dict[str, Any]] = field(default_factory=list)
+    git_branch: str | None = None
