@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.3.0] - 2026-06-12
+
+### Added
+
+- Branch linking: exchanges are linked to their git branch at index time.
+- `loci search "query" --branch NAME` — branch-filtered semantic search.
+- `loci context --branch NAME` — reverse lookup from a git branch to past conversations (includes undistilled exchanges).
+- `loci context --full` flag; the default output is now lighter.
+- `loci hook uninstall` — remove codeatrium hooks from `settings.json`.
+- SQLite hardening: WAL mode, `busy_timeout`, and a `user_version`-based migration framework.
+- Distillation transactions with `distill_status` and version tracking, plus new indexes.
+
+### Changed
+
+- `loci prime` output rewritten around agent-action triggers with concrete examples.
+- Distillation uses a flock-based lock; embeddings are serialized with `tobytes`.
+- Hook registration writes `settings.json` atomically.
+- Indexing is incremental and reports config errors explicitly.
+
+### Fixed
+
+- Silent data loss in the distillation pipeline; code reverse-lookup works again.
+- Embedding server can no longer double-start; socket protocol hardened and connection leaks fixed.
+- Ply coordinate drift and WAL sidecar file permissions.
+- `loci prime` exits silently when `.codeatrium/` is absent; resolving `.codeatrium/` from a parent directory now notifies on stderr.
+
 ## [0.2.0] - 2026-04-21
 
 ### Added
