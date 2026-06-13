@@ -41,6 +41,37 @@ loci context --symbol "SymbolResolver.extract" --json
 
 # Retrieve past conversations from work on a specific branch
 loci context --branch "feature/foo" --json
+```
+
+### IDE selection as a deictic anchor
+
+When the IDE injects an active editor selection (shown as `⧉ Selected N lines from <file>`), treat that selection as the referent of "this / これ / この〜" in the user's prompt. The selection resolves *which* symbol the memory lookup is about — it is NOT by itself a request to recall.
+
+Recall from a selection ONLY when BOTH hold:
+
+1. a selection is active, AND
+2. either (a) the user asks about the past — recall / why / history / decisions ("この実装の時の会話を思い出して", "これ前にどう決めた?"), or (b) your own next action on the selected code (edit / refactor / debug) needs prior decisions or constraints.
+
+Do NOT recall when the selection is present only because the user is about to edit it and asks nothing past-oriented.
+
+Map the selection to a query:
+
+- Selection IS a named function/class → look it up directly:
+
+```bash
+loci context --symbol "<name>" --json
+```
+
+- Selection is a fragment INSIDE one function/class — the `def`/`class` line is usually not in the selection, so resolve the enclosing symbol first (LSP `workspaceSymbol`/`hover`, or read `<file>` around the selection), then:
+
+```bash
+loci context --symbol "<enclosing-symbol>" --json
+```
+
+- Selection spans multiple symbols or belongs to none (module-level code, config, comments), OR the lookups above return no results → fall back to semantic search over your question:
+
+```bash
+loci search "<the user's question>" --json
 ```\
 """
 
