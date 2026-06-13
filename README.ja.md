@@ -1,16 +1,22 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="codeatrium — memory palace for AI coding agents" width="560">
+  <img src="assets/banner.svg" alt="codeatrium — memory palace for AI coding agents" width="720">
 </p>
 
-# Codeatrium
+<h1 align="center">Codeatrium</h1>
 
-[![CI](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml/badge.svg)](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/codeatrium)](https://pypi.org/project/codeatrium/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml"><img src="https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/codeatrium/"><img src="https://img.shields.io/pypi/v/codeatrium" alt="PyPI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
 
-[English](README.md) · 日本語
+<p align="center">AI コーディングエージェントに<strong>記憶の宮殿</strong>を。</p>
 
-AI コーディングエージェントに**記憶の宮殿**を。
+<p align="center"><a href="README.md">English</a> · 日本語</p>
+
+<p align="center">
+  <img src="assets/demo-search.svg" alt="loci search が過去の設計判断を symbol・file:line・git ブランチ付きで想起する様子" width="640">
+</p>
 
 Codeatrium は過去の会話を *palace object* に蒸留し、検索可能なインデックスに保存することで、エージェントに長期記憶を与えます。過去の意思決定・実装・コード位置を 0.2 秒で想起できます。
 
@@ -22,17 +28,20 @@ CLI コマンド `loci`（[Method of Loci＝記憶の宮殿](https://ja.wikipedi
 
 ## シンプルなインターフェース
 
-エージェントが使用するコマンドは基本２つ。
+エージェントが使用する主なコマンド:
 
 - **セマンティック検索** — `loci search "クエリ"` でセマンティック類似度から過去の会話を検索
 - **コードから逆引き** — `loci context --symbol "名前"` で特定のコードシンボルに関する過去の会話を想起
   - tree-sitter（Python / TypeScript / Go）のシンボル解決により、エージェントは実装意図・背景を把握できる
+- **ブランチから逆引き** — `loci context --branch "名前"`（または `loci search "クエリ" --branch "名前"`）で特定の git ブランチで何をしたか・何を議論したかを想起
 
-<img src="assets/interface.ja.svg" alt="Simple Interface" width="800">
+シンボルに触れることは、それについて決めたことを想起すること。`loci context` は正確なコード位置・シグネチャと、その背後にある会話を逆引きします:
+
+<p align="center">
+  <img src="assets/demo-context.svg" alt="loci context がシンボルからそれを形作った会話へ逆引きする様子" width="640">
+</p>
 
 ## 仕組み
-
-<img src="assets/architecture.svg" alt="Codeatrium Architecture" width="800">
 
 1. **Index** — エージェントのセッションログを exchange（ユーザー発話 + エージェント応答のペア）に分割し、FTS5 でキーワード検索可能にする
 2. **Distill** — LLM（`claude --print`、デフォルトは `claude-haiku-4-5`）が各 exchange を palace object に要約: `exchange_core`（何をしたか）、`specific_context`（具体的な詳細）、`room_assignments`（トピックタグ）。tree-sitter で触れたファイルをシンボルレベル（関数・クラス・メソッド + ファイル + 行 + シグネチャ）に解決
@@ -62,7 +71,7 @@ loci init
 > [!IMPORTANT]
 > 途中からこのツールを導入する場合、すでに大量の exchange が蓄積されています。全件蒸留すると `claude --print` (Haiku) のトークンが大量に消費されるため、まずは `Skip all` か `Distill last 50` で始めることを推奨します。
 
-1. **Min chars threshold** — exchange の最小文字数フィルタ（デフォルト: 50文字）。この閾値で蒸留の母数（対象 exchange 数）が決まります。値を大きくすると短い会話が除外され蒸留対象が減り、小さくするとほぼ全ての会話が蒸留対象になりトークン消費が増えます。
+1. **Min chars threshold** — インデックス時に適用される最小文字数フィルタ（デフォルト: 50文字）。短い exchange はそもそもインデックスされず、その結果として蒸留の母数も減ります。値を大きくすると短い会話が除外され、小さくするとほぼ全ての会話が対象になりトークン消費が増えます。（蒸留には別途 `min_chars=100` のフィルタがあります — [設定](#設定)を参照。）
 2. **既存 exchange の扱い** — 過去のセッションをどこまで蒸留するか選択:
    - Skip all（過去のセッション蒸留なし）
    - Distill last 50（直近の履歴のみ）
@@ -86,10 +95,12 @@ loci init
 | `loci init` | `.codeatrium/` を初期化し Claude Code フックを登録（`--no-hooks` で省略可） |
 | `loci index` | 新しいセッションログをインデックス |
 | `loci distill [--limit N]` | 未蒸留の exchange を LLM で蒸留 |
-| `loci search "クエリ" --json` | セマンティック検索（エージェント向け） |
-| `loci context --symbol "名前" --json` | コードシンボル → 過去の会話 |
+| `loci search "クエリ" --json` | セマンティック検索（エージェント向け）。`--branch NAME` で git ブランチ絞り込み |
+| `loci context --symbol "名前" --json` | コードシンボル → 過去の会話（軽量。`--full` で会話原文も含める） |
+| `loci context --branch "名前" --json` | git ブランチ → 過去の会話（未蒸留の exchange も含む） |
 | `loci show "<ref>" --json` | 会話原文を取得 |
 | `loci status` | インデックス状態を表示 |
+| `loci prime` | コマンドの使い方をセッションコンテキストに注入（SessionStart フックで自動実行） |
 | `loci server start/stop/status` | 埋め込みサーバー管理 |
 | `loci hook install` | フックを再登録（通常は `loci init` で済む） |
 
@@ -121,7 +132,8 @@ loci init
     "symbols": [
       { "name": "create_pool", "file": "src/db.py", "line": 42, "signature": "def create_pool(...)" }
     ],
-    "verbatim_ref": "~/.claude/projects/.../session.jsonl:ply=42"
+    "verbatim_ref": "~/.claude/projects/.../session.jsonl:ply=42",
+    "git_branch": "feature/db-pool"
   }
 ]
 ```
@@ -132,12 +144,15 @@ loci init
 
 ```toml
 [distill]
-model = "claude-haiku-4-5-20251001"   # 蒸留に使うモデル（デフォルト）
+model = "claude-haiku-4-5"             # 蒸留に使うモデル（デフォルト）
 batch_limit = 20                       # 1回あたりの蒸留上限
+min_chars = 100                        # この文字数未満の exchange は蒸留をスキップ
 
 [index]
-min_chars = 50                         # この文字数未満の exchange をスキップ
+min_chars = 50                         # この文字数未満の exchange はインデックスをスキップ
 ```
+
+`min_chars` は2か所あります。`[index] min_chars` はそもそもインデックス対象にするかを制御し、`[distill] min_chars` はインデックス済みの短い exchange について蒸留（LLM コスト）をさらにスキップします。
 
 ## Acknowledgments
 

@@ -1,16 +1,22 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="codeatrium — memory palace for AI coding agents" width="560">
+  <img src="assets/banner.svg" alt="codeatrium — memory palace for AI coding agents" width="720">
 </p>
 
-# Codeatrium
+<h1 align="center">Codeatrium</h1>
 
-[![CI](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml/badge.svg)](https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/codeatrium)](https://pypi.org/project/codeatrium/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml"><img src="https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/codeatrium/"><img src="https://img.shields.io/pypi/v/codeatrium" alt="PyPI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
 
-A **memory palace** for AI coding agents.
+<p align="center">A <strong>memory palace</strong> for AI coding agents.</p>
 
-English · [日本語](README.ja.md)
+<p align="center">English · <a href="README.ja.md">日本語</a></p>
+
+<p align="center">
+  <img src="assets/demo-search.svg" alt="loci search recalling a past design decision with its symbol, file:line, and git branch" width="640">
+</p>
 
 Codeatrium distills past conversations into *palace objects* and stores them in a searchable index, giving agents long-term memory. Past decisions, implementations, and code locations can be recalled in under 0.2 seconds.
 
@@ -22,17 +28,20 @@ The architecture extends the conversational memory model from [arXiv:2603.13017]
 
 ## Simple Interface
 
-Agents use two core commands:
+Agents use these core commands:
 
 - **Semantic search** — `loci search "query"` retrieves past conversations by semantic similarity
 - **Reverse lookup from code** — `loci context --symbol "name"` recalls past conversations about a specific code symbol
   - tree-sitter symbol resolution (Python / TypeScript / Go) lets agents understand implementation intent before editing
+- **Reverse lookup from branch** — `loci context --branch "name"` (or `loci search "query" --branch "name"`) recalls what was done and discussed on a specific git branch
 
-<img src="assets/interface.en.svg" alt="Simple Interface" width="800">
+Touching a symbol means recalling what was decided about it — `loci context` reverse-looks-up the exact code location, signature, and the conversation behind it:
+
+<p align="center">
+  <img src="assets/demo-context.svg" alt="loci context reverse-looking-up a symbol to the conversation that shaped it" width="640">
+</p>
 
 ## How It Works
-
-<img src="assets/architecture.svg" alt="Codeatrium Architecture" width="800">
 
 1. **Index** — Splits agent session logs into exchanges (user utterance + agent response pairs) and indexes them with FTS5 for keyword search
 2. **Distill** — An LLM (`claude --print`, default `claude-haiku-4-5`) summarizes each exchange into a palace object: `exchange_core` (what was done), `specific_context` (concrete details), `room_assignments` (topic tags). tree-sitter resolves touched files to symbol level (function/class/method + file + line + signature)
@@ -62,7 +71,7 @@ When running `loci init`, if past session logs are detected, you'll be prompted 
 > [!IMPORTANT]
 > When adopting this tool mid-project, a large number of exchanges may already exist. Distilling all of them will consume significant `claude --print` (Haiku) tokens. We recommend starting with `Skip all` or `Distill last 50`.
 
-1. **Min chars threshold** — Minimum character filter for exchanges (default: 50). This controls how many exchanges become distillation candidates. Higher values exclude short conversations and reduce token usage; lower values include nearly everything.
+1. **Min chars threshold** — Minimum character filter applied at index time (default: 50). Shorter exchanges are skipped entirely, which also shrinks the pool of distillation candidates. Higher values exclude short conversations and reduce token usage; lower values include nearly everything. (Distillation applies a separate `min_chars` of 100 — see [Configuration](#configuration).)
 2. **Handling existing exchanges** — Choose how much past history to distill:
    - Skip all (no past session distillation)
    - Distill last 50 (recent history only)
@@ -86,10 +95,12 @@ Agent instructions are injected automatically — no manual setup required:
 | `loci init` | Initialize `.codeatrium/` and register Claude Code hooks (`--no-hooks` to skip) |
 | `loci index` | Index new session logs |
 | `loci distill [--limit N]` | Distill undistilled exchanges via LLM |
-| `loci search "query" --json` | Semantic search (agent-facing) |
+| `loci search "query" --json` | Semantic search (agent-facing); add `--branch NAME` to filter by git branch |
 | `loci context --symbol "name" --json` | Code symbol → past conversations (lightweight; add `--full` for verbatim text) |
+| `loci context --branch "name" --json` | Git branch → past conversations (includes undistilled exchanges) |
 | `loci show "<ref>" --json` | Retrieve verbatim conversation |
 | `loci status` | Show index state |
+| `loci prime` | Inject command usage into the session context (run automatically by the SessionStart hook) |
 | `loci server start/stop/status` | Embedding server management |
 | `loci hook install` | Re-register hooks (normally already done by `loci init`) |
 | `loci hook uninstall` | Remove codeatrium hooks from `settings.json` |
@@ -122,7 +133,8 @@ After `loci init` (or `loci hook install`), everything runs automatically:
     "symbols": [
       { "name": "create_pool", "file": "src/db.py", "line": 42, "signature": "def create_pool(...)" }
     ],
-    "verbatim_ref": "~/.claude/projects/.../session.jsonl:ply=42"
+    "verbatim_ref": "~/.claude/projects/.../session.jsonl:ply=42",
+    "git_branch": "feature/db-pool"
   }
 ]
 ```
@@ -133,12 +145,15 @@ After `loci init` (or `loci hook install`), everything runs automatically:
 
 ```toml
 [distill]
-model = "claude-haiku-4-5-20251001"   # Model for distillation (default)
+model = "claude-haiku-4-5"             # Model for distillation (default)
 batch_limit = 20                       # Max distillations per hook run
+min_chars = 100                        # Skip distillation for exchanges shorter than this
 
 [index]
-min_chars = 50                         # Skip exchanges shorter than this
+min_chars = 50                         # Skip indexing exchanges shorter than this
 ```
+
+There are two `min_chars` settings: `[index] min_chars` controls what gets indexed at all, while `[distill] min_chars` further skips distillation (the LLM cost) for short exchanges that were already indexed.
 
 ## Acknowledgments
 
