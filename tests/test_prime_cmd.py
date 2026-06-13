@@ -44,6 +44,40 @@ def test_prime_text_context_section_explains_bidirectional_recall():
     )
 
 
+# ---- IDE selection trigger contract ----
+
+
+def test_prime_text_has_ide_selection_section():
+    """PRIME_TEXT must explain IDE selection as a deictic anchor for context recall"""
+    assert "IDE selection as a deictic anchor" in PRIME_TEXT
+
+
+def test_prime_text_ide_selection_requires_conjunction():
+    """A selection alone must NOT trigger recall — requires selection AND a recall need"""
+    text_lower = PRIME_TEXT.lower()
+    assert "only when both" in text_lower
+    # both branches of the recall need must be present
+    assert "asks about the past" in text_lower
+    assert "your own next action" in text_lower
+
+
+def test_prime_text_ide_selection_guards_against_over_fire():
+    """PRIME_TEXT must tell the agent NOT to recall on edit-only selections"""
+    assert "Do NOT recall" in PRIME_TEXT
+
+
+def test_prime_text_ide_selection_resolves_enclosing_symbol_for_fragments():
+    """A fragment selection must resolve its enclosing symbol before context lookup"""
+    assert "enclosing symbol" in PRIME_TEXT
+
+
+def test_prime_text_ide_selection_has_search_fallback():
+    """When no single symbol applies or context is empty, fall back to loci search"""
+    text_lower = PRIME_TEXT.lower()
+    assert "spans multiple symbols" in text_lower
+    assert "return no results" in text_lower
+
+
 # ---- inject_claude_md idempotency ----
 
 
