@@ -90,9 +90,21 @@ query → BM25 (FTS5 verbatim) + HNSW (distilled embedding)
 
 ```toml
 [distill]
-model = "claude-haiku-4-5-20251001"   # 蒸留に使うモデル
+provider = "claude"                   # 蒸留 backend: "claude" | "openai"（既定 "claude"）
+model = "claude-haiku-4-5-20251001"   # 蒸留に使うモデル（provider 共通）
 batch_limit = 20                       # hook 1回あたりの蒸留上限
 ```
+
+ローカル LLM（OpenAI 互換: Ollama / LM Studio / llama.cpp-server / vLLM）で蒸留する場合は `provider = "openai"` と `base_url` を指定する（新規依存なし・API キー不要＝`Authorization` ヘッダーは送らないローカル専用）:
+
+```toml
+[distill]
+provider = "openai"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434/v1"   # Ollama（LM Studio は :1234/v1）
+```
+
+`provider = "openai"` のとき `base_url` は必須。未設定/空なら警告して `claude` にフォールバックする。`provider = "claude"`（既定）では `base_url` は無視され、従来どおり `claude --print` で蒸留する。実装は `llm.py` の `DistillBackend` + `call_claude` dispatcher（`_call_openai` は stdlib `urllib`、`response_format=json_object` + プロンプト内スキーマ + `_validate_palace` 検証 + 1 回リトライ）。
 
 ## CLI Commands
 

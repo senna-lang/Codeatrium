@@ -145,6 +145,7 @@ After `loci init` (or `loci hook install`), everything runs automatically:
 
 ```toml
 [distill]
+provider = "claude"                    # Distillation backend: "claude" | "openai" (default "claude")
 model = "claude-haiku-4-5"             # Model for distillation (default)
 batch_limit = 20                       # Max distillations per hook run
 min_chars = 100                        # Skip distillation for exchanges shorter than this
@@ -154,6 +155,20 @@ min_chars = 50                         # Skip indexing exchanges shorter than th
 ```
 
 There are two `min_chars` settings: `[index] min_chars` controls what gets indexed at all, while `[distill] min_chars` further skips distillation (the LLM cost) for short exchanges that were already indexed.
+
+### Distilling with a local LLM
+
+Distillation is a small per-exchange structured-extraction task, so a local model is usually good enough. Any OpenAI-compatible endpoint (Ollama, LM Studio, llama.cpp-server, vLLM) works by setting `provider = "openai"` and `base_url` — no new dependencies, no API key (the `Authorization` header is never sent, so this is local-only):
+
+```toml
+[distill]
+provider = "openai"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434/v1"   # Ollama
+# base_url = "http://localhost:1234/v1"  # LM Studio
+```
+
+`base_url` is required when `provider = "openai"`; if it is missing or empty the provider falls back to `claude` with a warning. With `provider = "claude"` (the default), `base_url` is ignored and distillation runs through `claude --print` as before.
 
 ## Acknowledgments
 

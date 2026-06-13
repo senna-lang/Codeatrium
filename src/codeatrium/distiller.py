@@ -5,6 +5,8 @@ SPEC Section 6 DISTILLER フロー準拠:
   ② claude -p で palace object 生成（--output-format json --json-schema）
   ③ distill_text を embedding して vec_palace に登録
   ④ files_touched を tree-sitter で解析してシンボルを symbols テーブルに登録
+
+backend パラメータで蒸留に使う DistillBackend を指定可能。
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from codeatrium.embedder import Embedder, EmbedderSetupError
-from codeatrium.llm import DISTILL_PROMPT_TEMPLATE, call_claude
+from codeatrium.llm import DISTILL_PROMPT_TEMPLATE, DistillBackend, call_claude
 from codeatrium.models import PalaceObject
 from codeatrium.utils import sha256
 
@@ -92,7 +94,7 @@ def distill_exchange(
     agent_content: str,
     ply_start: int,
     ply_end: int,
-    model: str | None = None,
+    backend: DistillBackend | None = None,
     project_root: str | None = None,
 ) -> PalaceObject:
     """1つの exchange を蒸留して PalaceObject を返す
@@ -104,7 +106,7 @@ def distill_exchange(
         agent_content: エージェントコンテンツ
         ply_start: 開始ply
         ply_end: 終了ply
-        model: 蒸留に使うモデル（デフォルトはconfig.toml から）
+        backend: 蒸留に使う DistillBackend（省略時はデフォルト claude）
         project_root: プロジェクトルート（ファイルパスフィルタ用）
     """
     from codeatrium.db import get_connection
@@ -115,7 +117,7 @@ def distill_exchange(
         ply_end=ply_end,
         messages_text=messages_text,
     )
-    raw = call_claude(prompt, model=model)
+    raw = call_claude(prompt, backend=backend)
 
     # PRIMARY: exchange_files から読み込み
     con = get_connection(db_path)
@@ -302,13 +304,14 @@ def save_palace_object(
 def distill_all(
     db_path: Path,
     limit: int | None = None,
-    model: str | None = None,
+    backend: DistillBackend | None = None,
     on_progress: Callable[..., None] | None = None,
     project_root: str | None = None,
     distill_min_chars: int = 100,
 ) -> tuple[int, int]:
     """未蒸留の exchange を処理する。
 
+    backend: 蒸留に使う DistillBackend（省略時はデフォルト claude）
     distill_min_chars: この文字数未満の exchange は蒸留スキップ（デフォルト100）
     on_progress: (current, total, error=None) を受け取るコールバック
     Returns: (処理した exchange 数, エラー数)
@@ -360,7 +363,7 @@ def distill_all(
                 row["agent_content"],
                 row["ply_start"],
                 row["ply_end"],
-                model=model,
+                backend=backend,
                 project_root=project_root,
             )
             distill_text = palace.exchange_core + "\n" + palace.specific_context

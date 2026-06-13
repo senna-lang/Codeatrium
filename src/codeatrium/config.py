@@ -1,4 +1,6 @@
-"""設定ファイルの読み込み — .codeatrium/config.toml"""
+"""設定ファイルの読み込み — .codeatrium/config.toml
+
+Supports distill_provider (claude/openai) and distill_base_url for provider switching."""
 
 from __future__ import annotations
 
@@ -16,6 +18,8 @@ DEFAULT_DISTILL_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_DISTILL_BATCH_LIMIT = 20
 DEFAULT_INDEX_MIN_CHARS = 50
 DEFAULT_DISTILL_MIN_CHARS = 100
+DEFAULT_DISTILL_PROVIDER = "claude"
+VALID_DISTILL_PROVIDERS = frozenset({"claude", "openai"})
 
 
 @dataclass
@@ -26,6 +30,8 @@ class Config:
     distill_batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT
     index_min_chars: int = DEFAULT_INDEX_MIN_CHARS
     distill_min_chars: int = DEFAULT_DISTILL_MIN_CHARS
+    distill_provider: str = "claude"
+    distill_base_url: str | None = None
 
 
 def load_config(project_root: Path) -> Config:
@@ -79,9 +85,31 @@ def load_config(project_root: Path) -> Config:
         )
         distill_min_chars = DEFAULT_DISTILL_MIN_CHARS
 
+    provider = distill.get("provider", DEFAULT_DISTILL_PROVIDER)
+    if not isinstance(provider, str) or provider not in VALID_DISTILL_PROVIDERS:
+        print(
+            "Warning: distill.provider must be one of {claude, openai}, using default.",
+            file=sys.stderr,
+        )
+        provider = DEFAULT_DISTILL_PROVIDER
+
+    base_url = distill.get("base_url")
+    if base_url is not None and not isinstance(base_url, str):
+        base_url = None
+
+    if provider == "openai" and (base_url is None or not base_url.strip()):
+        print(
+            "Warning: distill.provider is 'openai' but base_url is not set, falling back to 'claude'.",
+            file=sys.stderr,
+        )
+        provider = DEFAULT_DISTILL_PROVIDER
+        base_url = None
+
     return Config(
         distill_model=model,
         distill_batch_limit=batch_limit,
         index_min_chars=min_chars,
         distill_min_chars=distill_min_chars,
+        distill_provider=provider,
+        distill_base_url=base_url,
     )
