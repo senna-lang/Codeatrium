@@ -1,15 +1,18 @@
 VENV := .venv/bin
 
+# ruff: prefer the project venv, fall back to `uvx ruff` when no venv is present
+RUFF := $(shell [ -x .venv/bin/ruff ] && echo .venv/bin/ruff || echo "uvx ruff")
+
 .PHONY: test lint fmt typecheck check hooks
 
 test:
 	$(VENV)/pytest tests/ -v
 
 lint:
-	$(VENV)/ruff check src/ tests/
+	$(RUFF) check src/ tests/
 
 fmt:
-	$(VENV)/ruff format src/ tests/
+	$(RUFF) format src/ tests/
 
 typecheck:
 	$(VENV)/pyright src/
