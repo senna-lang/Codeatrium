@@ -18,6 +18,7 @@ from codeatrium.distiller import (
     extract_files_touched,
     save_palace_object,
 )
+from codeatrium.llm import DistillBackend
 
 # --- フィクスチャ ---
 
@@ -114,9 +115,7 @@ def test_extract_files_excludes_venv() -> None:
 
 
 def test_extract_files_excludes_node_modules() -> None:
-    result = extract_files_touched(
-        "node_modules/react/index.js", ""
-    )
+    result = extract_files_touched("node_modules/react/index.js", "")
     assert result == []
 
 
@@ -145,7 +144,8 @@ def test_extract_files_project_root_filters_absolute() -> None:
 def test_extract_files_project_root_unknown_external() -> None:
     """ハードコードマーカーにない外部パスも git root で除外される"""
     result = extract_files_touched(
-        "/home/user/.local/lib/python3.11/foo/bar.py", "",
+        "/home/user/.local/lib/python3.11/foo/bar.py",
+        "",
         project_root="/home/user/myproject",
     )
     assert result == []
@@ -154,7 +154,8 @@ def test_extract_files_project_root_unknown_external() -> None:
 def test_extract_files_relative_paths_unaffected_by_root() -> None:
     """相対パスは project_root に影響されずマーカーのみでフィルタ"""
     result = extract_files_touched(
-        "src/app.py node_modules/react/index.js", "",
+        "src/app.py node_modules/react/index.js",
+        "",
         project_root="/home/user/myproject",
     )
     assert result == ["src/app.py"]
@@ -167,7 +168,9 @@ def test_extract_files_relative_paths_unaffected_by_root() -> None:
 def test_distill_exchange_returns_palace(mock_call, tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
-    palace = distill_exchange("ex1", db_path, "pool の設定", "pool_size=5 を追加した", 0, 3)
+    palace = distill_exchange(
+        "ex1", db_path, "pool の設定", "pool_size=5 を追加した", 0, 3
+    )
     assert palace.exchange_core == "pool_size を 5 に設定した"
     assert palace.specific_context == "pool_size=5"
     assert len(palace.room_assignments) == 1
@@ -185,7 +188,9 @@ def test_distill_exchange_calls_claude_once(mock_call, tmp_path) -> None:
 def test_distill_exchange_extracts_files(mock_call, tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
-    palace = distill_exchange("ex1", db_path, "src/db/pool.py を修正", "pool_size=5", 0, 3)
+    palace = distill_exchange(
+        "ex1", db_path, "src/db/pool.py を修正", "pool_size=5", 0, 3
+    )
     assert "src/db/pool.py" in palace.files_touched
 
 
@@ -211,7 +216,9 @@ def test_distill_exchange_merges_exchange_files(mock_call, tmp_path) -> None:
 def test_save_palace_object_symbol_id_uses_3part_hash(tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
-    _make_exchange(db_path, "ex1", user_text="Foo.bar method", agent_text="Foo.bar implementation")
+    _make_exchange(
+        db_path, "ex1", user_text="Foo.bar method", agent_text="Foo.bar implementation"
+    )
 
     resolver = MagicMock()
     sym = MagicMock()
@@ -228,7 +235,9 @@ def test_save_palace_object_symbol_id_uses_3part_hash(tmp_path) -> None:
         room_assignments=[],
         files_touched=["src/foo.py"],
     )
-    save_palace_object(db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver)
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
 
     con = get_connection(db_path)
     row = con.execute("SELECT id, dedup_hash FROM symbols").fetchone()
@@ -274,7 +283,12 @@ def test_save_palace_object_stores_in_db(tmp_path) -> None:
 def test_save_palace_object_skips_symbol_not_in_body(tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
-    _make_exchange(db_path, "ex1", user_text="some unrelated text " * 5, agent_text="more text " * 5)
+    _make_exchange(
+        db_path,
+        "ex1",
+        user_text="some unrelated text " * 5,
+        agent_text="more text " * 5,
+    )
 
     resolver = MagicMock()
     sym = MagicMock()
@@ -288,7 +302,9 @@ def test_save_palace_object_skips_symbol_not_in_body(tmp_path) -> None:
         room_assignments=[],
         files_touched=["src/foo.py"],
     )
-    save_palace_object(db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver)
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
 
     con = get_connection(db_path)
     count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
@@ -300,7 +316,9 @@ def test_save_palace_object_skips_symbol_not_in_body(tmp_path) -> None:
 def test_save_palace_object_includes_symbol_in_body(tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
-    _make_exchange(db_path, "ex1", user_text="Foo.bar method " * 5, agent_text="more text " * 5)
+    _make_exchange(
+        db_path, "ex1", user_text="Foo.bar method " * 5, agent_text="more text " * 5
+    )
 
     resolver = MagicMock()
     sym = MagicMock()
@@ -317,7 +335,9 @@ def test_save_palace_object_includes_symbol_in_body(tmp_path) -> None:
         room_assignments=[],
         files_touched=["src/foo.py"],
     )
-    save_palace_object(db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver)
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
 
     con = get_connection(db_path)
     count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
@@ -375,8 +395,18 @@ def test_save_palace_object_saves_rooms(tmp_path) -> None:
 def test_save_palace_object_two_palace_objects_same_symbol(tmp_path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
-    _make_exchange(db_path, "ex1", user_text="Foo.bar method " * 5, agent_text="implementation " * 5)
-    _make_exchange(db_path, "ex2", user_text="Foo.bar method " * 5, agent_text="implementation " * 5)
+    _make_exchange(
+        db_path,
+        "ex1",
+        user_text="Foo.bar method " * 5,
+        agent_text="implementation " * 5,
+    )
+    _make_exchange(
+        db_path,
+        "ex2",
+        user_text="Foo.bar method " * 5,
+        agent_text="implementation " * 5,
+    )
 
     resolver = MagicMock()
     sym = MagicMock()
@@ -394,8 +424,12 @@ def test_save_palace_object_two_palace_objects_same_symbol(tmp_path) -> None:
         files_touched=["src/foo.py"],
     )
 
-    save_palace_object(db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver)
-    save_palace_object(db_path, "ex2", palace, np.zeros(384, dtype=np.float32), resolver=resolver)
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+    save_palace_object(
+        db_path, "ex2", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
 
     con = get_connection(db_path)
     all_rows = con.execute("SELECT id, dedup_hash FROM symbols").fetchall()
@@ -451,7 +485,9 @@ def test_distill_all_skips_distilled(mock_call, tmp_path) -> None:
     _make_exchange(db_path, "ex1")
 
     con = get_connection(db_path)
-    con.execute("UPDATE exchanges SET distilled_at = '2026-01-01', distill_status = 'distilled' WHERE id = 'ex1'")
+    con.execute(
+        "UPDATE exchanges SET distilled_at = '2026-01-01', distill_status = 'distilled' WHERE id = 'ex1'"
+    )
     con.commit()
     con.close()
 
@@ -613,3 +649,47 @@ def test_save_palace_object_rollback_on_error(tmp_path) -> None:
     palace_rows = con.execute("SELECT * FROM palace_objects").fetchall()
     assert len(palace_rows) == 0
     con.close()
+
+
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+def test_distill_exchange_accepts_backend(mock_call, tmp_path) -> None:
+    """distill_exchange は backend パラメータを受け取れる"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    backend = DistillBackend(
+        provider="claude", model="claude-haiku-4-5-20251001", base_url=None
+    )
+    palace = distill_exchange(
+        "ex1", db_path, "pool の設定", "pool_size=5", 0, 3, backend=backend
+    )
+    assert palace.exchange_core == "pool_size を 5 に設定した"
+    mock_call.assert_called_once()
+
+
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+def test_distill_all_accepts_backend(mock_call, tmp_path) -> None:
+    """distill_all は backend パラメータを受け取れる"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+
+    backend = DistillBackend(
+        provider="claude", model="claude-haiku-4-5-20251001", base_url=None
+    )
+    mock_embedder = MagicMock()
+    mock_embedder.embed_passage.return_value = np.zeros(384, dtype=np.float32)
+
+    with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
+        count, _ = distill_all(db_path, backend=backend)
+
+    assert count == 1
+
+
+@patch("codeatrium.distiller.call_claude", return_value=MOCK_PALACE_RESPONSE)
+def test_distill_exchange_patch_point_unchanged(mock_call, tmp_path) -> None:
+    """patch('codeatrium.distiller.call_claude') がパッチ対象として機能し続ける（回帰防止）"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    palace = distill_exchange("ex1", db_path, "pool の設定", "pool_size=5", 0, 3)
+    assert palace.exchange_core == "pool_size を 5 に設定した"
+    mock_call.assert_called_once()

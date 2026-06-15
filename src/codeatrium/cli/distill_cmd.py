@@ -1,4 +1,4 @@
-"""loci distill コマンド"""
+"""loci distill コマンド — backend/provider サポート"""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ def distill(
 
     from codeatrium.config import load_config
     from codeatrium.distiller import distill_all
+    from codeatrium.llm import DistillBackend
     from codeatrium.paths import db_path, find_project_root
 
     root = find_project_root()
@@ -59,7 +60,7 @@ def distill(
         count, err_count = distill_all(
             db,
             limit=limit,
-            model=cfg.distill_model,
+            backend=DistillBackend.from_config(cfg),
             on_progress=_on_progress,
             project_root=str(root),
             distill_min_chars=cfg.distill_min_chars,

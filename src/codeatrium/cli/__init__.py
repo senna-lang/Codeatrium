@@ -130,9 +130,16 @@ def init(
                 "# Codeatrium configuration\n"
                 "\n"
                 "[distill]\n"
+                '# provider = "claude"   # 蒸留 LLM: "claude" | "openai"（既定 "claude"）\n'
                 '# model = "claude-haiku-4-5-20251001"\n'
                 "# batch_limit = 20\n"
                 "# min_chars = 100   # この文字数未満の exchange は蒸留スキップ\n"
+                "#\n"
+                "# ローカル LLM（OpenAI 互換）で蒸留する場合:\n"
+                '#   provider = "openai"\n'
+                '#   model = "qwen2.5:7b"\n'
+                '#   base_url = "http://localhost:11434/v1"   # Ollama\n'
+                '#   # base_url = "http://localhost:1234/v1"  # LM Studio\n'
                 "\n"
                 "[index]\n"
                 "# min_chars = 50   # trivial フィルタ閾値（文字数）\n"
@@ -225,6 +232,7 @@ def init(
         try:
             from codeatrium.config import load_config
             from codeatrium.distiller import distill_all
+            from codeatrium.llm import DistillBackend
 
             cfg = load_config(root)
             typer.echo("Running distillation...")
@@ -239,7 +247,7 @@ def init(
 
             count, err_count = distill_all(
                 db,
-                model=cfg.distill_model,
+                backend=DistillBackend.from_config(cfg),
                 on_progress=_on_progress,
                 project_root=str(root),
                 distill_min_chars=cfg.distill_min_chars,
