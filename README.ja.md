@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="codeatrium — memory palace for AI coding agents" width="720">
+  <img src="assets/banner.svg" alt="codeatrium — 2コマンドですべてを recall: AIコーディングエージェントのためのミニマルな記憶レイヤー" width="100%">
 </p>
-
-<h1 align="center">Codeatrium</h1>
 
 <p align="center">
   <a href="https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml"><img src="https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -10,38 +8,40 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-<p align="center">AI コーディングエージェントに<strong>記憶の宮殿</strong>を。</p>
-
 <p align="center"><a href="README.md">English</a> · 日本語</p>
 
 <p align="center">
   <img src="assets/demo-search.svg" alt="loci search が過去の設計判断を symbol・file:line・git ブランチ付きで想起する様子" width="640">
 </p>
 
-Codeatrium は過去の会話を *palace object* に蒸留し、検索可能なインデックスに保存することで、エージェントに長期記憶を与えます。過去の意思決定・実装・コード位置を 0.2 秒で想起できます。
+AI コーディングエージェントは、自分がやってきたことを 2 つのコマンド — `loci search` と `loci context` — だけで思い出せます。インターフェースはこれだけ。エージェントは迷うことなく適切な呼び出しを選び、過去の意思決定・会話・正確なコード位置を 0.2 秒以内に復元します。
 
-CLI コマンド `loci`（[Method of Loci＝記憶の宮殿](https://ja.wikipedia.org/wiki/%E5%A0%B4%E6%89%80%E6%B3%95)に由来）は**エージェント自身が呼び出す**ことを想定しています。`loci search "..." --json` をプロンプト内から実行します。
+CLI コマンド `loci` は**エージェント自身が呼び出す**ことを想定しています — `loci search "..." --json` をプロンプト内から実行します。*(名前は記憶術 [Method of Loci＝記憶の宮殿](https://ja.wikipedia.org/wiki/%E5%A0%B4%E6%89%80%E6%B3%95) に由来します。内部では会話を「palace object」に蒸留します（[仕組み](#仕組み)を参照）。アーキテクチャは [arXiv:2603.13017](https://arxiv.org/abs/2603.13017) の会話記憶モデルをコーディングエージェント向けに拡張したものです。)*
 
-アーキテクチャは [arXiv:2603.13017](https://arxiv.org/abs/2603.13017) の会話記憶モデルを、コーディングエージェント向けに拡張したものです。
+> **Note:** 現在は [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 専用です — インデックスは Claude Code のセッションログ（`.jsonl`）を読み込みます。蒸留は既定で `claude --print`（Haiku）ですが、ローカルの OpenAI 互換 LLM でも実行できます（[設定](#設定)を参照）。
 
-> **Note:** 現在は [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 専用です。セッションログ形式（`.jsonl`）と蒸留（`claude --print`）が Claude Code に依存しています。
+## ミニマルなインターフェース
 
-## シンプルなインターフェース
+想起のインターフェースは 2 つのコマンドだけ:
 
-エージェントが使用する主なコマンド:
+- **`loci search "クエリ"`** — 過去の会話をセマンティック検索
+- **`loci context`** — 逆引き。コードシンボル（`--symbol "名前"`）または git ブランチ（`--branch "名前"`）から
+  - tree-sitter のシンボル解決（Python / TypeScript / Go）により、エージェントは編集前に実装意図を把握できる
+  - `--branch "名前"` は特定の git ブランチで何をしたか・議論したかを想起（`loci search "クエリ" --branch "名前"` でも可）
 
-- **セマンティック検索** — `loci search "クエリ"` でセマンティック類似度から過去の会話を検索
-- **コードから逆引き** — `loci context --symbol "名前"` で特定のコードシンボルに関する過去の会話を想起
-  - tree-sitter（Python / TypeScript / Go）のシンボル解決により、エージェントは実装意図・背景を把握できる
-- **ブランチから逆引き** — `loci context --branch "名前"`（または `loci search "クエリ" --branch "名前"`）で特定の git ブランチで何をしたか・何を議論したかを想起
+これは意図的な設計です。ここでの利用者はエージェント自身であり、50 個のツールを渡されたエージェントは迷い、選び間違え、どれを呼ぶか決めるだけでトークンを消費します。表面がこれだけ小さく — かつ MCP のツール定義がコンテキストウィンドウに常駐しない — ので、エージェントは毎回・最初から正しい呼び出しに手を伸ばします。*(会話原文が必要なときは `loci show "<ref>"` で任意の結果を原文に展開できます。)*
 
-シンボルに触れることは、それについて決めたことを想起すること。`loci context` は正確なコード位置・シグネチャと、その背後にある会話を逆引きします:
+シンボルに触れることは、それについて決めたことを想起すること — `loci context` は正確なコード位置・シグネチャと、その背後にある会話を逆引きします:
 
 <p align="center">
   <img src="assets/demo-context.svg" alt="loci context がシンボルからそれを形作った会話へ逆引きする様子" width="640">
 </p>
 
 ## 仕組み
+
+<p align="center">
+  <img src="assets/how-it-works.svg" alt="セッションログを exchange にインデックスし、シンボル付きの palace object に蒸留、BM25 + HNSW を RRF で融合して想起する流れ" width="100%">
+</p>
 
 1. **Index** — エージェントのセッションログを exchange（ユーザー発話 + エージェント応答のペア）に分割し、FTS5 でキーワード検索可能にする
 2. **Distill** — LLM（`claude --print`、デフォルトは `claude-haiku-4-5`）が各 exchange を palace object に要約: `exchange_core`（何をしたか）、`specific_context`（具体的な詳細）、`room_assignments`（トピックタグ）。tree-sitter で触れたファイルをシンボルレベル（関数・クラス・メソッド + ファイル + 行 + シグネチャ）に解決
@@ -103,6 +103,7 @@ loci init
 | `loci prime` | コマンドの使い方をセッションコンテキストに注入（SessionStart フックで自動実行） |
 | `loci server start/stop/status` | 埋め込みサーバー管理 |
 | `loci hook install` | フックを再登録（通常は `loci init` で済む） |
+| `loci hook uninstall` | codeatrium のフックを `settings.json` から削除 |
 
 ## 自動化（Claude Code フック）
 
@@ -116,7 +117,7 @@ loci init
 | SessionStart | 起動時 / `/clear` / `/resume` / `compact` | `loci distill` |
 
 - **`loci index`** — 毎ラリー後に非同期で実行。セッション途中でも差分のみインデックスするので高速
-- **`loci distill`** — セッション開始時に未蒸留の exchange を `claude --print` で蒸留。ユーザーの Claude Code で Haiku を呼び出します（デフォルト: `claude-haiku-4-5`）
+- **`loci distill`** — セッション開始時に未蒸留の exchange を蒸留。既定は `claude --print`（Haiku、ユーザーの Claude Code 経由）ですが、ローカルの OpenAI 互換 LLM でも実行できます（[設定](#設定)を参照）
 - **`loci server start`** — 埋め込みモデル（約500MB）をメモリに常駐させ、以降の検索を 0.2 秒以内に
 
 ## 検索出力
@@ -144,6 +145,7 @@ loci init
 
 ```toml
 [distill]
+provider = "claude"                    # 蒸留 backend: "claude" | "openai"（既定 "claude"）
 model = "claude-haiku-4-5"             # 蒸留に使うモデル（デフォルト）
 batch_limit = 20                       # 1回あたりの蒸留上限
 min_chars = 100                        # この文字数未満の exchange は蒸留をスキップ
@@ -153,6 +155,20 @@ min_chars = 50                         # この文字数未満の exchange は�
 ```
 
 `min_chars` は2か所あります。`[index] min_chars` はそもそもインデックス対象にするかを制御し、`[distill] min_chars` はインデックス済みの短い exchange について蒸留（LLM コスト）をさらにスキップします。
+
+### ローカル LLM で蒸留する
+
+蒸留は exchange ごとの小さな構造化抽出タスクなので、ローカルモデルでも十分なことが多いです。OpenAI 互換のエンドポイント（Ollama、LM Studio、llama.cpp-server、vLLM）なら `provider = "openai"` と `base_url` を指定するだけで動きます — 新規依存なし・API キー不要（`Authorization` ヘッダーは送らないため、ローカル専用です）:
+
+```toml
+[distill]
+provider = "openai"
+model = "qwen2.5:7b"
+base_url = "http://localhost:11434/v1"   # Ollama
+# base_url = "http://localhost:1234/v1"  # LM Studio
+```
+
+`provider = "openai"` のとき `base_url` は必須です。未設定または空の場合は警告して `claude` にフォールバックします。`provider = "claude"`（既定）では `base_url` は無視され、従来どおり `claude --print` で蒸留します。
 
 ## Acknowledgments
 

@@ -1,8 +1,6 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="codeatrium — memory palace for AI coding agents" width="720">
+  <img src="assets/banner.svg" alt="codeatrium — two commands, recall everything: a minimal memory layer for AI coding agents" width="100%">
 </p>
-
-<h1 align="center">Codeatrium</h1>
 
 <p align="center">
   <a href="https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml"><img src="https://github.com/senna-lang/Codeatrium/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -10,30 +8,28 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
 </p>
 
-<p align="center">A <strong>memory palace</strong> for AI coding agents.</p>
-
 <p align="center">English · <a href="README.ja.md">日本語</a></p>
 
 <p align="center">
   <img src="assets/demo-search.svg" alt="loci search recalling a past design decision with its symbol, file:line, and git branch" width="640">
 </p>
 
-Codeatrium distills past conversations into *palace objects* and stores them in a searchable index, giving agents long-term memory. Past decisions, implementations, and code locations can be recalled in under 0.2 seconds.
+An AI coding agent recalls everything it has done through just two commands: `loci search` and `loci context`. That's the whole interface. The agent reaches for the right call without hesitation, and restores past decisions, conversations, and exact code locations in under 0.2 seconds.
 
-The CLI command `loci` (from [Method of Loci](https://en.wikipedia.org/wiki/Method_of_loci)) is designed to be **called by the agent itself** — running `loci search "..." --json` from within a prompt.
+The CLI command `loci` is designed to be **called by the agent itself** — running `loci search "..." --json` from within a prompt. *(The name comes from the [Method of Loci](https://en.wikipedia.org/wiki/Method_of_loci) — the memory-palace technique. Under the hood, conversations are distilled into "palace objects"; see [How It Works](#how-it-works). The architecture extends the conversational memory model from [arXiv:2603.13017](https://arxiv.org/abs/2603.13017) for coding agents.)*
 
-The architecture extends the conversational memory model from [arXiv:2603.13017](https://arxiv.org/abs/2603.13017) for coding agents.
+> **Note:** Currently [Claude Code](https://docs.anthropic.com/en/docs/claude-code) only — indexing reads Claude Code's session logs (`.jsonl`). Distillation defaults to `claude --print` (Haiku) but can run on a local OpenAI-compatible LLM instead (see [Configuration](#configuration)).
 
-> **Note:** Currently [Claude Code](https://docs.anthropic.com/en/docs/claude-code) only. Session log format (`.jsonl`) and distillation (`claude --print`) depend on Claude Code.
+## Minimal Interface
 
-## Simple Interface
+The whole recall interface is two commands:
 
-Agents use these core commands:
-
-- **Semantic search** — `loci search "query"` retrieves past conversations by semantic similarity
-- **Reverse lookup from code** — `loci context --symbol "name"` recalls past conversations about a specific code symbol
+- **`loci search "query"`** — semantic search over past conversations
+- **`loci context`** — reverse lookup, by code symbol (`--symbol "name"`) or git branch (`--branch "name"`)
   - tree-sitter symbol resolution (Python / TypeScript / Go) lets agents understand implementation intent before editing
-- **Reverse lookup from branch** — `loci context --branch "name"` (or `loci search "query" --branch "name"`) recalls what was done and discussed on a specific git branch
+  - `--branch "name"` recalls what was done and discussed on a specific git branch (also available as `loci search "query" --branch "name"`)
+
+That's deliberate. The user here is the agent, and an agent handed a 50-tool palette hesitates, mis-picks, and burns tokens just deciding which to call. With a surface this small — and no MCP tool schemas sitting resident in the context window — the agent reaches for the right call the first time, every time. *(When the full transcript is needed, `loci show "<ref>"` expands any result to its verbatim source.)*
 
 Touching a symbol means recalling what was decided about it — `loci context` reverse-looks-up the exact code location, signature, and the conversation behind it:
 
@@ -42,6 +38,10 @@ Touching a symbol means recalling what was decided about it — `loci context` r
 </p>
 
 ## How It Works
+
+<p align="center">
+  <img src="assets/how-it-works.svg" alt="session logs are indexed into exchanges, distilled into palace objects with symbols, then recalled via BM25 + HNSW fused by RRF" width="100%">
+</p>
 
 1. **Index** — Splits agent session logs into exchanges (user utterance + agent response pairs) and indexes them with FTS5 for keyword search
 2. **Distill** — An LLM (`claude --print`, default `claude-haiku-4-5`) summarizes each exchange into a palace object: `exchange_core` (what was done), `specific_context` (concrete details), `room_assignments` (topic tags). tree-sitter resolves touched files to symbol level (function/class/method + file + line + signature)
@@ -117,7 +117,7 @@ After `loci init` (or `loci hook install`), everything runs automatically:
 | SessionStart | startup / `/clear` / `/resume` / `compact` | `loci distill` |
 
 - **`loci index`** — Runs asynchronously after every turn. Indexes only new exchanges, so it's fast even mid-session
-- **`loci distill`** — Distills undistilled exchanges at session start via `claude --print`. Calls Haiku through the user's Claude Code (default: `claude-haiku-4-5`)
+- **`loci distill`** — Distills undistilled exchanges at session start. Defaults to `claude --print` (Haiku, through the user's Claude Code); can use a local OpenAI-compatible LLM instead (see [Configuration](#configuration))
 - **`loci server start`** — Keeps the embedding model (~500MB) resident in memory for sub-0.2s search latency
 
 ## Search Output
