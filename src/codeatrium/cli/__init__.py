@@ -8,7 +8,6 @@ from typing import Annotated
 
 import typer
 
-from codeatrium.cli.bench_cmd import bench_app
 from codeatrium.cli.distill_cmd import distill
 from codeatrium.cli.hook_cmd import hook_app
 from codeatrium.cli.index_cmd import index
@@ -436,4 +435,3 @@ app.command()(dump)
 app.command()(prime)
 app.add_typer(hook_app, name="hook")
 app.add_typer(server_app, name="server")
-app.add_typer(bench_app, name="bench")
