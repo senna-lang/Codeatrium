@@ -268,6 +268,76 @@ def test_call_openai_no_authorization_header() -> None:
         assert "Authorization" not in request_obj.headers
 
 
+def _mock_openai_response(structured: dict[str, Any], wrap: str = "plain") -> MagicMock:
+    """choices[0].message.content に structured を様々な包み方で入れた応答モックを返す。"""
+    content = json.dumps(structured)
+    if wrap == "fence":
+        content = f"```json\n{content}\n```"
+    elif wrap == "prose":
+        content = f"以下が結果です:\n```json\n{content}\n```\nスキーマに準拠しています。"
+    body = json.dumps({"choices": [{"message": {"content": content}}]})
+    mock_response = MagicMock()
+    mock_response.__enter__ = MagicMock(return_value=mock_response)
+    mock_response.__exit__ = MagicMock(return_value=None)
+    mock_response.read.return_value = body.encode()
+    return mock_response
+
+
+def test_call_openai_adds_authorization_when_key_env_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CODEATRIUM_DISTILL_API_KEY が設定されていれば Bearer トークンを付ける。"""
+    from codeatrium.llm import DISTILL_API_KEY_ENV
+
+    monkeypatch.setenv(DISTILL_API_KEY_ENV, "sk-test-123")
+    backend = DistillBackend(
+        provider="openai", model="deepseek-chat", base_url="https://api.deepseek.com"
+    )
+    mock_response = _mock_openai_response(MOCK_JSON_RESPONSE["structured_output"])
+
+    with patch("urllib.request.urlopen", return_value=mock_response) as mock_urlopen:
+        _call_openai("prompt", backend)
+        request_obj = mock_urlopen.call_args[0][0]
+        # urllib は header 名を capitalize して保持する
+        assert request_obj.headers.get("Authorization") == "Bearer sk-test-123"
+
+
+def test_call_openai_no_authorization_when_key_env_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """キー env が無ければ Authorization を付けない（Ollama 無認証経路を保持）。"""
+    from codeatrium.llm import DISTILL_API_KEY_ENV
+
+    monkeypatch.delenv(DISTILL_API_KEY_ENV, raising=False)
+    backend = DistillBackend(
+        provider="openai", model="llama3", base_url="http://localhost:11434/v1"
+    )
+    mock_response = _mock_openai_response(MOCK_JSON_RESPONSE["structured_output"])
+
+    with patch("urllib.request.urlopen", return_value=mock_response) as mock_urlopen:
+        _call_openai("prompt", backend)
+        request_obj = mock_urlopen.call_args[0][0]
+        assert "Authorization" not in request_obj.headers
+
+
+@pytest.mark.parametrize("wrap", ["plain", "fence", "prose"])
+def test_call_openai_parses_wrapped_json(
+    monkeypatch: pytest.MonkeyPatch, wrap: str
+) -> None:
+    """フェンス/散文で包まれた応答でも extract_json で本体を取り出してパースできる。"""
+    from codeatrium.llm import DISTILL_API_KEY_ENV
+
+    monkeypatch.delenv(DISTILL_API_KEY_ENV, raising=False)
+    backend = DistillBackend(
+        provider="openai", model="deepseek-chat", base_url="https://api.deepseek.com"
+    )
+    mock_response = _mock_openai_response(MOCK_JSON_RESPONSE["structured_output"], wrap)
+
+    with patch("urllib.request.urlopen", return_value=mock_response):
+        result = _call_openai("prompt", backend)
+        assert result == MOCK_JSON_RESPONSE["structured_output"]
+
+
 def test_strip_json_fence_with_fence() -> None:
     """
     _strip_json_fence が markdown code fence を削除することを確認する

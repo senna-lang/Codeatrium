@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Annotated
 
@@ -70,6 +71,13 @@ def init(
         bool,
         typer.Option("--no-hooks", help="Claude Code の hook 自動登録をスキップ"),
     ] = False,
+    no_local_distiller: Annotated[
+        bool,
+        typer.Option(
+            "--no-local-distiller",
+            help="ローカル蒸留モデルのダウンロード提案をスキップ（Haiku を使用）",
+        ),
+    ] = False,
 ) -> None:
     """プロジェクトルートに .codeatrium/memory.db を初期化する"""
     from codeatrium.db import get_connection, init_db
@@ -117,6 +125,11 @@ def init(
             if distill_count > 0:
                 run_distill_now = _ask_run_distill_now(distill_count)
 
+    use_local_distiller = False if no_local_distiller else _ask_use_local_distiller()
+    local_distiller_ready = (
+        _download_local_distiller() if use_local_distiller else False
+    )
+
     # --- 実行フェーズ（ここから DB・ファイルを作成） ---
     # 失敗時は作成した .codeatrium/ を掃除して次回再実行できる状態に戻す
     codeatrium_dir = db.parent
@@ -126,24 +139,48 @@ def init(
 
         config_path = codeatrium_dir / "config.toml"
         if not config_path.exists():
-            config_path.write_text(
-                "# Codeatrium configuration\n"
-                "\n"
-                "[distill]\n"
-                '# provider = "claude"   # 蒸留 LLM: "claude" | "openai"（既定 "claude"）\n'
-                '# model = "claude-haiku-4-5-20251001"\n'
-                "# batch_limit = 20\n"
-                "# min_chars = 100   # この文字数未満の exchange は蒸留スキップ\n"
-                "#\n"
-                "# ローカル LLM（OpenAI 互換）で蒸留する場合:\n"
-                '#   provider = "openai"\n'
-                '#   model = "qwen2.5:7b"\n'
-                '#   base_url = "http://localhost:11434/v1"   # Ollama\n'
-                '#   # base_url = "http://localhost:1234/v1"  # LM Studio\n'
-                "\n"
-                "[index]\n"
-                "# min_chars = 50   # trivial フィルタ閾値（文字数）\n"
-            )
+            if local_distiller_ready:
+                from codeatrium.config import (
+                    LOCAL_DISTILL_BASE_URL,
+                    LOCAL_DISTILL_MODEL,
+                )
+
+                config_path.write_text(
+                    "# Codeatrium configuration\n"
+                    "\n"
+                    "[distill]\n"
+                    'provider = "openai"\n'
+                    f'model = "{LOCAL_DISTILL_MODEL}"\n'
+                    f'base_url = "{LOCAL_DISTILL_BASE_URL}"\n'
+                    "# batch_limit = 20\n"
+                    "# min_chars = 100   # この文字数未満の exchange は蒸留スキップ\n"
+                    "#\n"
+                    "# Claude Haiku に戻す場合:\n"
+                    '#   provider = "claude"\n'
+                    '#   model = "claude-haiku-4-5-20251001"\n'
+                    "\n"
+                    "[index]\n"
+                    "# min_chars = 50   # trivial フィルタ閾値（文字数）\n"
+                )
+            else:
+                config_path.write_text(
+                    "# Codeatrium configuration\n"
+                    "\n"
+                    "[distill]\n"
+                    '# provider = "claude"   # 蒸留 LLM: "claude" | "openai"（既定 "claude"）\n'
+                    '# model = "claude-haiku-4-5-20251001"\n'
+                    "# batch_limit = 20\n"
+                    "# min_chars = 100   # この文字数未満の exchange は蒸留スキップ\n"
+                    "#\n"
+                    "# ローカル LLM（OpenAI 互換）で蒸留する場合:\n"
+                    '#   provider = "openai"\n'
+                    '#   model = "qwen2.5:7b"\n'
+                    '#   base_url = "http://localhost:11434/v1"   # Ollama\n'
+                    '#   # base_url = "http://localhost:1234/v1"  # LM Studio\n'
+                    "\n"
+                    "[index]\n"
+                    "# min_chars = 50   # trivial フィルタ閾値（文字数）\n"
+                )
 
         typer.echo(f"Initialized: {db}")
 
@@ -370,6 +407,72 @@ def _ask_run_distill_now(distill_count: int) -> bool:
         typer.echo("  Invalid choice. Please enter 1/2/y/n.")
 
 
+def _ask_use_local_distiller() -> bool:
+    """ローカル蒸留モデル(Ollama)をダウンロードして使うか聞く。y/n/1/2 を受け付ける。"""
+    from codeatrium.config import LOCAL_DISTILL_BASE_URL, LOCAL_DISTILL_MODEL
+
+    typer.echo(
+        "\nDownload a local distillation model instead of using Claude Haiku?\n"
+        f"  Model: {LOCAL_DISTILL_MODEL}\n"
+        "  Qwen2.5-7B fine-tuned for conversation memory distillation (~4.7GB, Q4_K_M).\n"
+        f"  Served locally via Ollama at {LOCAL_DISTILL_BASE_URL} — no API calls, no token cost.\n"
+    )
+    typer.echo("  [1] No — use Claude Haiku (default)")
+    typer.echo("  [2] Yes — download and use the local model")
+
+    while True:
+        choice = typer.prompt("Choice", default="1").strip().lower()
+        if choice in ("1", "n", "no"):
+            return False
+        if choice in ("2", "y", "yes"):
+            return True
+        typer.echo("  Invalid choice. Please enter 1/2/y/n.")
+
+
+def _download_local_distiller() -> bool:
+    """`ollama pull` で LOCAL_DISTILL_MODEL を取得する。失敗時は False（Haiku へフォールバック）。"""
+    from codeatrium.config import LOCAL_DISTILL_MODEL
+
+    ollama = shutil.which("ollama")
+    if ollama is None:
+        typer.echo(
+            "\n⚠ Ollama not found in PATH. Install it from https://ollama.com, then run:\n"
+            f"    ollama pull {LOCAL_DISTILL_MODEL}\n"
+            "Falling back to Claude Haiku for distillation.",
+            err=True,
+        )
+        return False
+
+    typer.echo(f"\nDownloading {LOCAL_DISTILL_MODEL} via Ollama (this may take a while)...")
+    try:
+        result = subprocess.run([ollama, "pull", LOCAL_DISTILL_MODEL])
+    except KeyboardInterrupt:
+        typer.echo(
+            "\n⚠ Download interrupted. Falling back to Claude Haiku for distillation.",
+            err=True,
+        )
+        return False
+    except OSError as exc:
+        typer.echo(
+            f"\n⚠ Failed to run ollama: {exc}\n"
+            "Falling back to Claude Haiku for distillation.",
+            err=True,
+        )
+        return False
+
+    if result.returncode != 0:
+        typer.echo(
+            "\n⚠ Failed to download local model (ollama pull exited non-zero).\n"
+            f"  Retry later with: ollama pull {LOCAL_DISTILL_MODEL}\n"
+            "Falling back to Claude Haiku for distillation.",
+            err=True,
+        )
+        return False
+
+    typer.echo(f"✓ Local model ready: {LOCAL_DISTILL_MODEL}")
+    return True
+
+
 def _ask_distill_priority() -> str:
     """蒸留対象の優先順位を選択する。"""
     typer.echo("\nDistill priority:")
@@ -397,7 +500,9 @@ def _resolve_skip_count(
     # 対話プロンプト
     typer.echo(
         f"\nFound {total} existing exchanges from past sessions.\n"
-        "Distillation uses claude --print (Haiku) and consumes tokens.\n"
+        "Distillation uses an LLM "
+        "(Claude Haiku by default, or a local model if configured) "
+        "and may consume tokens.\n"
         "⚠ Skipped exchanges cannot be distilled later.\n"
     )
     typer.echo("How should existing exchanges be handled?")

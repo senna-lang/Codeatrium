@@ -11,9 +11,19 @@ from codeatrium.config import (
     DEFAULT_DISTILL_MODEL,
     DEFAULT_DISTILL_PROVIDER,
     DEFAULT_INDEX_MIN_CHARS,
+    LOCAL_DISTILL_BASE_URL,
+    LOCAL_DISTILL_MODEL,
     Config,
     load_config,
 )
+
+
+def test_local_distill_model_uses_ollama_hf_pull_syntax() -> None:
+    """LOCAL_DISTILL_MODEL は `ollama pull` がそのまま使える hf.co/<repo>:<quant> 形式"""
+    assert LOCAL_DISTILL_MODEL == (
+        "hf.co/sennaLLMLearner/qwen2.5-7b-memory-distiller:Q4_K_M"
+    )
+    assert LOCAL_DISTILL_BASE_URL == "http://localhost:11434/v1"
 
 
 def test_load_config_no_file(tmp_path: Path) -> None:

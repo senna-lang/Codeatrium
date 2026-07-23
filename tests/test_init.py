@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -109,7 +110,7 @@ def _setup_project_with_sessions(
 def test_init_creates_db(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 0
     assert (tmp_path / ".codeatrium" / "memory.db").exists()
 
@@ -118,7 +119,7 @@ def test_init_prints_banner(tmp_path, monkeypatch):
     """init 実行時に ASCII アートバナーとサブタイトルが表示される"""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 0
     # pagga figlet バナー特有の文字列
     assert "░█▀▀░█▀█░█▀▄" in result.output
@@ -128,7 +129,7 @@ def test_init_prints_banner(tmp_path, monkeypatch):
 def test_init_creates_claude_md_section(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 0
     claude_md = tmp_path / "CLAUDE.md"
     assert claude_md.exists()
@@ -143,7 +144,7 @@ def test_init_appends_to_existing_claude_md(tmp_path, monkeypatch):
     (tmp_path / ".git").mkdir()
     claude_md = tmp_path / "CLAUDE.md"
     claude_md.write_text("# My Project\n\nExisting content.\n")
-    runner.invoke(app, ["init"])
+    runner.invoke(app, ["init", "--no-local-distiller"])
     content = claude_md.read_text()
     assert content.startswith("# My Project")
     assert "<!-- BEGIN CODEATRIUM -->" in content
@@ -158,7 +159,7 @@ def test_init_updates_existing_codeatrium_section(tmp_path, monkeypatch):
         "<!-- BEGIN CODEATRIUM -->\nold content\n<!-- END CODEATRIUM -->\n\n"
         "## Other\n"
     )
-    runner.invoke(app, ["init"])
+    runner.invoke(app, ["init", "--no-local-distiller"])
     content = claude_md.read_text()
     assert "old content" not in content
     assert "loci prime" in content
@@ -168,8 +169,8 @@ def test_init_updates_existing_codeatrium_section(tmp_path, monkeypatch):
 def test_init_already_initialized(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
-    runner.invoke(app, ["init"])
-    result = runner.invoke(app, ["init"])
+    runner.invoke(app, ["init", "--no-local-distiller"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert "Already initialized" in result.output
 
 
@@ -185,7 +186,7 @@ def test_init_non_git_does_not_traverse_parent(tmp_path, monkeypatch):
     child.mkdir()
     monkeypatch.chdir(child)
 
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 0
     assert "Initialized" in result.output
     assert (child / ".codeatrium" / "memory.db").exists()
@@ -198,7 +199,7 @@ def test_init_skip_existing_marks_all_as_skipped(tmp_path, monkeypatch):
     _setup_project_with_sessions(tmp_path, monkeypatch, num_files=2, exchanges_per_file=3)
 
     # min_chars プロンプト [1]=50 (default)
-    result = runner.invoke(app, ["init", "--skip-existing"], input="1\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller", "--skip-existing"], input="1\n")
     assert result.exit_code == 0
 
     db = tmp_path / ".codeatrium" / "memory.db"
@@ -223,7 +224,7 @@ def test_init_distill_limit_keeps_recent(tmp_path, monkeypatch):
     _setup_project_with_sessions(tmp_path, monkeypatch, num_files=2, exchanges_per_file=3)
 
     # min_chars [1]=50 → priority [1]=recent → distill now [1]=no
-    result = runner.invoke(app, ["init", "--distill-limit", "2"], input="1\n1\n1\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller", "--distill-limit", "2"], input="1\n1\n1\n")
     assert result.exit_code == 0
 
     db = tmp_path / ".codeatrium" / "memory.db"
@@ -250,7 +251,7 @@ def test_init_prompt_distill_all(tmp_path, monkeypatch):
     _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
 
     # min_chars [1]=50 → distill [3]=全件 → distill now [1]=no
-    result = runner.invoke(app, ["init"], input="1\n3\n1\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n3\n1\n")
     assert result.exit_code == 0
 
     db = tmp_path / ".codeatrium" / "memory.db"
@@ -272,7 +273,7 @@ def test_init_prompt_skip_all(tmp_path, monkeypatch):
     _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
 
     # min_chars プロンプト [1]=50 (default) → 蒸留プロンプト [1]=全件スキップ
-    result = runner.invoke(app, ["init"], input="1\n1\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n1\n")
     assert result.exit_code == 0
 
     db = tmp_path / ".codeatrium" / "memory.db"
@@ -299,7 +300,7 @@ def test_init_min_chars_flag(tmp_path, monkeypatch):
         tmp_path, monkeypatch, num_files=1, char_sizes=[60, 60, 250]
     )
 
-    result = runner.invoke(app, ["init", "--min-chars", "200", "--skip-existing"])
+    result = runner.invoke(app, ["init", "--no-local-distiller", "--min-chars", "200", "--skip-existing"])
     assert result.exit_code == 0
 
     db = tmp_path / ".codeatrium" / "memory.db"
@@ -319,7 +320,7 @@ def test_init_min_chars_prompt_select_100(tmp_path, monkeypatch):
     )
 
     # min_chars プロンプト [2]=100 → 蒸留プロンプト [1]=全件スキップ
-    result = runner.invoke(app, ["init"], input="2\n1\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="2\n1\n")
     assert result.exit_code == 0
 
     db = tmp_path / ".codeatrium" / "memory.db"
@@ -338,7 +339,7 @@ def test_init_min_chars_flag_skips_prompt(tmp_path, monkeypatch):
     )
 
     # --skip-existing で蒸留プロンプトもスキップ → 対話入力なしで完了
-    result = runner.invoke(app, ["init", "--min-chars", "50", "--skip-existing"])
+    result = runner.invoke(app, ["init", "--no-local-distiller", "--min-chars", "50", "--skip-existing"])
     assert result.exit_code == 0
     assert "Min chars threshold" not in result.output
 
@@ -354,7 +355,7 @@ def test_init_distill_priority_longest(tmp_path, monkeypatch):
     )
 
     # min_chars [1]=50 → distill [4]=custom → 1件 → priority [2]=longest → distill now [1]=no
-    result = runner.invoke(app, ["init"], input="1\n4\n1\n2\n1\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n4\n1\n2\n1\n")
     assert result.exit_code == 0
 
     db = tmp_path / ".codeatrium" / "memory.db"
@@ -378,7 +379,7 @@ def test_init_distill_priority_recent(tmp_path, monkeypatch):
     )
 
     # min_chars [1]=50 → distill [4]=custom → 1件 → priority [1]=recent → distill now [1]=no
-    result = runner.invoke(app, ["init"], input="1\n4\n1\n1\n1\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n4\n1\n1\n1\n")
     assert result.exit_code == 0
 
     db = tmp_path / ".codeatrium" / "memory.db"
@@ -405,7 +406,7 @@ def test_init_prompt_invalid_choice_reprompts(tmp_path, monkeypatch):
     _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
 
     # min_chars [1]=50 → skip_count "99"(無効) → 再入力 [1]=Skip all
-    result = runner.invoke(app, ["init"], input="1\n99\n1\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n99\n1\n")
     assert result.exit_code == 0
     assert "Invalid choice" in result.output
 
@@ -428,7 +429,7 @@ def test_init_distill_now_accepts_n_alias(tmp_path, monkeypatch):
     _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
 
     # min_chars [1]=50 → skip [3]=全件蒸留 → distill now "n"=No
-    result = runner.invoke(app, ["init"], input="1\n3\nn\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n3\nn\n")
     assert result.exit_code == 0
     # "n" が受理されたので再プロンプトは出ない & 蒸留も走らない
     assert "Invalid choice. Please enter 1/2/y/n" not in result.output
@@ -440,7 +441,7 @@ def test_init_custom_count_out_of_range_reprompts(tmp_path, monkeypatch):
     _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
 
     # min_chars [1]=50 → skip [4]=custom → "0"(範囲外) → "2"(有効) → priority [1]=recent → distill now "n"
-    result = runner.invoke(app, ["init"], input="1\n4\n0\n2\n1\nn\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n4\n0\n2\n1\nn\n")
     assert result.exit_code == 0
     assert "Must be ≥ 1" in result.output
 
@@ -459,7 +460,7 @@ def test_init_custom_count_over_total_reprompts(tmp_path, monkeypatch):
     _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
 
     # total=3 なのに 99 を指定 → 再入力 → 3 で全件蒸留扱い
-    result = runner.invoke(app, ["init"], input="1\n4\n99\n3\nn\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n4\n99\n3\nn\n")
     assert result.exit_code == 0
     assert "Must be ≤ 3" in result.output
 
@@ -477,7 +478,7 @@ def test_init_cleanup_on_execution_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_claude_md", _boom)
 
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 1
     assert "init failed" in result.output
     assert "simulated failure" in result.output
@@ -501,7 +502,7 @@ def test_init_preserves_preexisting_dir_on_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_claude_md", _boom)
 
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 1
     # pre-existing .codeatrium/ とその中の config.toml は削除されていない
     assert codeatrium_dir.exists()
@@ -519,7 +520,7 @@ def test_init_cleanup_on_keyboard_interrupt(tmp_path, monkeypatch):
 
     monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_claude_md", _interrupt)
 
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 130
     assert "Interrupted" in result.output
     assert not (tmp_path / ".codeatrium").exists()
@@ -545,7 +546,7 @@ def test_init_per_file_index_error_continues(tmp_path, monkeypatch):
     monkeypatch.setattr("codeatrium.indexer.index_file", _flaky)
 
     # --skip-existing でも min_chars プロンプトは出る → "1"=50
-    result = runner.invoke(app, ["init", "--skip-existing"], input="1\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller", "--skip-existing"], input="1\n")
     assert result.exit_code == 0
     assert "flaky fs error" in result.output
     # 2ファイル目は成功し DB は残っている
@@ -568,7 +569,7 @@ def test_init_installs_hooks_by_default(tmp_path, monkeypatch):
 
     monkeypatch.setattr("codeatrium.hooks.install_hooks", _spy)
 
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 0
     assert len(calls) == 1
     assert "Installed hooks." in result.output
@@ -587,7 +588,7 @@ def test_init_no_hooks_flag_skips_install(tmp_path, monkeypatch):
 
     monkeypatch.setattr("codeatrium.hooks.install_hooks", _spy)
 
-    result = runner.invoke(app, ["init", "--no-hooks"])
+    result = runner.invoke(app, ["init", "--no-local-distiller", "--no-hooks"])
     assert result.exit_code == 0
     assert calls == []
     assert "Installed hooks." not in result.output
@@ -603,7 +604,7 @@ def test_init_hook_install_failure_warns_but_succeeds(tmp_path, monkeypatch):
 
     monkeypatch.setattr("codeatrium.hooks.install_hooks", _boom)
 
-    result = runner.invoke(app, ["init"])
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 0  # init 自体は成功
     assert "Hook install failed" in result.output
     assert "permission denied" in result.output
@@ -654,7 +655,7 @@ def test_init_distill_embedder_setup_error_friendly_message(tmp_path, monkeypatc
     monkeypatch.setattr("codeatrium.distiller.distill_all", _raising_distill_all)
 
     # min_chars=50, Distill all, Yes-run-now
-    result = runner.invoke(app, ["init"], input="1\n3\ny\n")
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n3\ny\n")
     assert result.exit_code == 1
     # 友好的メッセージ
     assert "Embedding model failed to load" in result.output
@@ -662,3 +663,144 @@ def test_init_distill_embedder_setup_error_friendly_message(tmp_path, monkeypatc
     assert "loci distill" in result.output
     # DB はクリーンアップされず残っている（索引済み）
     assert (tmp_path / ".codeatrium" / "memory.db").exists()
+
+
+# ---- ローカル蒸留モデル (Ollama) ダウンロード提案 ----
+
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
+class _FakeCompletedProcess:
+    def __init__(self, returncode: int) -> None:
+        self.returncode = returncode
+
+
+def _fake_ollama_pull_run(returncode: int, calls: list):
+    """git rev-parse 等の実呼び出しは通し、ollama pull だけ差し替えるディスパッチャ"""
+
+    def _run(args, **kwargs):
+        if args and args[0] == "/usr/local/bin/ollama":
+            calls.append(args)
+            return _FakeCompletedProcess(returncode)
+        return _REAL_SUBPROCESS_RUN(args, **kwargs)
+
+    return _run
+
+
+def test_init_no_local_distiller_flag_skips_prompt_and_uses_default_config(
+    tmp_path, monkeypatch
+):
+    """--no-local-distiller で質問が出ず、既定(コメントアウトされた Haiku)設定になる"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
+    assert result.exit_code == 0
+    assert "Download a local distillation model" not in result.output
+
+    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
+    assert '# provider = "claude"' in config
+    assert '\nprovider = "openai"\n' not in config
+
+
+def test_init_local_distiller_declined_uses_default_config(tmp_path, monkeypatch):
+    """プロンプトで No (既定) を選ぶと従来通りコメントアウトされた設定になる"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    result = runner.invoke(app, ["init"], input="1\n")
+    assert result.exit_code == 0
+    assert "Download a local distillation model" in result.output
+
+    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
+    assert '# provider = "claude"' in config
+    assert '\nprovider = "openai"\n' not in config
+
+
+def test_init_local_distiller_accepted_downloads_and_writes_config(
+    tmp_path, monkeypatch
+):
+    """Yes を選び ollama pull が成功すると provider=openai の config が書かれる"""
+    from codeatrium.config import LOCAL_DISTILL_BASE_URL, LOCAL_DISTILL_MODEL
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/ollama")
+
+    calls: list = []
+    monkeypatch.setattr("subprocess.run", _fake_ollama_pull_run(0, calls))
+
+    result = runner.invoke(app, ["init"], input="2\n")
+    assert result.exit_code == 0
+    assert calls == [["/usr/local/bin/ollama", "pull", LOCAL_DISTILL_MODEL]]
+    assert "Local model ready" in result.output
+
+    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
+    assert '\nprovider = "openai"\n' in config
+    assert f'model = "{LOCAL_DISTILL_MODEL}"' in config
+    assert f'base_url = "{LOCAL_DISTILL_BASE_URL}"' in config
+
+
+def test_init_local_distiller_accepted_but_ollama_missing_falls_back(
+    tmp_path, monkeypatch
+):
+    """Yes を選んでも ollama が PATH に無ければ警告して Haiku にフォールバックする"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    monkeypatch.setattr("shutil.which", lambda name: None)
+
+    result = runner.invoke(app, ["init"], input="2\n")
+    assert result.exit_code == 0
+    assert "Ollama not found in PATH" in result.output
+    assert "Falling back to Claude Haiku" in result.output
+
+    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
+    assert '# provider = "claude"' in config
+    assert '\nprovider = "openai"\n' not in config
+
+
+def test_init_local_distiller_accepted_but_pull_fails_falls_back(tmp_path, monkeypatch):
+    """ollama pull が非0終了したら警告して Haiku にフォールバックする"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/ollama")
+    monkeypatch.setattr("subprocess.run", _fake_ollama_pull_run(1, []))
+
+    result = runner.invoke(app, ["init"], input="2\n")
+    assert result.exit_code == 0
+    assert "Failed to download local model" in result.output
+    assert "Falling back to Claude Haiku" in result.output
+
+    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
+    assert '# provider = "claude"' in config
+    assert '\nprovider = "openai"\n' not in config
+
+
+def test_init_local_distiller_accepts_y_alias(tmp_path, monkeypatch):
+    """_ask_use_local_distiller が 'y' を Yes として受け付ける"""
+    from codeatrium.config import LOCAL_DISTILL_MODEL
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/ollama")
+    monkeypatch.setattr("subprocess.run", _fake_ollama_pull_run(0, []))
+
+    result = runner.invoke(app, ["init"], input="y\n")
+    assert result.exit_code == 0
+
+    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
+    assert f'model = "{LOCAL_DISTILL_MODEL}"' in config
+
+
+def test_init_local_distiller_invalid_choice_reprompts(tmp_path, monkeypatch):
+    """無効な入力は再プロンプトされる"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    result = runner.invoke(app, ["init"], input="bogus\n1\n")
+    assert result.exit_code == 0
+    assert "Invalid choice. Please enter 1/2/y/n" in result.output

@@ -7,12 +7,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from codeatrium.json_utils import extract_json
+
+# ホスト型 OpenAI 互換 API で使う API キーの env 変数。
+# 未設定なら Authorization ヘッダを付けない（ローカル Ollama の無認証経路を保持）。
+DISTILL_API_KEY_ENV = "CODEATRIUM_DISTILL_API_KEY"
 
 # ---- プロンプト定数 ----
 
@@ -239,12 +246,19 @@ def _call_openai(prompt: str, backend: DistillBackend) -> dict[str, Any]:
     }
     body_bytes = json.dumps(body).encode()
 
+    # ホスト型 API はキー必須。env にキーがある時だけ Authorization を付ける
+    # （未設定ならローカル Ollama 等の無認証経路を変えない）。
+    headers = {"Content-Type": "application/json"}
+    api_key = os.environ.get(DISTILL_API_KEY_ENV)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
     for attempt in range(2):
         try:
             req = urllib.request.Request(
                 url=backend.base_url + "/chat/completions",
                 data=body_bytes,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=300) as response:
@@ -254,8 +268,8 @@ def _call_openai(prompt: str, backend: DistillBackend) -> dict[str, Any]:
 
         response_data = json.loads(response_text)
         message_content = response_data["choices"][0]["message"]["content"]
-        stripped = _strip_json_fence(message_content)
-        result = json.loads(stripped)
+        # フェンス/散文/balanced 抽出で頑健化（単純 strip では取りこぼす応答に対応）。
+        result = json.loads(extract_json(message_content))
 
         try:
             return _validate_palace(result)

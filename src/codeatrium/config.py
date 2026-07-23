@@ -21,6 +21,11 @@ DEFAULT_DISTILL_MIN_CHARS = 100
 DEFAULT_DISTILL_PROVIDER = "claude"
 VALID_DISTILL_PROVIDERS = frozenset({"claude", "openai"})
 
+# ローカル蒸留モデル（`loci init` の対話プロンプトで opt-in した場合のデフォルト値）。
+# GGUF は Ollama 経由で hf.co/<repo>:<quant> の形式で直接 pull できる。
+LOCAL_DISTILL_MODEL = "hf.co/sennaLLMLearner/qwen2.5-7b-memory-distiller:Q4_K_M"
+LOCAL_DISTILL_BASE_URL = "http://localhost:11434/v1"
+
 
 @dataclass
 class Config:

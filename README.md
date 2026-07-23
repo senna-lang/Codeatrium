@@ -79,6 +79,10 @@ When running `loci init`, if past session logs are detected, you'll be prompted 
    - Custom (specify a number)
 3. **Run distillation now?** — Accepts `1`/`2`/`y`/`n`/`yes`/`no`. Choose No to defer to the next session start.
 
+`loci init` also asks once, regardless of past session history:
+
+4. **Use a local distillation model?** — Offers [`qwen2.5-7b-memory-distiller`](https://huggingface.co/sennaLLMLearner/qwen2.5-7b-memory-distiller), a Qwen2.5-7B fine-tuned specifically for this distillation task (SFT + ORPO on WildChat-1M). Choosing Yes runs `ollama pull hf.co/sennaLLMLearner/qwen2.5-7b-memory-distiller:Q4_K_M` (~4.7GB, requires [Ollama](https://ollama.com)) and writes `provider = "openai"` into `config.toml` pointing at it. Choosing No (default) keeps `claude --print` (Haiku). If Ollama isn't installed or the pull fails, init warns and falls back to Haiku automatically. Pass `--no-local-distiller` to skip this prompt entirely.
+
 Invalid input on any prompt re-prompts instead of silently falling back to a default.
 
 ## Agent Instructions
@@ -92,7 +96,7 @@ Agent instructions are injected automatically — no manual setup required:
 
 | Command | Description |
 |---------|-------------|
-| `loci init` | Initialize `.codeatrium/` and register Claude Code hooks (`--no-hooks` to skip) |
+| `loci init` | Initialize `.codeatrium/` and register Claude Code hooks (`--no-hooks` to skip, `--no-local-distiller` to skip the local-model prompt) |
 | `loci index` | Index new session logs |
 | `loci distill [--limit N]` | Distill undistilled exchanges via LLM |
 | `loci search "query" --json` | Semantic search (agent-facing); add `--branch NAME` to filter by git branch |
@@ -169,6 +173,8 @@ base_url = "http://localhost:11434/v1"   # Ollama
 ```
 
 `base_url` is required when `provider = "openai"`; if it is missing or empty the provider falls back to `claude` with a warning. With `provider = "claude"` (the default), `base_url` is ignored and distillation runs through `claude --print` as before.
+
+`loci init` offers to set this up for you automatically with [`qwen2.5-7b-memory-distiller`](https://huggingface.co/sennaLLMLearner/qwen2.5-7b-memory-distiller), a model fine-tuned specifically for this task (see the prompt above) — no manual config needed if you accept it.
 
 ## Acknowledgments
 
