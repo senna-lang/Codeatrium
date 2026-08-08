@@ -185,6 +185,17 @@ codex の `changes` は `{ファイルパス: {type, unified_diff | content, mov
 > ツール名だけを見ると見落とすので、他ハーネスを追加する際も
 > **payload 種別を全部数えてから判断すること。**
 
+> **ステップ1b（実ログ165本相当を実際に読んで検証、2026-08-08）で見つかった訂正2件**：
+>
+> - **grok**: `old_string`/`new_string` は `rawInput`（`tool_call` イベント側）にしか無いというのは
+>   不正確。**完了イベント（`tool_call_update`）側には `content: [{type: "diff", path, oldText, newText}]`
+>   という別名のフィールドが存在**し、どちらからでも `TextAnchor` を作れる。
+> - **opencode**: `part.state.metadata.diff` の存在は正しいが、**`state.input.filePath` は相対パスのことがある**
+>   （例: `./result.py`）。絶対パスは `state.metadata.filepath`（**小文字**、`filePath` ではない）に別途入っている。
+>   アダプター実装時にどちらを使うか明示的に決めること。
+>
+> 詳細な実例は `tests/fixtures/harness_logs/README.md`（合成ログの元にした実ログの読み方の記録）を参照。
+
 これを使えば、不具合A（文章にシンボル名が出てこないと弾かれる問題）を正しく直せる。
 
 **注意：不具合Aの条件を単に削除してはいけない。**

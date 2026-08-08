@@ -1,0 +1,132 @@
+{
+  "project": {
+    "id": "proj_synth1",
+    "worktree": "/repo",
+    "vcs": "git",
+    "name": "repo"
+  },
+  "session": {
+    "id": "ses_synth1",
+    "project_id": "proj_synth1",
+    "directory": "/repo",
+    "model": {
+      "providerID": "anthropic",
+      "modelID": "claude-sonnet-5"
+    }
+  },
+  "messages": [
+    {
+      "id": "msg_synth1",
+      "session_id": "ses_synth1",
+      "data": {
+        "role": "user",
+        "time": {
+          "created": 1798761600000
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "anthropic",
+          "modelID": "claude-sonnet-5"
+        }
+      }
+    },
+    {
+      "id": "msg_synth2",
+      "session_id": "ses_synth1",
+      "data": {
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/repo",
+          "root": "/repo"
+        },
+        "modelID": "claude-sonnet-5",
+        "providerID": "anthropic",
+        "time": {
+          "created": 1798761601000
+        }
+      }
+    }
+  ],
+  "parts": [
+    {
+      "id": "prt_synth1",
+      "message_id": "msg_synth2",
+      "session_id": "ses_synth1",
+      "data": {
+        "type": "tool",
+        "tool": "edit",
+        "callID": "call_synth001",
+        "state": {
+          "status": "completed",
+          "input": {
+            "filePath": "/repo/src/fs.py",
+            "oldString": "def list_dir(path):\n    return os.listdir(path)\n",
+            "newString": "def list_dir(path) -> Result[list[str], OSError]:\n    try:\n        return Ok(os.listdir(path))\n    except OSError as e:\n        return Err(e)\n"
+          },
+          "output": "Edit applied successfully.",
+          "metadata": {
+            "diagnostics": {},
+            "diff": "Index: /repo/src/fs.py\n===================================================================\n--- /repo/src/fs.py\n+++ /repo/src/fs.py\n@@ -1,3 +1,6 @@\n-def list_dir(path):\n-    return os.listdir(path)\n+def list_dir(path) -> Result[list[str], OSError]:\n+    try:\n+        return Ok(os.listdir(path))\n+    except OSError as e:\n+        return Err(e)\n"
+          }
+        }
+      }
+    },
+    {
+      "id": "prt_synth2",
+      "message_id": "msg_synth2",
+      "session_id": "ses_synth1",
+      "data": {
+        "type": "tool",
+        "tool": "write",
+        "callID": "call_synth002",
+        "state": {
+          "status": "completed",
+          "input": {
+            "filePath": "./src/result.py",
+            "content": "class Result:\n    pass\n"
+          },
+          "output": "Wrote file successfully.",
+          "metadata": {
+            "diagnostics": {},
+            "filepath": "/repo/src/result.py",
+            "exists": false,
+            "truncated": false
+          }
+        }
+      }
+    },
+    {
+      "id": "prt_synth3",
+      "message_id": "msg_synth2",
+      "session_id": "ses_synth1",
+      "data": {
+        "type": "tool",
+        "tool": "write",
+        "callID": "call_synth003",
+        "state": {
+          "status": "error",
+          "input": {
+            "filePath": "/etc/hosts",
+            "content": "127.0.0.1 localhost\n"
+          },
+          "error": "The user rejected permission to use this specific tool call."
+        }
+      }
+    },
+    {
+      "id": "prt_synth4",
+      "message_id": "msg_synth2",
+      "session_id": "ses_synth1",
+      "data": {
+        "type": "patch",
+        "hash": "synthhash0001",
+        "files": [
+          "/repo/src/fs.py",
+          "/repo/src/result.py"
+        ]
+      }
+    }
+  ]
+}
