@@ -212,3 +212,93 @@ def test_load_config_provider_claude_no_base_url(tmp_path: Path) -> None:
     cfg = load_config(tmp_path)
     assert cfg.distill_provider == "claude"
     assert cfg.distill_base_url is None
+
+
+# ---- distill.client 解決（client 本線 / provider alias / unconfigured） ----
+
+
+def test_load_config_no_file_is_unconfigured(tmp_path: Path) -> None:
+    """config.toml が無ければ distill は unconfigured"""
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client is None
+    assert cfg.distill_unconfigured is True
+
+
+def test_load_config_explicit_client_ollama_ft(tmp_path: Path) -> None:
+    """distill.client = "ollama-ft" はそのまま解決される"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        '[distill]\nclient = "ollama-ft"\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client == "ollama-ft"
+    assert cfg.distill_unconfigured is False
+
+
+def test_load_config_client_wins_over_legacy_provider(tmp_path: Path) -> None:
+    """client と provider が両方あれば client が勝つ"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        '[distill]\nclient = "claude-cli"\nprovider = "openai"\n'
+        'base_url = "http://localhost:11434/v1"\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client == "claude-cli"
+
+
+def test_load_config_unknown_client_is_unconfigured(tmp_path: Path, capsys) -> None:
+    """未知の client id は unconfigured として扱われ、暗黙解決しない"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        '[distill]\nclient = "bogus-client"\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client is None
+    assert cfg.distill_unconfigured is True
+    assert "unknown distill.client" in capsys.readouterr().err
+
+
+def test_load_config_legacy_provider_claude_maps_to_claude_cli(tmp_path: Path) -> None:
+    """旧 provider = "claude" は client = "claude-cli" として解決される"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text('[distill]\nprovider = "claude"\n')
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client == "claude-cli"
+    assert cfg.distill_unconfigured is False
+
+
+def test_load_config_legacy_provider_openai_ollama_base_url_maps_to_ollama_ft(
+    tmp_path: Path,
+) -> None:
+    """旧 provider = "openai" + Ollama base_url(11434) は client = "ollama-ft" として解決される"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        '[distill]\nprovider = "openai"\nbase_url = "http://localhost:11434/v1"\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client == "ollama-ft"
+    assert cfg.distill_unconfigured is False
+
+
+def test_load_config_legacy_provider_openai_other_base_url_maps_to_openai_compat(
+    tmp_path: Path,
+) -> None:
+    """旧 provider = "openai" + 非 Ollama base_url は client = "openai-compat" として解決される"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        '[distill]\nprovider = "openai"\nbase_url = "https://api.deepseek.com"\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client == "openai-compat"
+    assert cfg.distill_unconfigured is False
+
+
+def test_load_config_neither_client_nor_provider_is_unconfigured(tmp_path: Path) -> None:
+    """config.toml に [distill] があっても client/provider どちらも無ければ unconfigured"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        "[distill]\nbatch_limit = 5\n"
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client is None
+    assert cfg.distill_unconfigured is True

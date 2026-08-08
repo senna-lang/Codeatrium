@@ -12,7 +12,9 @@ def status(
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
     """インデックス状態（exchange 数・蒸留済み数・DB サイズ）を表示する"""
-    from codeatrium.db import get_connection
+    from codeatrium.adapters.model.registry import check_ready
+    from codeatrium.config import load_config
+    from codeatrium.db import check_drift, get_connection
     from codeatrium.paths import db_path, find_project_root
 
     root = find_project_root()
@@ -37,7 +39,14 @@ def status(
     symbol_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
     con.close()
 
-    from codeatrium.db import check_drift
+    cfg = load_config(root)
+    if cfg.distill_unconfigured or not cfg.distill_client:
+        distill_client_label = "unconfigured"
+        distill_available = False
+    else:
+        distill_client_label = cfg.distill_client
+        distill_available = check_ready(cfg.distill_client).state == "ready"
+
     drifts = check_drift(db)
     for key, recorded, current in drifts:
         typer.echo(
@@ -60,6 +69,8 @@ def status(
                     "palace_objects": palace_count,
                     "symbols": symbol_count,
                     "db_size_kb": round(db_size_kb, 1),
+                    "distill_client": distill_client_label,
+                    "distill_available": distill_available,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -72,3 +83,5 @@ def status(
         )
         typer.echo(f"Palace    : {palace_count}")
         typer.echo(f"Symbols   : {symbol_count}")
+        avail = "ready" if distill_available else "not ready"
+        typer.echo(f"Distill   : {distill_client_label} ({avail})")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,6 +18,32 @@ runner = CliRunner()
 def _isolate_home(tmp_path, monkeypatch):
     """$HOME を tmp に隔離して install_hooks が実環境の ~/.claude を触らないようにする"""
     monkeypatch.setenv("HOME", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _no_distill_clients_by_default(monkeypatch):
+    """discover() が実機の ollama/claude を拾わないよう、既定で両方 unavailable にする。
+    distill client 選択フローを検証するテストは discover/check_ready を個別に monkeypatch する。
+    """
+    from codeatrium.adapters.model.types import ClientStatus
+
+    def _fake_discover():
+        return [
+            ClientStatus(
+                id="ollama-ft",
+                label="Ollama (local FT model)",
+                state="unavailable",
+                reason="test default",
+            ),
+            ClientStatus(
+                id="claude-cli",
+                label="Claude CLI",
+                state="unavailable",
+                reason="test default",
+            ),
+        ]
+
+    monkeypatch.setattr("codeatrium.adapters.model.registry.discover", _fake_discover)
 
 
 def _create_jsonl(
@@ -643,6 +668,7 @@ def test_init_distill_embedder_setup_error_friendly_message(tmp_path, monkeypatc
         tmp_path, monkeypatch, num_files=1, exchanges_per_file=3
     )
 
+    from codeatrium.adapters.model.types import ClientStatus, ModelClient
     from codeatrium.embedder import EmbedderSetupError
 
     def _raising_distill_all(*_args, **_kwargs):
@@ -653,9 +679,29 @@ def test_init_distill_embedder_setup_error_friendly_message(tmp_path, monkeypatc
         )
 
     monkeypatch.setattr("codeatrium.distiller.distill_all", _raising_distill_all)
+    monkeypatch.setattr(
+        "codeatrium.adapters.model.registry.check_ready",
+        lambda client_id: ClientStatus(
+            id="claude-cli",
+            label="Claude CLI",
+            state="ready",
+            reason="ready",
+            client=ModelClient(
+                id="claude-cli",
+                provider="claude",
+                model="claude-haiku-4-5-20251001",
+                base_url=None,
+                label="Claude CLI",
+            ),
+        ),
+    )
 
     # min_chars=50, Distill all, Yes-run-now
-    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n3\ny\n")
+    result = runner.invoke(
+        app,
+        ["init", "--distill-client", "claude-cli"],
+        input="1\n3\ny\n",
+    )
     assert result.exit_code == 1
     # 友好的メッセージ
     assert "Embedding model failed to load" in result.output
@@ -665,142 +711,266 @@ def test_init_distill_embedder_setup_error_friendly_message(tmp_path, monkeypatc
     assert (tmp_path / ".codeatrium" / "memory.db").exists()
 
 
-# ---- ローカル蒸留モデル (Ollama) ダウンロード提案 ----
-
-_REAL_SUBPROCESS_RUN = subprocess.run
+# ---- distill client 選択フロー（discover/setup/select） ----
 
 
-class _FakeCompletedProcess:
-    def __init__(self, returncode: int) -> None:
-        self.returncode = returncode
-
-
-def _fake_ollama_pull_run(returncode: int, calls: list):
-    """git rev-parse 等の実呼び出しは通し、ollama pull だけ差し替えるディスパッチャ"""
-
-    def _run(args, **kwargs):
-        if args and args[0] == "/usr/local/bin/ollama":
-            calls.append(args)
-            return _FakeCompletedProcess(returncode)
-        return _REAL_SUBPROCESS_RUN(args, **kwargs)
-
-    return _run
-
-
-def test_init_no_local_distiller_flag_skips_prompt_and_uses_default_config(
-    tmp_path, monkeypatch
-):
-    """--no-local-distiller で質問が出ず、既定(コメントアウトされた Haiku)設定になる"""
+def test_init_no_ready_client_leaves_distill_unconfigured(tmp_path, monkeypatch):
+    """discover() が Ready 0件のとき、config は unconfigured のまま init は成功する"""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
 
-    result = runner.invoke(app, ["init", "--no-local-distiller"])
+    result = runner.invoke(app, ["init"])
     assert result.exit_code == 0
-    assert "Download a local distillation model" not in result.output
+    assert "No distill client is ready" in result.output
 
     config = (tmp_path / ".codeatrium" / "config.toml").read_text()
-    assert '# provider = "claude"' in config
-    assert '\nprovider = "openai"\n' not in config
+    assert 'loci distill --setup' in config
+    assert '\nclient = "' not in config
 
 
-def test_init_local_distiller_declined_uses_default_config(tmp_path, monkeypatch):
-    """プロンプトで No (既定) を選ぶと従来通りコメントアウトされた設定になる"""
+def _patch_setupable_ollama_only(monkeypatch):
+    from codeatrium.adapters.model.types import ClientStatus
+
+    def _fake_discover():
+        return [
+            ClientStatus(
+                id="ollama-ft",
+                label="Ollama (local FT model)",
+                state="setupable",
+                reason="model not pulled",
+            ),
+            ClientStatus(
+                id="claude-cli",
+                label="Claude CLI",
+                state="unavailable",
+                reason="claude CLI not found in PATH",
+            ),
+        ]
+
+    monkeypatch.setattr("codeatrium.adapters.model.registry.discover", _fake_discover)
+
+
+def test_init_setupable_ollama_declined_leaves_unconfigured(tmp_path, monkeypatch):
+    """setup offer を断ると Ready 0件のまま unconfigured で init が成功する"""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
+    _patch_setupable_ollama_only(monkeypatch)
 
-    result = runner.invoke(app, ["init"], input="1\n")
+    result = runner.invoke(app, ["init"], input="n\n")
     assert result.exit_code == 0
-    assert "Download a local distillation model" in result.output
+    assert "Set up Ollama" in result.output
 
     config = (tmp_path / ".codeatrium" / "config.toml").read_text()
-    assert '# provider = "claude"' in config
-    assert '\nprovider = "openai"\n' not in config
+    assert '\nclient = "' not in config
 
 
-def test_init_local_distiller_accepted_downloads_and_writes_config(
-    tmp_path, monkeypatch
-):
-    """Yes を選び ollama pull が成功すると provider=openai の config が書かれる"""
+def test_init_setupable_ollama_accepted_writes_config(tmp_path, monkeypatch):
+    """setup offer を承諾し setup() が成功すると Ready 化した client が config に書かれる"""
+    from codeatrium.adapters.model.types import ClientStatus, ModelClient
     from codeatrium.config import LOCAL_DISTILL_BASE_URL, LOCAL_DISTILL_MODEL
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
 
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/ollama")
+    ready_client = ModelClient(
+        id="ollama-ft",
+        provider="openai",
+        model=LOCAL_DISTILL_MODEL,
+        base_url=LOCAL_DISTILL_BASE_URL,
+        label="Ollama (local FT model)",
+    )
+    call_count = {"n": 0}
 
-    calls: list = []
-    monkeypatch.setattr("subprocess.run", _fake_ollama_pull_run(0, calls))
+    def _fake_discover():
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return [
+                ClientStatus(
+                    id="ollama-ft",
+                    label="Ollama (local FT model)",
+                    state="setupable",
+                    reason="model not pulled",
+                )
+            ]
+        return [
+            ClientStatus(
+                id="ollama-ft",
+                label="Ollama (local FT model)",
+                state="ready",
+                reason="ready",
+                client=ready_client,
+            )
+        ]
 
-    result = runner.invoke(app, ["init"], input="2\n")
+    setup_calls: list[str] = []
+
+    def _fake_setup(client_id: str):
+        setup_calls.append(client_id)
+        return True, f"pulled {LOCAL_DISTILL_MODEL}"
+
+    monkeypatch.setattr("codeatrium.adapters.model.registry.discover", _fake_discover)
+    monkeypatch.setattr("codeatrium.adapters.model.registry.setup", _fake_setup)
+
+    result = runner.invoke(app, ["init"], input="y\n\n")
     assert result.exit_code == 0
-    assert calls == [["/usr/local/bin/ollama", "pull", LOCAL_DISTILL_MODEL]]
-    assert "Local model ready" in result.output
+    assert setup_calls == ["ollama-ft"]
 
     config = (tmp_path / ".codeatrium" / "config.toml").read_text()
-    assert '\nprovider = "openai"\n' in config
+    assert 'client = "ollama-ft"' in config
     assert f'model = "{LOCAL_DISTILL_MODEL}"' in config
     assert f'base_url = "{LOCAL_DISTILL_BASE_URL}"' in config
 
 
-def test_init_local_distiller_accepted_but_ollama_missing_falls_back(
+def _patch_both_ready(monkeypatch):
+    from codeatrium.adapters.model.types import ClientStatus, ModelClient
+
+    ollama_client = ModelClient(
+        id="ollama-ft",
+        provider="openai",
+        model="hf.co/sennaLLMLearner/qwen2.5-7b-memory-distiller:Q4_K_M",
+        base_url="http://localhost:11434/v1",
+        label="Ollama (local FT model)",
+    )
+    claude_client = ModelClient(
+        id="claude-cli",
+        provider="claude",
+        model="claude-haiku-4-5-20251001",
+        base_url=None,
+        label="Claude CLI",
+    )
+
+    def _fake_discover():
+        return [
+            ClientStatus(
+                id="ollama-ft",
+                label="Ollama (local FT model)",
+                state="ready",
+                reason="ready",
+                client=ollama_client,
+            ),
+            ClientStatus(
+                id="claude-cli",
+                label="Claude CLI",
+                state="ready",
+                reason="ready",
+                client=claude_client,
+            ),
+        ]
+
+    monkeypatch.setattr("codeatrium.adapters.model.registry.discover", _fake_discover)
+
+
+def test_init_ready_clients_default_selection_is_ollama_ft(tmp_path, monkeypatch):
+    """両方 Ready のとき ollama-ft が recommended default で、空 Enter で選ばれる"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+    _patch_both_ready(monkeypatch)
+
+    result = runner.invoke(app, ["init"], input="\n")
+    assert result.exit_code == 0
+    assert "(recommended)" in result.output
+
+    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
+    assert 'client = "ollama-ft"' in config
+
+
+def test_init_select_claude_cli_from_ready_list(tmp_path, monkeypatch):
+    """一覧から番号で claude-cli を選べる"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+    _patch_both_ready(monkeypatch)
+
+    result = runner.invoke(app, ["init"], input="2\n")
+    assert result.exit_code == 0
+
+    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
+    assert 'client = "claude-cli"' in config
+
+
+def test_init_no_local_distiller_flag_skips_setup_offer(tmp_path, monkeypatch):
+    """--no-local-distiller は setupable な ollama-ft の setup offer だけをスキップする"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+    _patch_setupable_ollama_only(monkeypatch)
+
+    setup_called = []
+    monkeypatch.setattr(
+        "codeatrium.adapters.model.registry.setup",
+        lambda client_id: setup_called.append(client_id) or (True, "ok"),
+    )
+
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
+    assert result.exit_code == 0
+    assert setup_called == []
+    assert "Set up Ollama" not in result.output
+
+    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
+    assert '\nclient = "' not in config
+
+
+def test_init_distill_client_flag_ready_writes_config_without_prompt(
     tmp_path, monkeypatch
 ):
-    """Yes を選んでも ollama が PATH に無ければ警告して Haiku にフォールバックする"""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / ".git").mkdir()
-
-    monkeypatch.setattr("shutil.which", lambda name: None)
-
-    result = runner.invoke(app, ["init"], input="2\n")
-    assert result.exit_code == 0
-    assert "Ollama not found in PATH" in result.output
-    assert "Falling back to Claude Haiku" in result.output
-
-    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
-    assert '# provider = "claude"' in config
-    assert '\nprovider = "openai"\n' not in config
-
-
-def test_init_local_distiller_accepted_but_pull_fails_falls_back(tmp_path, monkeypatch):
-    """ollama pull が非0終了したら警告して Haiku にフォールバックする"""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / ".git").mkdir()
-
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/ollama")
-    monkeypatch.setattr("subprocess.run", _fake_ollama_pull_run(1, []))
-
-    result = runner.invoke(app, ["init"], input="2\n")
-    assert result.exit_code == 0
-    assert "Failed to download local model" in result.output
-    assert "Falling back to Claude Haiku" in result.output
-
-    config = (tmp_path / ".codeatrium" / "config.toml").read_text()
-    assert '# provider = "claude"' in config
-    assert '\nprovider = "openai"\n' not in config
-
-
-def test_init_local_distiller_accepts_y_alias(tmp_path, monkeypatch):
-    """_ask_use_local_distiller が 'y' を Yes として受け付ける"""
-    from codeatrium.config import LOCAL_DISTILL_MODEL
+    """--distill-client で明示指定し Ready なら対話なしで config に書かれる"""
+    from codeatrium.adapters.model.types import ClientStatus, ModelClient
 
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
 
-    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/ollama")
-    monkeypatch.setattr("subprocess.run", _fake_ollama_pull_run(0, []))
+    claude_client = ModelClient(
+        id="claude-cli",
+        provider="claude",
+        model="claude-haiku-4-5-20251001",
+        base_url=None,
+        label="Claude CLI",
+    )
+    monkeypatch.setattr(
+        "codeatrium.adapters.model.registry.check_ready",
+        lambda client_id: ClientStatus(
+            id="claude-cli",
+            label="Claude CLI",
+            state="ready",
+            reason="ready",
+            client=claude_client,
+        ),
+    )
 
-    result = runner.invoke(app, ["init"], input="y\n")
+    result = runner.invoke(app, ["init", "--distill-client", "claude-cli"])
     assert result.exit_code == 0
 
     config = (tmp_path / ".codeatrium" / "config.toml").read_text()
-    assert f'model = "{LOCAL_DISTILL_MODEL}"' in config
+    assert 'client = "claude-cli"' in config
 
 
-def test_init_local_distiller_invalid_choice_reprompts(tmp_path, monkeypatch):
-    """無効な入力は再プロンプトされる"""
+def test_init_distill_client_flag_not_ready_errors_without_fallback(
+    tmp_path, monkeypatch
+):
+    """--distill-client が Ready でなければ別 client に落とさずエラー終了する"""
+    from codeatrium.adapters.model.types import ClientStatus
+
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
 
-    result = runner.invoke(app, ["init"], input="bogus\n1\n")
-    assert result.exit_code == 0
-    assert "Invalid choice. Please enter 1/2/y/n" in result.output
+    monkeypatch.setattr(
+        "codeatrium.adapters.model.registry.check_ready",
+        lambda client_id: ClientStatus(
+            id="ollama-ft",
+            label="Ollama (local FT model)",
+            state="unavailable",
+            reason="ollama binary not found in PATH",
+        ),
+    )
+
+    result = runner.invoke(app, ["init", "--distill-client", "ollama-ft"])
+    assert result.exit_code == 1
+    assert not (tmp_path / ".codeatrium" / "memory.db").exists()
+
+
+def test_init_distill_client_flag_unknown_id_errors(tmp_path, monkeypatch):
+    """未知の --distill-client 値はエラー終了する"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    result = runner.invoke(app, ["init", "--distill-client", "bogus"])
+    assert result.exit_code == 1
+    assert "Unknown distill client" in result.output

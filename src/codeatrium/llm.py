@@ -92,6 +92,12 @@ class LLMValidationError(Exception):
     pass
 
 
+class DistillUnconfiguredError(Exception):
+    """distill client が未設定（init/`loci distill --setup` が必要）"""
+
+    pass
+
+
 # ---- DistillBackend 抽象化 ----
 
 
@@ -105,11 +111,21 @@ class DistillBackend:
 
     @classmethod
     def from_config(cls, cfg) -> DistillBackend:
-        """Create DistillBackend from Config object"""
+        """Config から DistillBackend を作る。distill_client 経由で ModelClient registry を解決する。
+
+        unconfigured（client/provider どちらも未設定）は暗黙解決せず例外にする — silent fallback 禁止。
+        """
+        if cfg.distill_unconfigured or not cfg.distill_client:
+            raise DistillUnconfiguredError(
+                "distill client is not configured. Run `loci distill --setup`."
+            )
+        from codeatrium.adapters.model.registry import resolve_client
+
+        client = resolve_client(cfg.distill_client, cfg)
         return DistillBackend(
-            provider=cfg.distill_provider,
-            model=cfg.distill_model,
-            base_url=cfg.distill_base_url,
+            provider=client.provider,
+            model=client.model,
+            base_url=client.base_url,
         )
 
 

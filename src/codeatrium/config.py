@@ -20,6 +20,7 @@ DEFAULT_INDEX_MIN_CHARS = 50
 DEFAULT_DISTILL_MIN_CHARS = 100
 DEFAULT_DISTILL_PROVIDER = "claude"
 VALID_DISTILL_PROVIDERS = frozenset({"claude", "openai"})
+VALID_DISTILL_CLIENT_IDS = frozenset({"ollama-ft", "claude-cli", "openai-compat"})
 
 # ローカル蒸留モデル（`loci init` の対話プロンプトで opt-in した場合のデフォルト値）。
 # GGUF は Ollama 経由で hf.co/<repo>:<quant> の形式で直接 pull できる。
@@ -37,6 +38,8 @@ class Config:
     distill_min_chars: int = DEFAULT_DISTILL_MIN_CHARS
     distill_provider: str = "claude"
     distill_base_url: str | None = None
+    distill_client: str | None = None
+    distill_unconfigured: bool = True
 
 
 def load_config(project_root: Path) -> Config:
@@ -110,6 +113,37 @@ def load_config(project_root: Path) -> Config:
         provider = DEFAULT_DISTILL_PROVIDER
         base_url = None
 
+    raw_client = distill.get("client")
+    provider_specified = "provider" in distill
+
+    distill_client: str | None
+    distill_unconfigured: bool
+    if isinstance(raw_client, str) and raw_client in VALID_DISTILL_CLIENT_IDS:
+        distill_client = raw_client
+        distill_unconfigured = False
+    elif isinstance(raw_client, str):
+        print(
+            f"Warning: unknown distill.client '{raw_client}', "
+            "treating distill as unconfigured.",
+            file=sys.stderr,
+        )
+        distill_client = None
+        distill_unconfigured = True
+    elif provider_specified:
+        # provider/base_url はここまでの検証で安全な値に確定済み（例: openai だが
+        # base_url 欠落は "claude" にフォールバック済み）。それを踏まえて解決する。
+        distill_unconfigured = False
+        if provider == "claude":
+            distill_client = "claude-cli"
+        else:
+            # provider = "openai": Ollama のデフォルトポート(11434)を使っていれば
+            # ローカル FT (ollama-ft) とみなし、それ以外は汎用 openai-compat とする。
+            is_ollama = bool(base_url) and "11434" in base_url
+            distill_client = "ollama-ft" if is_ollama else "openai-compat"
+    else:
+        distill_client = None
+        distill_unconfigured = True
+
     return Config(
         distill_model=model,
         distill_batch_limit=batch_limit,
@@ -117,4 +151,6 @@ def load_config(project_root: Path) -> Config:
         distill_min_chars=distill_min_chars,
         distill_provider=provider,
         distill_base_url=base_url,
+        distill_client=distill_client,
+        distill_unconfigured=distill_unconfigured,
     )

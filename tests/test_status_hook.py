@@ -99,6 +99,47 @@ def test_status_counts_exchanges(tmp_path, monkeypatch):
     assert data["pending"] == 1
 
 
+def test_status_shows_unconfigured_distill(tmp_path, monkeypatch):
+    _setup_db(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["status", "--json"])
+    data = json.loads(result.output)
+    assert data["distill_client"] == "unconfigured"
+    assert data["distill_available"] is False
+
+
+def test_status_shows_ready_distill_client(tmp_path, monkeypatch):
+    _setup_db(tmp_path)
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        '[distill]\nclient = "claude-cli"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+
+    from codeatrium.adapters.model.types import ClientStatus, ModelClient
+
+    monkeypatch.setattr(
+        "codeatrium.adapters.model.registry.check_ready",
+        lambda client_id: ClientStatus(
+            id="claude-cli",
+            label="Claude CLI",
+            state="ready",
+            reason="ready",
+            client=ModelClient(
+                id="claude-cli",
+                provider="claude",
+                model="claude-haiku-4-5-20251001",
+                base_url=None,
+                label="Claude CLI",
+            ),
+        ),
+    )
+
+    result = runner.invoke(app, ["status", "--json"])
+    data = json.loads(result.output)
+    assert data["distill_client"] == "claude-cli"
+    assert data["distill_available"] is True
+
+
 # ---- hook install ----
 
 

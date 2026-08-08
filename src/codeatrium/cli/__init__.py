@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Annotated
 
@@ -75,9 +74,16 @@ def init(
         bool,
         typer.Option(
             "--no-local-distiller",
-            help="ローカル蒸留モデルのダウンロード提案をスキップ（Haiku を使用）",
+            help="ローカル蒸留モデルの pull 提案をスキップする",
         ),
     ] = False,
+    distill_client: Annotated[
+        str | None,
+        typer.Option(
+            "--distill-client",
+            help="蒸留 client を明示指定する（ollama-ft | claude-cli）。Ready でなければエラー終了",
+        ),
+    ] = None,
 ) -> None:
     """プロジェクトルートに .codeatrium/memory.db を初期化する"""
     from codeatrium.db import get_connection, init_db
@@ -125,9 +131,10 @@ def init(
             if distill_count > 0:
                 run_distill_now = _ask_run_distill_now(distill_count)
 
-    use_local_distiller = False if no_local_distiller else _ask_use_local_distiller()
-    local_distiller_ready = (
-        _download_local_distiller() if use_local_distiller else False
+    chosen_client = _resolve_init_distill_client(
+        root,
+        no_local_distiller=no_local_distiller,
+        distill_client_flag=distill_client,
     )
 
     # --- 実行フェーズ（ここから DB・ファイルを作成） ---
@@ -139,44 +146,32 @@ def init(
 
         config_path = codeatrium_dir / "config.toml"
         if not config_path.exists():
-            if local_distiller_ready:
-                from codeatrium.config import (
-                    LOCAL_DISTILL_BASE_URL,
-                    LOCAL_DISTILL_MODEL,
-                )
+            if chosen_client is not None:
+                from codeatrium.adapters.model.registry import write_client_config
 
+                write_client_config(config_path, chosen_client)
+                # write_client_config は既定で [distill]/[index] のみ生成する。
+                # init 由来のコメント（batch_limit/min_chars 案内）を後段に追記する。
                 config_path.write_text(
-                    "# Codeatrium configuration\n"
-                    "\n"
-                    "[distill]\n"
-                    'provider = "openai"\n'
-                    f'model = "{LOCAL_DISTILL_MODEL}"\n'
-                    f'base_url = "{LOCAL_DISTILL_BASE_URL}"\n'
-                    "# batch_limit = 20\n"
-                    "# min_chars = 100   # この文字数未満の exchange は蒸留スキップ\n"
-                    "#\n"
-                    "# Claude Haiku に戻す場合:\n"
-                    '#   provider = "claude"\n'
-                    '#   model = "claude-haiku-4-5-20251001"\n'
-                    "\n"
-                    "[index]\n"
-                    "# min_chars = 50   # trivial フィルタ閾値（文字数）\n"
+                    config_path.read_text().rstrip("\n")
+                    + "\n"
+                    + "# batch_limit = 20\n"
+                    + "# min_chars = 100   # この文字数未満の exchange は蒸留スキップ\n"
                 )
             else:
                 config_path.write_text(
                     "# Codeatrium configuration\n"
                     "\n"
                     "[distill]\n"
-                    '# provider = "claude"   # 蒸留 LLM: "claude" | "openai"（既定 "claude"）\n'
-                    '# model = "claude-haiku-4-5-20251001"\n'
+                    "# distill client が未設定です。次のコマンドで選択してください:\n"
+                    "#   loci distill --setup\n"
+                    "#\n"
+                    '# client = "ollama-ft"     # ローカル FT モデル（Ollama）\n'
+                    '# client = "claude-cli"    # Claude CLI (claude --print)\n'
+                    '# model = "..."\n'
+                    '# base_url = "..."         # ollama-ft / openai-compat のみ\n'
                     "# batch_limit = 20\n"
                     "# min_chars = 100   # この文字数未満の exchange は蒸留スキップ\n"
-                    "#\n"
-                    "# ローカル LLM（OpenAI 互換）で蒸留する場合:\n"
-                    '#   provider = "openai"\n'
-                    '#   model = "qwen2.5:7b"\n'
-                    '#   base_url = "http://localhost:11434/v1"   # Ollama\n'
-                    '#   # base_url = "http://localhost:1234/v1"  # LM Studio\n'
                     "\n"
                     "[index]\n"
                     "# min_chars = 50   # trivial フィルタ閾値（文字数）\n"
@@ -265,6 +260,7 @@ def init(
     # --- 蒸留フェーズ（失敗しても DB は残す: 後で loci distill で再試行可） ---
     if run_distill_now:
         from codeatrium.embedder import EmbedderSetupError
+        from codeatrium.llm import DistillUnconfiguredError
 
         try:
             from codeatrium.config import load_config
@@ -299,6 +295,12 @@ def init(
                 err=True,
             )
             raise typer.Exit(code=130) from None
+        except DistillUnconfiguredError:
+            typer.echo(
+                "\nDistill client is not configured — skipping distillation.\n"
+                "Configure and retry with: loci distill --setup",
+                err=True,
+            )
         except EmbedderSetupError as exc:
             typer.echo(
                 f"\n⚠ {exc}\n"
@@ -407,70 +409,68 @@ def _ask_run_distill_now(distill_count: int) -> bool:
         typer.echo("  Invalid choice. Please enter 1/2/y/n.")
 
 
-def _ask_use_local_distiller() -> bool:
-    """ローカル蒸留モデル(Ollama)をダウンロードして使うか聞く。y/n/1/2 を受け付ける。"""
-    from codeatrium.config import LOCAL_DISTILL_BASE_URL, LOCAL_DISTILL_MODEL
+def _resolve_init_distill_client(
+    root: Path, *, no_local_distiller: bool, distill_client_flag: str | None
+):
+    """discover → (optional) setup offer → Ready 一覧 → 選択。
 
-    typer.echo(
-        "\nDownload a local distillation model instead of using Claude Haiku?\n"
-        f"  Model: {LOCAL_DISTILL_MODEL}\n"
-        "  Qwen2.5-7B fine-tuned for conversation memory distillation (~4.7GB, Q4_K_M).\n"
-        f"  Served locally via Ollama at {LOCAL_DISTILL_BASE_URL} — no API calls, no token cost.\n"
+    Returns: 選ばれた ModelClient、または unconfigured を意味する None。
+    `--distill-client` 明示指定時は Ready でなければエラー終了する（別 client に落とさない）。
+    """
+    from codeatrium.adapters.model.registry import (
+        check_ready,
+        discover,
+        ready_clients,
+        recommended_id,
+        resolve_client,
+        setup,
     )
-    typer.echo("  [1] No — use Claude Haiku (default)")
-    typer.echo("  [2] Yes — download and use the local model")
+    from codeatrium.config import load_config
 
-    while True:
-        choice = typer.prompt("Choice", default="1").strip().lower()
-        if choice in ("1", "n", "no"):
-            return False
-        if choice in ("2", "y", "yes"):
-            return True
-        typer.echo("  Invalid choice. Please enter 1/2/y/n.")
+    if distill_client_flag is not None:
+        if distill_client_flag not in ("ollama-ft", "claude-cli"):
+            typer.echo(f"Unknown distill client: {distill_client_flag}", err=True)
+            raise typer.Exit(code=1)
+        status = check_ready(distill_client_flag)
+        if status.state != "ready" or status.client is None:
+            typer.echo(
+                f"--distill-client {distill_client_flag} is not ready: "
+                f"{status.reason}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        return status.client
 
+    statuses = discover()
+    for s in statuses:
+        if s.state == "setupable" and not no_local_distiller:
+            typer.echo(f"\n{s.label}: {s.reason}")
+            if typer.confirm(f"Set up {s.label} now?", default=False):
+                ok, msg = setup(s.id)
+                typer.echo(msg)
+                if ok:
+                    statuses = discover()
 
-def _download_local_distiller() -> bool:
-    """`ollama pull` で LOCAL_DISTILL_MODEL を取得する。失敗時は False（Haiku へフォールバック）。"""
-    from codeatrium.config import LOCAL_DISTILL_MODEL
-
-    ollama = shutil.which("ollama")
-    if ollama is None:
+    ready = ready_clients(statuses)
+    if not ready:
         typer.echo(
-            "\n⚠ Ollama not found in PATH. Install it from https://ollama.com, then run:\n"
-            f"    ollama pull {LOCAL_DISTILL_MODEL}\n"
-            "Falling back to Claude Haiku for distillation.",
-            err=True,
+            "\nNo distill client is ready. Leaving distill unconfigured — "
+            "run `loci distill --setup` later."
         )
-        return False
+        return None
 
-    typer.echo(f"\nDownloading {LOCAL_DISTILL_MODEL} via Ollama (this may take a while)...")
-    try:
-        result = subprocess.run([ollama, "pull", LOCAL_DISTILL_MODEL])
-    except KeyboardInterrupt:
-        typer.echo(
-            "\n⚠ Download interrupted. Falling back to Claude Haiku for distillation.",
-            err=True,
-        )
-        return False
-    except OSError as exc:
-        typer.echo(
-            f"\n⚠ Failed to run ollama: {exc}\n"
-            "Falling back to Claude Haiku for distillation.",
-            err=True,
-        )
-        return False
-
-    if result.returncode != 0:
-        typer.echo(
-            "\n⚠ Failed to download local model (ollama pull exited non-zero).\n"
-            f"  Retry later with: ollama pull {LOCAL_DISTILL_MODEL}\n"
-            "Falling back to Claude Haiku for distillation.",
-            err=True,
-        )
-        return False
-
-    typer.echo(f"✓ Local model ready: {LOCAL_DISTILL_MODEL}")
-    return True
+    rec = recommended_id(statuses)
+    typer.echo("\nAvailable distill clients:")
+    default_idx = 1
+    for i, s in enumerate(ready, start=1):
+        mark = " (recommended)" if s.id == rec else ""
+        typer.echo(f"  {i}. {s.label} [{s.id}]{mark}")
+        if s.id == rec:
+            default_idx = i
+    raw = typer.prompt("Select client", default=str(default_idx)).strip()
+    idx = int(raw) if raw.isdigit() and 1 <= int(raw) <= len(ready) else default_idx
+    chosen = ready[idx - 1]
+    return chosen.client or resolve_client(chosen.id, load_config(root))
 
 
 def _ask_distill_priority() -> str:
