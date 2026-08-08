@@ -566,3 +566,124 @@ def test_index_file_exchange_files_dedup(tmp_path: Path) -> None:
     count = con.execute("SELECT COUNT(*) FROM exchange_files").fetchone()[0]
     assert count == 1
     con.close()
+
+
+# ---- code_touches のテスト（design §4.1・§5.3） ----
+
+
+def make_edit_tool_use_and_result(
+    tool_id: str, abs_file_path: str, parent_uuid: str, old: str = "a", new: str = "b"
+) -> list[dict]:
+    """Edit の tool_use（assistant）とそれに対応する tool_result（user, toolUseResult 付き）を返す"""
+    assistant = {
+        "type": "assistant",
+        "uuid": f"{tool_id}-call",
+        "parentUuid": parent_uuid,
+        "timestamp": "2026-03-26T00:00:01.000Z",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": tool_id,
+                    "name": "Edit",
+                    "input": {"file_path": abs_file_path, "old_string": old, "new_string": new},
+                }
+            ],
+        },
+    }
+    user_result = {
+        "type": "user",
+        "uuid": f"{tool_id}-result",
+        "parentUuid": f"{tool_id}-call",
+        "timestamp": "2026-03-26T00:00:02.000Z",
+        "message": {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": []}],
+        },
+        "toolUseResult": {
+            "filePath": abs_file_path,
+            "oldString": old,
+            "newString": new,
+            "structuredPatch": [
+                {"oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1, "lines": [f"-{old}", f"+{new}"]}
+            ],
+        },
+    }
+    return [assistant, user_result]
+
+
+def test_index_file_writes_code_touches_when_project_root_given(tmp_path: Path) -> None:
+    """project_root を渡すと code_touches に記録される（design §5.3）"""
+    project_root = tmp_path
+    db_path = project_root / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    jsonl = project_root / "session.jsonl"
+    abs_file_path = str(project_root / "src" / "foo.py")
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Fix the bug in foo.py please. " * 10),
+            *make_edit_tool_use_and_result("toolu_1", abs_file_path, "u1"),
+        ],
+    )
+
+    index_file(jsonl, db_path, project_root=project_root)
+
+    con = get_connection(db_path)
+    rows = con.execute("SELECT file_path, locator_kind, touch_kind FROM code_touches").fetchall()
+    con.close()
+
+    assert len(rows) == 1
+    assert rows[0]["file_path"] == "src/foo.py"
+    assert rows[0]["locator_kind"] == "line"
+    assert rows[0]["touch_kind"] == "edit"
+
+
+def test_index_file_skips_code_touches_outside_project_root(tmp_path: Path) -> None:
+    """不変条件3: プロジェクト外のパスは記録しない"""
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    db_path = project_root / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    jsonl = project_root / "session.jsonl"
+    outside_path = str(tmp_path / "elsewhere" / "foo.py")
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Fix the bug in foo.py please. " * 10),
+            *make_edit_tool_use_and_result("toolu_1", outside_path, "u1"),
+        ],
+    )
+
+    index_file(jsonl, db_path, project_root=project_root)
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM code_touches").fetchone()[0]
+    con.close()
+    assert count == 0
+
+
+def test_index_file_without_project_root_skips_code_touches(tmp_path: Path) -> None:
+    """project_root 未指定なら code_touches の記録自体をスキップする（後方互換）"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    abs_file_path = str(tmp_path / "src" / "foo.py")
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Fix the bug in foo.py please. " * 10),
+            *make_edit_tool_use_and_result("toolu_1", abs_file_path, "u1"),
+        ],
+    )
+
+    index_file(jsonl, db_path)
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM code_touches").fetchone()[0]
+    con.close()
+    assert count == 0

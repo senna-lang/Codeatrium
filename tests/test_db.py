@@ -1365,3 +1365,137 @@ def test_migration_v8_idempotent(tmp_path: Path) -> None:
     # Verify user_version equals the number of migrations both times
     assert user_version_1 == len(_MIGRATIONS)
     assert user_version_2 == len(_MIGRATIONS)
+
+
+def test_init_db_new_db_has_code_touches_table(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    cur = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='code_touches'"
+    )
+    assert cur.fetchone() is not None
+    con.close()
+
+
+def test_init_db_new_db_has_code_symbols_table(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    cur = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='code_symbols'"
+    )
+    assert cur.fetchone() is not None
+    con.close()
+
+
+def test_init_db_new_db_has_code_edges_table(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    cur = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='code_edges'"
+    )
+    assert cur.fetchone() is not None
+    con.close()
+
+
+def test_init_db_new_db_conversations_has_parent_session_ref_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    columns = con.execute("PRAGMA table_info(conversations)").fetchall()
+    column_names = [col[1] for col in columns]
+    assert "parent_session_ref" in column_names
+    con.close()
+
+
+def test_migration_v9_adds_code_touches_tables(tmp_path: Path) -> None:
+    """Test that v9 migration creates code_touches/code_symbols/code_edges on a pre-v9 DB."""
+    db_path = tmp_path / "memory.db"
+
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute("PRAGMA user_version = 8")
+    raw_con.commit()
+    raw_con.close()
+
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    tables = {
+        row[0]
+        for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('code_touches', 'code_symbols', 'code_edges')"
+        ).fetchall()
+    }
+    assert tables == {"code_touches", "code_symbols", "code_edges"}
+    con.close()
+
+
+def test_migration_v9_adds_parent_session_ref_column(tmp_path: Path) -> None:
+    """Test that v9 migration adds parent_session_ref to an existing conversations table."""
+    db_path = tmp_path / "memory.db"
+
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1
+        )"""
+    )
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
+    raw_con.execute("PRAGMA user_version = 8")
+    raw_con.commit()
+    raw_con.close()
+
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    columns = con.execute("PRAGMA table_info(conversations)").fetchall()
+    column_names = [col[1] for col in columns]
+    assert "parent_session_ref" in column_names
+    # 既存行が壊れていないことも確認する
+    row = con.execute("SELECT id FROM conversations WHERE id='conv1'").fetchone()
+    assert row is not None
+    con.close()
+
+
+def test_migration_v9_idempotent(tmp_path: Path) -> None:
+    """Test that v9 migration is idempotent (can be run multiple times)."""
+    db_path = tmp_path / "memory.db"
+
+    init_db(db_path)
+    con = sqlite3.connect(db_path)
+    user_version_1 = con.execute("PRAGMA user_version").fetchone()[0]
+    con.close()
+
+    init_db(db_path)
+    con = sqlite3.connect(db_path)
+    user_version_2 = con.execute("PRAGMA user_version").fetchone()[0]
+    tables = {
+        row[0]
+        for row in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('code_touches', 'code_symbols', 'code_edges')"
+        ).fetchall()
+    }
+    con.close()
+
+    assert user_version_1 == len(_MIGRATIONS)
+    assert user_version_2 == len(_MIGRATIONS)
+    assert tables == {"code_touches", "code_symbols", "code_edges"}

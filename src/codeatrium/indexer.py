@@ -8,6 +8,8 @@ exchange 境界定義:
 フィルタルール（SPEC Section 6 / 論文 Section 3.1 準拠）:
   - 50文字未満の exchange は trivial として除外
   - isMeta=True の user エントリは exchange 境界としない
+
+project_root を渡すと、exchange と同じコミットで code_touches（design §4.1）も記録する。
 """
 
 from __future__ import annotations
@@ -18,6 +20,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from codeatrium.adapters.harness import claude as claude_adapter
+from codeatrium.code_touches import (
+    build_code_touch_rows,
+    is_external_path,
+    normalize_repo_path,
+)
 from codeatrium.utils import sha256
 
 
@@ -36,25 +44,6 @@ class Exchange:
 
 
 # ---- 内部ヘルパー ----
-
-# 外部パス（サイトパッケージ等）の判定用マーカー
-_EXTERNAL_PATH_MARKERS = (
-    'site-packages/',
-    'dist-packages/',
-    '/lib/python',
-    '/opt/',
-    '/usr/lib/',
-    '/usr/local/lib/',
-    '.venv/',
-    '/venv/',
-    'node_modules/',
-)
-
-
-def _is_external_path_indexer(path: str) -> bool:
-    """パスが外部ライブラリ（site-packages など）を指しているか判定する"""
-    return any(marker in path for marker in _EXTERNAL_PATH_MARKERS)
-
 
 def _extract_tool_use_files(entries: list[dict | None]) -> list[str]:
     """
@@ -103,7 +92,7 @@ def _extract_tool_use_files(entries: list[dict | None]) -> list[str]:
                 continue
 
             # 外部パスはスキップ
-            if _is_external_path_indexer(path):
+            if is_external_path(path):
                 continue
 
             # 重複排除（順序保持）
@@ -179,15 +168,14 @@ def _is_real_user_entry(entry: dict) -> bool:
 # ---- 公開API ----
 
 
-def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -1) -> list[Exchange]:
-    """
-    .jsonl ファイルを読んで exchange リストを返す。
-    trivial（min_chars 文字未満）は除外する。
-    last_ply_end: ply インデックス以前の行はスキップ（デフォルト -1 = 全行パース、既にインデックスされた部分の再処理を避けるため）。
+def _load_raw_entries(jsonl_path: Path, last_ply_end: int) -> list[dict | None]:
+    """.jsonl を1行ずつ読んで raw entry のリストを返す。
+    last_ply_end 以前の行は None プレースホルダに置き換える（既インデックス領域の再構築を避ける）。
+    parse_exchanges と code_touches 抽出（index_file）の両方から同じ ply 座標系で参照するための共有ローダー。
     """
     raw_entries: list[dict | None] = []
     if not jsonl_path.exists():
-        return []
+        return raw_entries
     ply = 0
     with jsonl_path.open(encoding="utf-8") as f:
         for line in f:
@@ -210,6 +198,25 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -
                     ply += 1
                 except json.JSONDecodeError:
                     continue
+    return raw_entries
+
+
+def parse_exchanges(
+    jsonl_path: Path,
+    min_chars: int = 50,
+    last_ply_end: int = -1,
+    raw_entries: list[dict | None] | None = None,
+) -> list[Exchange]:
+    """
+    .jsonl ファイルを読んで exchange リストを返す。
+    trivial（min_chars 文字未満）は除外する。
+    last_ply_end: ply インデックス以前の行はスキップ（デフォルト -1 = 全行パース、既にインデックスされた部分の再処理を避けるため）。
+    raw_entries: 呼び出し側が既に読み込み済みなら渡せる（index_file が code_touches 抽出と共有するため）。
+    """
+    if raw_entries is None:
+        if not jsonl_path.exists():
+            return []
+        raw_entries = _load_raw_entries(jsonl_path, last_ply_end)
 
     conversation_id = sha256(str(jsonl_path))
 
@@ -279,10 +286,17 @@ def parse_exchanges(jsonl_path: Path, min_chars: int = 50, last_ply_end: int = -
     return exchanges
 
 
-def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
+def index_file(
+    jsonl_path: Path,
+    db_path: Path,
+    min_chars: int = 50,
+    project_root: Path | None = None,
+) -> int:
     """
     .jsonl ファイルを DB に登録する。
     既存 conversation の場合は last_ply_end 以降の新規 exchange のみ追加する。
+    project_root を渡すと、あわせて code_touches（design §4.1）を同じコミットで記録する。
+    None の場合は code_touches の記録をスキップする（project_root が無いと相対パス化できないため）。
     Returns: 新規登録した exchange 数
     """
     from codeatrium.db import get_connection
@@ -296,7 +310,10 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
     ).fetchone()
     last_ply_end = row["last_ply_end"] if row is not None else -1
 
-    exchanges = parse_exchanges(jsonl_path, min_chars=min_chars, last_ply_end=last_ply_end)
+    raw_entries = _load_raw_entries(jsonl_path, last_ply_end)
+    exchanges = parse_exchanges(
+        jsonl_path, min_chars=min_chars, last_ply_end=last_ply_end, raw_entries=raw_entries
+    )
     new_exchanges = [ex for ex in exchanges if ex.ply_start > last_ply_end]
 
     if not new_exchanges:
@@ -342,6 +359,28 @@ def index_file(jsonl_path: Path, db_path: Path, min_chars: int = 50) -> int:
                 "INSERT OR IGNORE INTO exchange_files (exchange_id, file_path) VALUES (?, ?)",
                 (ex.id, file_path),
             )
+
+    # code_touches を登録（design §5.3: 解析 → まとめて INSERT → 既存コミットにまとめる）
+    if project_root is not None:
+        for ex in new_exchanges:
+            exchange_slice = raw_entries[ex.ply_start : ex.ply_end + 1]
+            for touch in claude_adapter.extract_code_touches(exchange_slice):
+                rel_path = normalize_repo_path(touch.file_path, str(project_root))
+                if rel_path is None:
+                    continue
+                for touch_row in build_code_touch_rows(touch, exchange_id=ex.id, rel_file_path=rel_path):
+                    con.execute(
+                        """
+                        INSERT OR IGNORE INTO code_touches
+                            (id, exchange_id, harness, tool_call_id, file_path, touch_kind,
+                             locator_kind, old_start, old_lines, new_start, new_lines,
+                             old_string, new_string, added, removed, ts)
+                        VALUES (:id, :exchange_id, :harness, :tool_call_id, :file_path, :touch_kind,
+                                :locator_kind, :old_start, :old_lines, :new_start, :new_lines,
+                                :old_string, :new_string, :added, :removed, :ts)
+                        """,
+                        touch_row,
+                    )
 
     con.commit()
     con.close()

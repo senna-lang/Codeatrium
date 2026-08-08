@@ -9,7 +9,10 @@ SQLite DB の初期化・スキーマ定義・接続管理
   palace_objects - 蒸留済み palace object（exchange_core + specific_context）
   rooms          - palace object の room_assignments
   vec_palace     - sqlite-vec HNSW インデックス（Phase2 distilled ベクトル検索用）
-  symbols        - tree-sitter 解決済みシンボル（Phase3 コード逆引き用）
+  symbols        - tree-sitter 解決済みシンボル（Phase3 コード逆引き用、読み取り専用で残置）
+  code_touches   - ハーネスの編集ログから記録時に保存する加工前の手がかり（design §4.1）
+  code_symbols   - tree-sitter で解決したシンボルの正本（design §4.1）
+  code_edges     - 会話とコードのひも付け（design §4.1）
   _MIGRATIONS    - 逐次マイグレーション関数リスト（user_version ベース）
 """
 
@@ -239,6 +242,80 @@ def _migrate_v8_add_git_branch(con: sqlite3.Connection) -> None:
                 pass
 
 
+def _migrate_v9_add_code_touches(con: sqlite3.Connection) -> None:
+    """Migration v9: code_touches/code_symbols/code_edges を新設し conversations.parent_session_ref を追加する（design §4.1・§4.2）"""
+    conversations_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'").fetchone()
+    if conversations_exists is not None:
+        columns = con.execute("PRAGMA table_info(conversations)").fetchall()
+        column_names = [col[1] for col in columns]
+        if "parent_session_ref" not in column_names:
+            con.execute("ALTER TABLE conversations ADD COLUMN parent_session_ref TEXT")
+
+    # executescript() は暗黙に COMMIT するため、_run_migrations の外側トランザクションが
+    # 途中で閉じてしまう。個別の execute() に分けて同一トランザクション内に収める。
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS code_touches (
+            id           TEXT PRIMARY KEY,
+            exchange_id  TEXT NOT NULL,
+            harness      TEXT NOT NULL,
+            tool_call_id TEXT NOT NULL,
+            file_path    TEXT NOT NULL,
+            touch_kind   TEXT NOT NULL,
+
+            locator_kind TEXT NOT NULL,
+            old_start    INT,
+            old_lines    INT,
+            new_start    INT,
+            new_lines    INT,
+            old_string   TEXT,
+            new_string   TEXT,
+
+            symbol_name  TEXT,
+            resolved_by  TEXT,
+            added        INT NOT NULL DEFAULT 0,
+            removed      INT NOT NULL DEFAULT 0,
+            ts           TEXT
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_code_touches_exchange ON code_touches(exchange_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_code_touches_file     ON code_touches(file_path)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_code_touches_symbol   ON code_touches(file_path, symbol_name)")
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS code_symbols (
+            id          TEXT PRIMARY KEY,
+            file_path   TEXT NOT NULL,
+            symbol_name TEXT NOT NULL,
+            symbol_kind TEXT NOT NULL,
+            signature   TEXT NOT NULL,
+            line        INT NOT NULL,
+            end_line    INT NOT NULL,
+            lang        TEXT NOT NULL,
+            resolved_at TEXT NOT NULL,
+            UNIQUE(file_path, symbol_name)
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(symbol_name)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_code_symbols_file ON code_symbols(file_path)")
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS code_edges (
+            id          TEXT PRIMARY KEY,
+            exchange_id TEXT NOT NULL,
+            file_path   TEXT NOT NULL,
+            symbol_id   TEXT,
+            edge_kind   TEXT NOT NULL,
+            granularity TEXT NOT NULL,
+            confidence  REAL NOT NULL,
+            added       INT NOT NULL DEFAULT 0,
+            ts          TEXT
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_symbol   ON code_edges(symbol_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_file     ON code_edges(file_path)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_exchange ON code_edges(exchange_id)")
+
+
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_add_last_ply_end,
     _migrate_v2_add_distill_status,
@@ -248,6 +325,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v6_recompute_symbol_ids,
     _migrate_v7_repair_distill,
     _migrate_v8_add_git_branch,
+    _migrate_v9_add_code_touches,
 ]
 
 
@@ -300,10 +378,11 @@ def init_db(db_path: Path) -> None:
         # New DB: run core schema
         con.executescript("""
             CREATE TABLE IF NOT EXISTS conversations (
-                id            TEXT PRIMARY KEY,   -- sha256(source_path)
-                source_path   TEXT NOT NULL UNIQUE,
-                started_at    TIMESTAMP,
-                last_ply_end  INT  NOT NULL DEFAULT -1  -- 最後にインデックスした ply_end（差分用）
+                id                 TEXT PRIMARY KEY,   -- sha256(source_path)
+                source_path        TEXT NOT NULL UNIQUE,
+                started_at         TIMESTAMP,
+                last_ply_end       INT  NOT NULL DEFAULT -1,  -- 最後にインデックスした ply_end（差分用）
+                parent_session_ref TEXT                       -- サブエージェントの親セッション参照（不透明値、design §4.2）
             );
 
             CREATE TABLE IF NOT EXISTS exchanges (
@@ -385,6 +464,62 @@ def init_db(db_path: Path) -> None:
             CREATE INDEX IF NOT EXISTS idx_rooms_palace_object_id ON rooms(palace_object_id);
             CREATE INDEX IF NOT EXISTS idx_symbols_palace_object_id ON symbols(palace_object_id);
             CREATE INDEX IF NOT EXISTS idx_palace_objects_exchange_id ON palace_objects(exchange_id);
+
+            CREATE TABLE IF NOT EXISTS code_touches (
+                id           TEXT PRIMARY KEY,
+                exchange_id  TEXT NOT NULL,
+                harness      TEXT NOT NULL,
+                tool_call_id TEXT NOT NULL,
+                file_path    TEXT NOT NULL,
+                touch_kind   TEXT NOT NULL,
+
+                locator_kind TEXT NOT NULL,
+                old_start    INT,
+                old_lines    INT,
+                new_start    INT,
+                new_lines    INT,
+                old_string   TEXT,
+                new_string   TEXT,
+
+                symbol_name  TEXT,
+                resolved_by  TEXT,
+                added        INT NOT NULL DEFAULT 0,
+                removed      INT NOT NULL DEFAULT 0,
+                ts           TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_touches_exchange ON code_touches(exchange_id);
+            CREATE INDEX IF NOT EXISTS idx_code_touches_file     ON code_touches(file_path);
+            CREATE INDEX IF NOT EXISTS idx_code_touches_symbol   ON code_touches(file_path, symbol_name);
+
+            CREATE TABLE IF NOT EXISTS code_symbols (
+                id          TEXT PRIMARY KEY,
+                file_path   TEXT NOT NULL,
+                symbol_name TEXT NOT NULL,
+                symbol_kind TEXT NOT NULL,
+                signature   TEXT NOT NULL,
+                line        INT NOT NULL,
+                end_line    INT NOT NULL,
+                lang        TEXT NOT NULL,
+                resolved_at TEXT NOT NULL,
+                UNIQUE(file_path, symbol_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(symbol_name);
+            CREATE INDEX IF NOT EXISTS idx_code_symbols_file ON code_symbols(file_path);
+
+            CREATE TABLE IF NOT EXISTS code_edges (
+                id          TEXT PRIMARY KEY,
+                exchange_id TEXT NOT NULL,
+                file_path   TEXT NOT NULL,
+                symbol_id   TEXT,
+                edge_kind   TEXT NOT NULL,
+                granularity TEXT NOT NULL,
+                confidence  REAL NOT NULL,
+                added       INT NOT NULL DEFAULT 0,
+                ts          TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_edges_symbol   ON code_edges(symbol_id);
+            CREATE INDEX IF NOT EXISTS idx_code_edges_file     ON code_edges(file_path);
+            CREATE INDEX IF NOT EXISTS idx_code_edges_exchange ON code_edges(exchange_id);
         """)
 
         from codeatrium.embedder import MODEL_NAME

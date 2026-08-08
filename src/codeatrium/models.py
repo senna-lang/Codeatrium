@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -52,3 +52,56 @@ class FusedResult:
     rooms: list[dict[str, Any]] = field(default_factory=list)
     symbols: list[dict[str, Any]] = field(default_factory=list)
     git_branch: str | None = None
+
+
+# ---- コードとの紐付け（ハーネス非依存の共通型。design §3.2 / §5.1） ----
+
+
+@dataclass(frozen=True)
+class LineRange:
+    """行番号が直接分かる場合の手がかり"""
+
+    old_start: int | None
+    old_lines: int | None
+    new_start: int
+    new_lines: int
+
+
+@dataclass(frozen=True)
+class TextAnchor:
+    """編集前後の文字列だけ分かる場合の手がかり。行の割り出しは core が行う"""
+
+    old_string: str | None
+    new_string: str | None
+
+
+@dataclass(frozen=True)
+class FileOnly:
+    """ファイルしか分からない場合の手がかり"""
+
+
+CodeLocator = LineRange | TextAnchor | FileOnly
+
+# ハーネスが編集場所をどこまで正確に出せるか（design §3.3）。
+# 'full' を宣言したハーネスは LineRange を出す契約を負うため、
+# 解読できていない形式を安易に 'full' と申告してはならない。
+EditCapability = Literal["full", "anchor", "file_only"]
+
+TouchKind = Literal["edit", "write", "read"]
+
+
+@dataclass(frozen=True)
+class CodeTouch:
+    """ハーネス非依存の編集記録。アダプターがこの形にして core へ渡す（design §5.1）"""
+
+    harness: str
+    tool_call_id: str
+    file_path: str
+    touch_kind: TouchKind
+    locators: tuple[CodeLocator, ...]
+    added: int
+    removed: int
+    ts: str | None
+    # 以下は core が後から埋める
+    symbol_name: str | None = None
+    resolved_by: str | None = None

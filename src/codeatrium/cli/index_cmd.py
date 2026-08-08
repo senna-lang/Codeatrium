@@ -51,7 +51,7 @@ def index(
     total_exchanges = 0
     files_with_new = 0
     for jsonl in jsonl_files:
-        count = index_file(jsonl, db, min_chars=cfg.index_min_chars)
+        count = index_file(jsonl, db, min_chars=cfg.index_min_chars, project_root=root)
         if count == 0:
             continue
         files_with_new += 1
