@@ -2,7 +2,9 @@
 SymbolResolver — tree-sitter でソースファイルからシンボルを抽出する
 
 対応言語: Python / TypeScript / Go
-抽出対象: 関数・クラス・メソッド（symbol_name / symbol_kind / signature / line / file_path）
+抽出対象: 関数・クラス・メソッド（symbol_name / symbol_kind / signature / line / end_line / file_path / lang）
+TypeScript/TSX では `const Button = () => {}` 系のアロー関数・関数式も
+`function` として拾う（`React.memo(...)` / `forwardRef(...)` に包まれた形も含む）。
 
 シンボル解決は検索時ではなく蒸留時に一度だけ実行する。
 ファイル移動後も記録が残り、検索が高速になる。
@@ -27,7 +29,9 @@ class Symbol:
     symbol_kind: str  # "function" / "class" / "method"
     signature: str  # ソースコードのテキストをそのまま保存（型解決なし）
     line: int  # 1-indexed
+    end_line: int  # 1-indexed
     file_path: str
+    lang: str  # ファイル拡張子（".py" / ".ts" / ".tsx" / ".go"）
 
 
 # ---- 言語定義 ----
@@ -68,18 +72,22 @@ class SymbolResolver:
         tree = parser.parse(source)
 
         if suffix == ".py":
-            return self._extract_python(tree.root_node, source, str(file_path))
+            return self._extract_python(tree.root_node, source, str(file_path), suffix)
         if suffix in (".ts", ".tsx"):
-            return self._extract_typescript(tree.root_node, source, str(file_path))
+            return self._extract_typescript(
+                tree.root_node, source, str(file_path), suffix
+            )
         if suffix == ".go":
-            return self._extract_go(tree.root_node, source, str(file_path))
+            return self._extract_go(tree.root_node, source, str(file_path), suffix)
         return []
 
     # ---- Python ----
 
-    def _extract_python(self, root: Node, source: bytes, path: str) -> list[Symbol]:
+    def _extract_python(
+        self, root: Node, source: bytes, path: str, lang: str
+    ) -> list[Symbol]:
         symbols: list[Symbol] = []
-        self._walk_python(root, source, path, parent_class=None, symbols=symbols)
+        self._walk_python(root, source, path, lang, parent_class=None, symbols=symbols)
         return symbols
 
     def _walk_python(
@@ -87,6 +95,7 @@ class SymbolResolver:
         node: Node,
         source: bytes,
         path: str,
+        lang: str,
         parent_class: str | None,
         symbols: list[Symbol],
     ) -> None:
@@ -100,12 +109,19 @@ class SymbolResolver:
                         symbol_kind="class",
                         signature=_signature(node, source),
                         line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
                         file_path=path,
+                        lang=lang,
                     )
                 )
                 for child in node.children:
                     self._walk_python(
-                        child, source, path, parent_class=class_name, symbols=symbols
+                        child,
+                        source,
+                        path,
+                        lang,
+                        parent_class=class_name,
+                        symbols=symbols,
                     )
                 return
 
@@ -121,21 +137,30 @@ class SymbolResolver:
                         symbol_kind=kind,
                         signature=_signature(node, source),
                         line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
                         file_path=path,
+                        lang=lang,
                     )
                 )
                 return  # メソッド内のネスト関数は追跡しない
 
         for child in node.children:
             self._walk_python(
-                child, source, path, parent_class=parent_class, symbols=symbols
+                child, source, path, lang, parent_class=parent_class, symbols=symbols
             )
 
     # ---- TypeScript ----
 
-    def _extract_typescript(self, root: Node, source: bytes, path: str) -> list[Symbol]:
+    # variable_declarator の value がこの型なら関数（コンポーネント）とみなす
+    _TS_FUNCTION_VALUE_TYPES = ("arrow_function", "function_expression")
+
+    def _extract_typescript(
+        self, root: Node, source: bytes, path: str, lang: str
+    ) -> list[Symbol]:
         symbols: list[Symbol] = []
-        self._walk_typescript(root, source, path, parent_class=None, symbols=symbols)
+        self._walk_typescript(
+            root, source, path, lang, parent_class=None, symbols=symbols
+        )
         return symbols
 
     def _walk_typescript(
@@ -143,6 +168,7 @@ class SymbolResolver:
         node: Node,
         source: bytes,
         path: str,
+        lang: str,
         parent_class: str | None,
         symbols: list[Symbol],
     ) -> None:
@@ -156,12 +182,19 @@ class SymbolResolver:
                         symbol_kind="class",
                         signature=_signature(node, source),
                         line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
                         file_path=path,
+                        lang=lang,
                     )
                 )
                 for child in node.children:
                     self._walk_typescript(
-                        child, source, path, parent_class=class_name, symbols=symbols
+                        child,
+                        source,
+                        path,
+                        lang,
+                        parent_class=class_name,
+                        symbols=symbols,
                     )
                 return
 
@@ -175,7 +208,9 @@ class SymbolResolver:
                         symbol_kind="function",
                         signature=_signature(node, source),
                         line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
                         file_path=path,
+                        lang=lang,
                     )
                 )
                 return
@@ -190,24 +225,94 @@ class SymbolResolver:
                         symbol_kind="method",
                         signature=_signature(node, source),
                         line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
                         file_path=path,
+                        lang=lang,
                     )
                 )
                 return
 
+        if node.type == "variable_declarator":
+            symbol = self._typescript_variable_symbol(node, source, path, lang)
+            if symbol is not None:
+                symbols.append(symbol)
+                return
+
         for child in node.children:
             self._walk_typescript(
-                child, source, path, parent_class=parent_class, symbols=symbols
+                child, source, path, lang, parent_class=parent_class, symbols=symbols
             )
+
+    def _typescript_variable_symbol(
+        self, node: Node, source: bytes, path: str, lang: str
+    ) -> Symbol | None:
+        """`const Button = () => {}` 系（§6.0b）を関数シンボルとして拾う
+
+        直接の arrow_function / function_expression だけでなく、
+        `React.memo(...)` / `forwardRef(...)` のように呼び出しで包まれた形も対象にする。
+
+        モジュール直下（トップレベル）の宣言のみを対象にする。
+        コールバック引数の中の `const helper = () => {}` のようなネストした
+        宣言まで拾うと、意図しないシンボルが大量に生まれてしまうため。
+        """
+        name_node = node.child_by_field_name("name")
+        value_node = node.child_by_field_name("value")
+        if name_node is None or name_node.type != "identifier" or value_node is None:
+            return None
+        if not self._is_typescript_function_like(value_node):
+            return None
+
+        anchor = self._typescript_declaration_anchor(node)
+        if anchor.parent is None or anchor.parent.type != "program":
+            return None
+
+        func_name = source[name_node.start_byte : name_node.end_byte].decode()
+        return Symbol(
+            symbol_name=func_name,
+            symbol_kind="function",
+            signature=_signature(anchor, source),
+            line=anchor.start_point[0] + 1,
+            end_line=anchor.end_point[0] + 1,
+            file_path=path,
+            lang=lang,
+        )
+
+    def _is_typescript_function_like(self, value_node: Node) -> bool:
+        if value_node.type in self._TS_FUNCTION_VALUE_TYPES:
+            return True
+        if value_node.type == "call_expression":
+            args = value_node.child_by_field_name("arguments")
+            if args is not None:
+                return any(
+                    child.type in self._TS_FUNCTION_VALUE_TYPES
+                    for child in args.children
+                )
+        return False
+
+    def _typescript_declaration_anchor(self, declarator: Node) -> Node:
+        """signature/line/end_line の基準ノードを返す
+
+        `export const X = ...` の場合は export_statement を、
+        そうでなければ lexical_declaration（親）を基準にする。
+        """
+        declaration = declarator.parent
+        if declaration is None:
+            return declarator
+        export_statement = declaration.parent
+        if export_statement is not None and export_statement.type == "export_statement":
+            return export_statement
+        return declaration
 
     # ---- Go ----
 
-    def _extract_go(self, root: Node, source: bytes, path: str) -> list[Symbol]:
+    def _extract_go(
+        self, root: Node, source: bytes, path: str, lang: str
+    ) -> list[Symbol]:
         symbols: list[Symbol] = []
         # Go の type_spec から struct 名を収集して receiver マッピングに使う
         type_names: set[str] = set()
         self._collect_go_types(root, source, type_names)
-        self._walk_go(root, source, path, type_names, symbols)
+        self._walk_go(root, source, path, lang, type_names, symbols)
         return symbols
 
     def _collect_go_types(
@@ -227,6 +332,7 @@ class SymbolResolver:
         node: Node,
         source: bytes,
         path: str,
+        lang: str,
         type_names: set[str],
         symbols: list[Symbol],
     ) -> None:
@@ -243,7 +349,9 @@ class SymbolResolver:
                                 symbol_kind="class",
                                 signature=_signature(node, source),
                                 line=node.start_point[0] + 1,
+                                end_line=node.end_point[0] + 1,
                                 file_path=path,
+                                lang=lang,
                             )
                         )
 
@@ -258,7 +366,9 @@ class SymbolResolver:
                         symbol_kind="function",
                         signature=_signature(node, source),
                         line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
                         file_path=path,
+                        lang=lang,
                     )
                 )
 
@@ -278,12 +388,14 @@ class SymbolResolver:
                         symbol_kind="method",
                         signature=_signature(node, source),
                         line=node.start_point[0] + 1,
+                        end_line=node.end_point[0] + 1,
                         file_path=path,
+                        lang=lang,
                     )
                 )
 
         for child in node.children:
-            self._walk_go(child, source, path, type_names, symbols)
+            self._walk_go(child, source, path, lang, type_names, symbols)
 
     def _go_receiver_type(self, receiver: Node, source: bytes) -> str:
         """(f Foo) / (f *Foo) から型名 "Foo" を返す"""

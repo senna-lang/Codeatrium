@@ -63,6 +63,21 @@ def test_python_line_number(tmp_path):
     assert s.line == 2
 
 
+def test_python_end_line(tmp_path):
+    f = tmp_path / "foo.py"
+    f.write_text("def add(a, b):\n    total = a + b\n    return total\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "add")
+    assert s.end_line == 3
+
+
+def test_python_lang(tmp_path):
+    f = tmp_path / "foo.py"
+    f.write_text("def run():\n    pass\n")
+    symbols = resolver.extract(f)
+    assert symbols[0].lang == ".py"
+
+
 # ---- TypeScript ----
 
 
@@ -90,6 +105,158 @@ def test_typescript_method(tmp_path):
     assert "Bar.baz" in names
 
 
+def test_typescript_end_line(tmp_path):
+    f = tmp_path / "foo.ts"
+    f.write_text("function greet(name: string): string {\n  return name;\n}\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "greet")
+    assert s.end_line == 3
+
+
+def test_typescript_lang(tmp_path):
+    f = tmp_path / "foo.ts"
+    f.write_text("function greet(): void {}\n")
+    symbols = resolver.extract(f)
+    assert symbols[0].lang == ".ts"
+
+
+# ---- TypeScript / TSX: arrow function components (design §6.0b) ----
+
+
+def test_tsx_arrow_function_exported_const(tmp_path):
+    f = tmp_path / "Button.tsx"
+    f.write_text("export const Button = ({label}) => {\n  return label;\n};\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Button" in names
+
+
+def test_tsx_arrow_function_plain_const(tmp_path):
+    f = tmp_path / "hooks.ts"
+    f.write_text("const useCounter = () => {\n  return 1;\n};\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "useCounter" in names
+
+
+def test_tsx_function_expression_const(tmp_path):
+    f = tmp_path / "foo.ts"
+    f.write_text("const f = function () {\n  return 1;\n};\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "f" in names
+
+
+def test_tsx_react_memo_wrapped_function_expression(tmp_path):
+    f = tmp_path / "Panel.tsx"
+    f.write_text(
+        "export const Panel = React.memo(function Panel(props) {\n"
+        "  return null;\n"
+        "});\n"
+    )
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Panel" in names
+
+
+def test_tsx_react_memo_wrapped_arrow(tmp_path):
+    f = tmp_path / "Panel.tsx"
+    f.write_text(
+        "export const Panel = React.memo((props) => {\n  return null;\n});\n"
+    )
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Panel" in names
+
+
+def test_tsx_forward_ref_wrapped_arrow(tmp_path):
+    f = tmp_path / "Input.tsx"
+    f.write_text(
+        "const Input = React.forwardRef((props, ref) => {\n  return null;\n});\n"
+    )
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Input" in names
+
+
+def test_tsx_export_default_function_still_works(tmp_path):
+    f = tmp_path / "Card.tsx"
+    f.write_text("export default function Card({title}) {\n  return title;\n}\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Card" in names
+
+
+def test_tsx_arrow_function_symbol_kind_is_function(tmp_path):
+    f = tmp_path / "Button.tsx"
+    f.write_text("export const Button = () => {\n  return null;\n};\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Button")
+    assert s.symbol_kind == "function"
+
+
+def test_tsx_arrow_function_end_line(tmp_path):
+    f = tmp_path / "Button.tsx"
+    f.write_text("export const Button = () => {\n  return null;\n};\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Button")
+    assert s.end_line == 3
+
+
+def test_tsx_plain_const_is_not_a_symbol(tmp_path):
+    f = tmp_path / "config.ts"
+    f.write_text("export const MAX_RETRIES = 3;\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "MAX_RETRIES" not in names
+
+
+def test_tsx_arrow_function_signature_stops_before_body(tmp_path):
+    f = tmp_path / "Button.tsx"
+    f.write_text("export const Button = ({label}: Props) => {\n  return label;\n};\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Button")
+    assert s.signature == "export const Button = ({label}: Props) =>"
+
+
+def test_tsx_nested_const_inside_bare_call_is_not_a_symbol(tmp_path):
+    f = tmp_path / "foo.tsx"
+    f.write_text(
+        "useEffect(() => {\n  const timer = () => {};\n  return timer;\n}, []);\n"
+    )
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "timer" not in names
+
+
+def test_tsx_nested_const_inside_object_literal_is_not_a_symbol(tmp_path):
+    f = tmp_path / "foo.tsx"
+    f.write_text(
+        "const config = {\n"
+        "  onClick: () => {\n"
+        "    const helper = () => {};\n"
+        "    return helper;\n"
+        "  },\n"
+        "};\n"
+    )
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "helper" not in names
+
+
+def test_tsx_top_level_arrow_component_with_nested_helper(tmp_path):
+    f = tmp_path / "Panel.tsx"
+    f.write_text(
+        "export const Panel = () => {\n"
+        "  const renderItem = (item) => item;\n"
+        "  return renderItem;\n"
+        "};\n"
+    )
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert names == ["Panel"]
+
+
 # ---- Go ----
 
 
@@ -107,6 +274,14 @@ def test_go_method(tmp_path):
     symbols = resolver.extract(f)
     names = [s.symbol_name for s in symbols]
     assert "Foo.Bar" in names
+
+
+def test_go_lang(tmp_path):
+    f = tmp_path / "foo.go"
+    f.write_text("package main\nfunc Hello() {}\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Hello")
+    assert s.lang == ".go"
 
 
 # ---- Symbol dataclass ----
