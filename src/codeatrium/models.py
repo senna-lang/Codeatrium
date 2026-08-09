@@ -105,3 +105,26 @@ class CodeTouch:
     # 以下は core が後から埋める
     symbol_name: str | None = None
     resolved_by: str | None = None
+
+
+EdgeKind = Literal["edit", "write", "read", "mention"]
+Granularity = Literal["line", "file"]
+
+
+@dataclass(frozen=True)
+class CodeEdge:
+    """会話とコードのひも付け（design §4.1・§5.5）。
+
+    symbol_id=None は granularity='file' を意味し、シンボルまでは特定できな
+    かったが会話とファイルの関係だけは記録できた状態（design §8.1 不変条件2）。
+    """
+
+    id: str
+    exchange_id: str
+    file_path: str
+    symbol_id: str | None
+    edge_kind: EdgeKind
+    granularity: Granularity
+    confidence: float
+    added: int
+    ts: str | None

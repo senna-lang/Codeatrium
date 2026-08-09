@@ -1,12 +1,17 @@
 """
-コードとの紐付けの前処理を担うハーネス非依存の純関数群（design §2.4・§4.1・§5.3）。
+コードとの紐付けを担うハーネス非依存の純関数群（design §2.4・§4.1・§5.3・§5.5）。
 
 ここに置く関数はファイル・DB・ディスクに触れない。絶対パスをプロジェクト内相対パスへ
 正規化する `normalize_repo_path` は、不変条件3（プロジェクト外は記録しない）の判定
 そのものであり、記録前に必ず通す。`build_code_touch_rows` は CodeTouch を code_touches
 テーブルの行データへ変換する。`resolve_line_range` / `resolve_symbol_name` は編集記録
-から「どの関数を触ったか」を best-effort で推定する（design §2.4 の実測にもとづく手順）。
+から「どの関数を触ったか」をディスクを読まずに best-effort で推定する（design §2.4）。
 特定できなければ None を返す — 間違ったひも付けは、ひも付けが無いことより悪い（§3.3）。
+
+`intersect_span` / `touches_to_edges` は別の経路で、tree-sitter が解決した
+シンボルの行範囲（`resolver.Symbol`、呼び出し側がディスクを読んで用意する）と
+編集された行範囲の重なりで CodeEdge を作る（design §5.5）。§8.1 の不変条件
+（編集記録1件からは必ず1本以上、シンボル不明でもファイル粒度で必ず1本）を守る。
 """
 
 from __future__ import annotations
@@ -14,10 +19,19 @@ from __future__ import annotations
 import os
 import re
 from pathlib import PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from codeatrium.models import CodeLocator, CodeTouch, LineRange, TextAnchor
+from codeatrium.models import CodeEdge, CodeLocator, CodeTouch, LineRange, TextAnchor
 from codeatrium.utils import sha256
+
+if TYPE_CHECKING:
+    # 型注釈だけの利用。tree-sitter の重い読み込みをこのモジュールの実行時コストにしない
+    from codeatrium.resolver import Symbol
+
+# granularity ごとの確信度（design §6.3 の GRAN 重みをそのまま流用）。
+# line: シンボルの行範囲との重なりが確認できた「確信」。file: シンボル不明の下限。
+_LINE_CONFIDENCE = 1.0
+_FILE_CONFIDENCE = 0.5
 
 # 外部パス（サイトパッケージ・依存ディレクトリ）の判定用マーカー。
 # indexer.py の tool_use file 抽出と同じ基準を共有する。
@@ -254,3 +268,84 @@ def resolve_symbol_name(
                 return (name, "patch_body")
 
     return (None, None)
+
+
+def intersect_span(touch: CodeTouch, symbols: list[Symbol]) -> list[Symbol]:
+    """編集された行の範囲と重なるシンボルを返す（design §5.5、純関数）。
+
+    `touch.locators` に含まれる **全ての** `LineRange`（複数 hunk 分）を見る。
+    1つの hunk が複数シンボルにまたがることはある（重なりを全部返す）が、
+    同じシンボルが複数 hunk にまたがってヒットしても1回だけ返す。
+    比較は新ファイル側の座標（`new_start`/`new_lines`）で行う——旧ファイル座標を
+    使う `resolve_line_range` とは目的が別（design §2.4 実装ノート参照）。
+    行範囲の手がかりが無い touch（anchor/file のみ）には常に空を返す。
+    """
+    matched: dict[str, Symbol] = {}
+    for loc in touch.locators:
+        if not isinstance(loc, LineRange):
+            continue
+        touch_lines = loc.new_lines if loc.new_lines and loc.new_lines > 0 else 1
+        touch_start = loc.new_start
+        touch_end = loc.new_start + touch_lines - 1
+        for sym in symbols:
+            if touch_start <= sym.end_line and sym.line <= touch_end:
+                matched[sym.symbol_name] = sym
+    return list(matched.values())
+
+
+def touches_to_edges(
+    touch: CodeTouch,
+    exchange_id: str,
+    rel_file_path: str,
+    symbols: list[Symbol],
+) -> list[CodeEdge]:
+    """CodeTouch を code_edges の行へ変換する（design §5.5、純関数）。
+
+    design §8.1 の不変条件を守る実装:
+      - 不変条件1: touch 1件からは必ず1本以上の CodeEdge を返す
+      - 不変条件2: シンボルが特定できなくても granularity='file' で必ず1本張る
+        （「シンボルが見つからなければ何も作らない」は誤り。ここを間違えると
+        G1 が静かに崩れる）
+
+    `intersect_span` で重なりが見つかれば、シンボルごとに granularity='line' の
+    確信度1.0のエッジを作る。見つからなければ（未対応言語・行範囲なし・重なりなし
+    のいずれでも）granularity='file' のエッジを1本だけ作る。
+    """
+    matched = intersect_span(touch, symbols)
+
+    if matched:
+        edges = []
+        for sym in matched:
+            symbol_id = sha256(f"{rel_file_path}:{sym.symbol_name}")
+            edge_id = sha256(
+                f"{exchange_id}:{rel_file_path}:{symbol_id}:{touch.touch_kind}"
+            )
+            edges.append(
+                CodeEdge(
+                    id=edge_id,
+                    exchange_id=exchange_id,
+                    file_path=rel_file_path,
+                    symbol_id=symbol_id,
+                    edge_kind=touch.touch_kind,
+                    granularity="line",
+                    confidence=_LINE_CONFIDENCE,
+                    added=touch.added,
+                    ts=touch.ts,
+                )
+            )
+        return edges
+
+    edge_id = sha256(f"{exchange_id}:{rel_file_path}::{touch.touch_kind}")
+    return [
+        CodeEdge(
+            id=edge_id,
+            exchange_id=exchange_id,
+            file_path=rel_file_path,
+            symbol_id=None,
+            edge_kind=touch.touch_kind,
+            granularity="file",
+            confidence=_FILE_CONFIDENCE,
+            added=touch.added,
+            ts=touch.ts,
+        )
+    ]

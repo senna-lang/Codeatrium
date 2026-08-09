@@ -7,6 +7,7 @@ from pathlib import Path
 
 from codeatrium.db import get_connection, init_db
 from codeatrium.indexer import index_file, parse_exchanges
+from codeatrium.utils import sha256
 
 # ---- フィクスチャ ----
 
@@ -687,3 +688,173 @@ def test_index_file_without_project_root_skips_code_touches(tmp_path: Path) -> N
     count = con.execute("SELECT COUNT(*) FROM code_touches").fetchone()[0]
     con.close()
     assert count == 0
+
+
+# ---- code_symbols / code_edges のテスト（design §5.5・§8.1 不変条件） ----
+
+
+def test_index_file_writes_code_edges_matching_symbol(tmp_path: Path) -> None:
+    """編集行がシンボルの範囲と重なれば granularity='line' の code_edges ができる"""
+    project_root = tmp_path
+    db_path = project_root / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    src_dir = project_root / "src"
+    src_dir.mkdir()
+    (src_dir / "foo.py").write_text("def greet(name):\n    return name\n")
+
+    jsonl = project_root / "session.jsonl"
+    abs_file_path = str(src_dir / "foo.py")
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Fix the bug in foo.py please. " * 10),
+            *make_edit_tool_use_and_result("toolu_1", abs_file_path, "u1"),
+        ],
+    )
+
+    index_file(jsonl, db_path, project_root=project_root)
+
+    con = get_connection(db_path)
+    symbols = con.execute("SELECT file_path, symbol_name FROM code_symbols").fetchall()
+    edges = con.execute(
+        "SELECT file_path, symbol_id, edge_kind, granularity, confidence FROM code_edges"
+    ).fetchall()
+    con.close()
+
+    assert len(symbols) == 1
+    assert symbols[0]["file_path"] == "src/foo.py"
+    assert symbols[0]["symbol_name"] == "greet"
+
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge["file_path"] == "src/foo.py"
+    assert edge["granularity"] == "line"
+    assert edge["confidence"] == 1.0
+    assert edge["symbol_id"] == sha256("src/foo.py:greet")
+    assert edge["edge_kind"] == "edit"
+
+
+def test_index_file_writes_code_edges_file_granularity_for_unsupported_language(
+    tmp_path: Path,
+) -> None:
+    """resolver.py が未対応の言語（.md）ではシンボルが無いので、必ずファイル粒度に落ちる
+    （design §8.1 不変条件2: シンボル不明でもファイル粒度で必ず1本張る）"""
+    project_root = tmp_path
+    db_path = project_root / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    (project_root / "README.md").write_text("# Title\n\nSome text.\n")
+
+    jsonl = project_root / "session.jsonl"
+    abs_file_path = str(project_root / "README.md")
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Update the README please. " * 10),
+            *make_edit_tool_use_and_result("toolu_1", abs_file_path, "u1"),
+        ],
+    )
+
+    index_file(jsonl, db_path, project_root=project_root)
+
+    con = get_connection(db_path)
+    edges = con.execute(
+        "SELECT symbol_id, granularity, confidence FROM code_edges"
+    ).fetchall()
+    con.close()
+
+    assert len(edges) == 1
+    assert edges[0]["granularity"] == "file"
+    assert edges[0]["symbol_id"] is None
+    assert edges[0]["confidence"] == 0.5
+
+
+def test_index_file_every_code_touch_has_at_least_one_code_edge(tmp_path: Path) -> None:
+    """design §8.1 不変条件1: 編集記録1件からは必ず1本以上のひも付けができる。
+
+    対応言語のファイル（symbol が見つかる）と未対応言語のファイル（見つからない）を
+    両方含めても、両方の code_touches に対応する code_edges ができることを確認する。
+    """
+    project_root = tmp_path
+    db_path = project_root / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    src_dir = project_root / "src"
+    src_dir.mkdir()
+    (src_dir / "a.py").write_text("def a():\n    pass\n")
+    (project_root / "notes.md").write_text("notes\n")
+
+    jsonl = project_root / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Fix a couple of things please. " * 10),
+            *make_edit_tool_use_and_result("toolu_1", str(src_dir / "a.py"), "u1"),
+            *make_edit_tool_use_and_result(
+                "toolu_2", str(project_root / "notes.md"), "toolu_1-result"
+            ),
+        ],
+    )
+
+    index_file(jsonl, db_path, project_root=project_root)
+
+    con = get_connection(db_path)
+    touches = con.execute("SELECT exchange_id, file_path FROM code_touches").fetchall()
+    edge_keys = {
+        (row["exchange_id"], row["file_path"])
+        for row in con.execute("SELECT exchange_id, file_path FROM code_edges").fetchall()
+    }
+    con.close()
+
+    assert len(touches) == 2
+    for touch in touches:
+        assert (touch["exchange_id"], touch["file_path"]) in edge_keys
+
+
+def test_index_file_code_edges_added_accumulates_across_touches_on_same_symbol(
+    tmp_path: Path,
+) -> None:
+    """同じ exchange 内で同じシンボルを2回touchすると code_edges.id が衝突するが、
+    added は上書きではなく合算されなければならない（さもないと §6.3 の並び替えで
+    log1p(added) が過小評価される）"""
+    project_root = tmp_path
+    db_path = project_root / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    src_dir = project_root / "src"
+    src_dir.mkdir()
+    (src_dir / "foo.py").write_text("def greet(name):\n    return name\n")
+
+    jsonl = project_root / "session.jsonl"
+    abs_file_path = str(src_dir / "foo.py")
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Fix the bug in foo.py twice please. " * 10),
+            *make_edit_tool_use_and_result(
+                "toolu_1", abs_file_path, "u1", old="return name", new="return name.strip()"
+            ),
+            *make_edit_tool_use_and_result(
+                "toolu_2",
+                abs_file_path,
+                "toolu_1-result",
+                old="return name.strip()",
+                new="return name.strip().lower()",
+            ),
+        ],
+    )
+
+    index_file(jsonl, db_path, project_root=project_root)
+
+    con = get_connection(db_path)
+    touch_added_total = con.execute(
+        "SELECT SUM(added) FROM code_touches WHERE file_path = 'src/foo.py'"
+    ).fetchone()[0]
+    edges = con.execute(
+        "SELECT added FROM code_edges WHERE granularity = 'line'"
+    ).fetchall()
+    con.close()
+
+    assert len(edges) == 1
+    assert edges[0]["added"] == touch_added_total

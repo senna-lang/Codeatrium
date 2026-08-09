@@ -9,7 +9,9 @@ exchange 境界定義:
   - 50文字未満の exchange は trivial として除外
   - isMeta=True の user エントリは exchange 境界としない
 
-project_root を渡すと、exchange と同じコミットで code_touches（design §4.1）も記録する。
+project_root を渡すと、exchange と同じコミットで code_touches / code_symbols / code_edges
+（design §4.1・§5.5）も記録する。symbol 解決は tree-sitter でその場でディスクを読んで行う
+（distill を待たない — §8.1 の不変条件を蒸留のスキップ条件から独立させるため）。
 """
 
 from __future__ import annotations
@@ -18,15 +20,19 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from codeatrium.adapters.harness import claude as claude_adapter
 from codeatrium.code_touches import (
     build_code_touch_rows,
     is_external_path,
     normalize_repo_path,
+    touches_to_edges,
 )
 from codeatrium.utils import sha256
+
+if TYPE_CHECKING:
+    from codeatrium.resolver import Symbol
 
 
 @dataclass
@@ -360,14 +366,25 @@ def index_file(
                 (ex.id, file_path),
             )
 
-    # code_touches を登録（design §5.3: 解析 → まとめて INSERT → 既存コミットにまとめる）
+    # code_touches / code_symbols / code_edges を登録
+    # （design §5.3: 解析 → まとめて INSERT → 既存コミットにまとめる。
+    #  §8.1 の不変条件（編集したファイルは100%）は蒸留を待たずに満たす必要があるため、
+    #  ここ index 時点で code_edges まで作り切る — distill 待ちにすると、蒸留の
+    #  batch_limit/distill_min_chars でスキップされた touch が永久に0件のままになる）
     if project_root is not None:
+        from codeatrium.resolver import SymbolResolver
+
+        resolver = SymbolResolver()
+        symbol_cache: dict[str, list[Symbol]] = {}
+        resolved_at = datetime.now(UTC).isoformat()
+
         for ex in new_exchanges:
             exchange_slice = raw_entries[ex.ply_start : ex.ply_end + 1]
             for touch in claude_adapter.extract_code_touches(exchange_slice):
                 rel_path = normalize_repo_path(touch.file_path, str(project_root))
                 if rel_path is None:
                     continue
+
                 for touch_row in build_code_touch_rows(touch, exchange_id=ex.id, rel_file_path=rel_path):
                     con.execute(
                         """
@@ -380,6 +397,68 @@ def index_file(
                                 :old_string, :new_string, :added, :removed, :ts)
                         """,
                         touch_row,
+                    )
+
+                if rel_path not in symbol_cache:
+                    symbol_cache[rel_path] = resolver.extract(Path(touch.file_path))
+                symbols = symbol_cache[rel_path]
+
+                for sym in symbols:
+                    symbol_id = sha256(f"{rel_path}:{sym.symbol_name}")
+                    # REPLACE は id が変わらないシンボルの line/end_line/signature を
+                    # 最新の解析結果へ更新するために使う（code_symbols が「唯一の正しい
+                    # 定義元」であるため、§4.1）。SQLite の REPLACE は delete→insert だが、
+                    # code_edges.symbol_id に FK は無いので安全。将来 FK を張るなら、
+                    # ON DELETE CASCADE と組み合わせないこと（このREPLACEでedgeが消える）
+                    con.execute(
+                        """
+                        INSERT OR REPLACE INTO code_symbols
+                            (id, file_path, symbol_name, symbol_kind, signature,
+                             line, end_line, lang, resolved_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            symbol_id,
+                            rel_path,
+                            sym.symbol_name,
+                            sym.symbol_kind,
+                            sym.signature,
+                            sym.line,
+                            sym.end_line,
+                            sym.lang,
+                            resolved_at,
+                        ),
+                    )
+
+                edges = touches_to_edges(
+                    touch, exchange_id=ex.id, rel_file_path=rel_path, symbols=symbols
+                )
+                for edge in edges:
+                    # id は (exchange_id, file_path, symbol_id, edge_kind) から決まるため、
+                    # 同じ exchange 内で同じシンボルを別の touch（別 tool_call）が触ると
+                    # 衝突する。INSERT OR IGNORE だと後から来た touch の added が
+                    # 静かに失われる（§6.3 の log1p(added) が過小評価になる）ので、
+                    # 衝突時は加算する。code_touches は last_ply_end で重複処理されない
+                    # ため、この加算が再インデックスで二重計上されることもない。
+                    con.execute(
+                        """
+                        INSERT INTO code_edges
+                            (id, exchange_id, file_path, symbol_id, edge_kind,
+                             granularity, confidence, added, ts)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET added = added + excluded.added
+                        """,
+                        (
+                            edge.id,
+                            edge.exchange_id,
+                            edge.file_path,
+                            edge.symbol_id,
+                            edge.edge_kind,
+                            edge.granularity,
+                            edge.confidence,
+                            edge.added,
+                            edge.ts,
+                        ),
                     )
 
     con.commit()
