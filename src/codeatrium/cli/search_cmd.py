@@ -375,6 +375,10 @@ def _context_u1_u2(target: str, limit: int, json_output: bool, full: bool) -> No
 
     con = get_connection(db)
 
+    from codeatrium.file_renames import resolve_aliases
+
+    alias_paths = tuple(resolve_aliases(con, str(root), file_path))
+
     symbol_name = parsed.symbol_name
     if parsed.line is not None:
         sym_rows = con.execute(
@@ -385,9 +389,9 @@ def _context_u1_u2(target: str, limit: int, json_output: bool, full: bool) -> No
         symbol_name = pick_enclosing_symbol_name(parsed.line, symbols)
 
     hits = (
-        resolve_u1(con, file_path, symbol_name, limit)
+        resolve_u1(con, file_path, symbol_name, limit, alias_paths)
         if symbol_name is not None
-        else resolve_u2(con, file_path, limit)
+        else resolve_u2(con, file_path, limit, alias_paths)
     )
     con.close()
 

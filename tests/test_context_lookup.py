@@ -237,6 +237,34 @@ def test_resolve_u1_respects_limit(tmp_path: Path) -> None:
     assert len(hits) == 2
 
 
+def test_resolve_u1_alias_paths_widen_symbol_tier(tmp_path: Path) -> None:
+    """design §8.2: 旧パスの edge も symbol段でヒットする（file段へ落とさない）"""
+    con = _setup_db(tmp_path)
+    _insert_conversation_and_exchange(con, "c1", "ex1")
+    _insert_symbol(con, "sym1", "src/logo/db.py", "get_connection")
+    _insert_edge(con, "e1", "ex1", "src/logo/db.py", "sym1", "line", 1.0)
+    con.commit()
+
+    hits = resolve_u1(
+        con, "src/codeatrium/db.py", "get_connection", limit=5,
+        alias_paths=("src/logo/db.py",),
+    )
+
+    assert len(hits) == 1
+    assert hits[0].match_kind == "symbol"
+    assert hits[0].confidence == 1.0
+
+
+def test_resolve_u1_alias_paths_do_not_affect_lookup_when_empty(tmp_path: Path) -> None:
+    """alias_paths を渡さない場合の挙動は変わらない（既定は空タプル）"""
+    con = _setup_db(tmp_path)
+    con.commit()
+
+    hits = resolve_u1(con, "src/foo.py", "greet", limit=5)
+
+    assert hits == []
+
+
 # ---- resolve_u2 ----
 
 
@@ -293,3 +321,20 @@ def test_resolve_u2_root_level_file_directory_match(tmp_path: Path) -> None:
     assert len(hits) == 1
     assert hits[0].match_kind == "directory"
     assert hits[0].file_path == "README.md"
+
+
+def test_resolve_u2_alias_paths_widen_file_tier(tmp_path: Path) -> None:
+    """design §8.2: 旧パスの edge を file段でひとつのファイルとして扱う"""
+    con = _setup_db(tmp_path)
+    _insert_conversation_and_exchange(con, "c1", "ex1")
+    _insert_edge(con, "e1", "ex1", "src/logo/db.py", None, "file", 0.5)
+    con.commit()
+
+    hits = resolve_u2(
+        con, "src/codeatrium/db.py", limit=5, alias_paths=("src/logo/db.py",)
+    )
+
+    assert len(hits) == 1
+    assert hits[0].match_kind == "file"
+    assert hits[0].confidence == 1.0
+    assert hits[0].file_path == "src/logo/db.py"

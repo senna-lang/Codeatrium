@@ -136,8 +136,14 @@ def _row_to_hit(row: sqlite3.Row, match_kind: str, confidence: float) -> Context
     )
 
 
-def _file_rows(con: sqlite3.Connection, file_path: str) -> list[sqlite3.Row]:
-    return _dedup_by_exchange(_query_rows(con, "ce.file_path = ?", (file_path,)))
+def _file_rows(
+    con: sqlite3.Connection, file_path: str, alias_paths: tuple[str, ...] = ()
+) -> list[sqlite3.Row]:
+    paths = (file_path, *alias_paths)
+    placeholders = ",".join("?" for _ in paths)
+    return _dedup_by_exchange(
+        _query_rows(con, f"ce.file_path IN ({placeholders})", paths)
+    )
 
 
 def _directory_rows(con: sqlite3.Connection, file_path: str) -> list[sqlite3.Row]:
@@ -152,23 +158,36 @@ def _directory_rows(con: sqlite3.Connection, file_path: str) -> list[sqlite3.Row
 
 
 def resolve_u1(
-    con: sqlite3.Connection, file_path: str, symbol_name: str, limit: int
+    con: sqlite3.Connection,
+    file_path: str,
+    symbol_name: str,
+    limit: int,
+    alias_paths: tuple[str, ...] = (),
 ) -> list[ContextHit]:
     """U1: symbol(1.00) → file(0.45) → directory(0.25) の順に試す（design §6.2）。
 
     最初にヒットした段だけを返す。`limit` は最終的な件数の上限であり、
     ヒットした段の件数がそれに満たなくても下の段から埋め合わせない
     （埋め合わせると確信度の意味が壊れる）。semantic 段は呼び出し側の責務。
+
+    `alias_paths` は `file_path` の旧パス（design §8.2、ファイル改名）。
+    同じファイルの別名として symbol/file 段のクエリに加えるだけで、確信度や
+    段構成そのものは変えない――改名前の会話も「同じファイル」として symbol
+    段でヒットする（別の下位ティアを新設しない）。
     """
+    paths = (file_path, *alias_paths)
+    placeholders = ",".join("?" for _ in paths)
     rows = _dedup_by_exchange(
         _query_rows(
-            con, "ce.file_path = ? AND cs.symbol_name = ?", (file_path, symbol_name)
+            con,
+            f"ce.file_path IN ({placeholders}) AND cs.symbol_name = ?",
+            (*paths, symbol_name),
         )
     )
     if rows:
         return [_row_to_hit(r, "symbol", _TIER_SYMBOL_CONFIDENCE) for r in rows[:limit]]
 
-    rows = _file_rows(con, file_path)
+    rows = _file_rows(con, file_path, alias_paths)
     if rows:
         return [_row_to_hit(r, "file", _TIER_FILE_CONFIDENCE_U1) for r in rows[:limit]]
 
@@ -181,14 +200,19 @@ def resolve_u1(
     return []
 
 
-def resolve_u2(con: sqlite3.Connection, file_path: str, limit: int) -> list[ContextHit]:
+def resolve_u2(
+    con: sqlite3.Connection,
+    file_path: str,
+    limit: int,
+    alias_paths: tuple[str, ...] = (),
+) -> list[ContextHit]:
     """U2: file(1.00) → directory(0.30) の順に試す（design §6.2）。
 
     file 段は「このファイルについて何が決まっているか」を知りたい用途なので、
     一番良い1件だけでなく、シンボルごとにまとめて複数返す。semantic 段は
-    呼び出し側の責務。
+    呼び出し側の責務。`alias_paths` は resolve_u1 と同じ意味（design §8.2）。
     """
-    rows = _file_rows(con, file_path)
+    rows = _file_rows(con, file_path, alias_paths)
     if rows:
         return [_row_to_hit(r, "file", _TIER_FILE_CONFIDENCE_U2) for r in rows[:limit]]
 

@@ -13,6 +13,7 @@ SQLite DB の初期化・スキーマ定義・接続管理
   code_touches   - ハーネスの編集ログから記録時に保存する加工前の手がかり（design §4.1）
   code_symbols   - tree-sitter で解決したシンボルの正本（design §4.1）
   code_edges     - 会話とコードのひも付け（design §4.1）
+  file_renames   - ファイル改名の記録（design §8.2、旧パス→新パス。問い合わせ時に逆向きにたどる）
   _MIGRATIONS    - 逐次マイグレーション関数リスト（user_version ベース）
 """
 
@@ -316,6 +317,20 @@ def _migrate_v9_add_code_touches(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_exchange ON code_edges(exchange_id)")
 
 
+def _migrate_v10_add_file_renames(con: sqlite3.Connection) -> None:
+    """Migration v10: file_renames を新設する（design §8.2、ファイル改名の追従）"""
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS file_renames (
+            old_path TEXT NOT NULL,
+            new_path TEXT NOT NULL,
+            source   TEXT NOT NULL,
+            ts       TEXT,
+            PRIMARY KEY (old_path, new_path)
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_file_renames_new_path ON file_renames(new_path)")
+
+
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_add_last_ply_end,
     _migrate_v2_add_distill_status,
@@ -326,6 +341,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v7_repair_distill,
     _migrate_v8_add_git_branch,
     _migrate_v9_add_code_touches,
+    _migrate_v10_add_file_renames,
 ]
 
 
@@ -520,6 +536,15 @@ def init_db(db_path: Path) -> None:
             CREATE INDEX IF NOT EXISTS idx_code_edges_symbol   ON code_edges(symbol_id);
             CREATE INDEX IF NOT EXISTS idx_code_edges_file     ON code_edges(file_path);
             CREATE INDEX IF NOT EXISTS idx_code_edges_exchange ON code_edges(exchange_id);
+
+            CREATE TABLE IF NOT EXISTS file_renames (
+                old_path TEXT NOT NULL,
+                new_path TEXT NOT NULL,
+                source   TEXT NOT NULL,
+                ts       TEXT,
+                PRIMARY KEY (old_path, new_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_file_renames_new_path ON file_renames(new_path);
         """)
 
         from codeatrium.embedder import MODEL_NAME
