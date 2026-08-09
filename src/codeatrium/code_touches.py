@@ -1,19 +1,22 @@
 """
-コードとの紐付けの前処理を担うハーネス非依存の純関数群（design §4.1・§5.3）。
+コードとの紐付けの前処理を担うハーネス非依存の純関数群（design §2.4・§4.1・§5.3）。
 
-ここに置く関数はファイル・DB に触れない。絶対パスをプロジェクト内相対パスへ
-正規化する `normalize_repo_path` は、不変条件3（プロジェクト外は記録しない）
-の判定そのものであり、記録前に必ず通す。`build_code_touch_rows` は CodeTouch を
-code_touches テーブルの行データへ変換する。
+ここに置く関数はファイル・DB・ディスクに触れない。絶対パスをプロジェクト内相対パスへ
+正規化する `normalize_repo_path` は、不変条件3（プロジェクト外は記録しない）の判定
+そのものであり、記録前に必ず通す。`build_code_touch_rows` は CodeTouch を code_touches
+テーブルの行データへ変換する。`resolve_line_range` / `resolve_symbol_name` は編集記録
+から「どの関数を触ったか」を best-effort で推定する（design §2.4 の実測にもとづく手順）。
+特定できなければ None を返す — 間違ったひも付けは、ひも付けが無いことより悪い（§3.3）。
 """
 
 from __future__ import annotations
 
 import os
+import re
 from pathlib import PurePosixPath
 from typing import Any
 
-from codeatrium.models import CodeTouch, LineRange, TextAnchor
+from codeatrium.models import CodeLocator, CodeTouch, LineRange, TextAnchor
 from codeatrium.utils import sha256
 
 # 外部パス（サイトパッケージ・依存ディレクトリ）の判定用マーカー。
@@ -101,3 +104,153 @@ def build_code_touch_rows(
     if anchor is not None:
         return [_row(0, "anchor", None)]
     return [_row(0, "file", None)]
+
+
+def resolve_line_range(
+    locators: tuple[CodeLocator, ...], original_content: str | None
+) -> tuple[int, int] | None:
+    """手がかりを行の範囲（開始行, 終了行）へ変換する（design §5.3、1-indexed 両端含む）。
+
+    優先順位は LineRange → TextAnchor。ここで返す行範囲は常に旧ファイル側の座標になる
+    （LineRange の old_start、または TextAnchor を original_content 中から探した位置）。
+    resolve_symbol_name が original_content（旧ファイル全文）と突き合わせるための座標が
+    これで、新ファイル側の座標（new_start）とは別の目的である（§2.4「old_start の位置を解決する」）。
+
+    行番号が欠けている LineRange は使えないので次の手がかりへフォールバックする。
+    TextAnchor は old_string が原文中に無い・複数箇所にマッチする場合は推測せず None を返す（§3.3）。
+    """
+    for loc in locators:
+        if isinstance(loc, LineRange) and loc.old_start is not None:
+            old_lines = loc.old_lines if loc.old_lines and loc.old_lines > 0 else 1
+            return (loc.old_start, loc.old_start + old_lines - 1)
+
+    for loc in locators:
+        if isinstance(loc, TextAnchor) and loc.old_string and original_content:
+            start = _find_unique_line_span(loc.old_string, original_content)
+            if start is not None:
+                return start
+
+    return None
+
+
+def _find_unique_line_span(needle: str, haystack: str) -> tuple[int, int] | None:
+    """haystack 中に needle がちょうど1箇所だけ現れる場合、その行範囲を返す（1-indexed）"""
+    count = haystack.count(needle)
+    if count != 1:
+        return None
+    offset = haystack.index(needle)
+    start_line = haystack.count("\n", 0, offset) + 1
+    # needle 末尾の改行は「次の行の開始」ではなく「この行の終端」なので行数に数えない
+    span_lines = len(needle.splitlines()) or 1
+    return (start_line, start_line + span_lines - 1)
+
+
+# 言語ごとの関数・クラス定義行パターン（design §2.4: def / class / function / const X = ( ）
+# resolver.py の tree-sitter とは独立した、テキストベースの best-effort ヒューリスティック。
+_SYMBOL_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
+    ".py": (
+        re.compile(r"^\s*(?:async\s+)?def\s+(\w+)"),
+        re.compile(r"^\s*class\s+(\w+)"),
+    ),
+    ".ts": (
+        re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)"),
+        re.compile(r"^\s*(?:export\s+)?(?:default\s+)?class\s+(\w+)"),
+        re.compile(r"^\s*(?:export\s+)?const\s+(\w+)\s*="),
+    ),
+    ".go": (re.compile(r"^\s*func\s+(?:\([^)]*\)\s*)?(\w+)"),),
+}
+_SYMBOL_PATTERNS[".tsx"] = _SYMBOL_PATTERNS[".ts"]
+
+
+def _match_symbol_line(line: str, lang: str) -> str | None:
+    patterns = _SYMBOL_PATTERNS.get(lang)
+    if not patterns:
+        return None
+    # diff の +/-/space プレフィックスを1文字だけ剥がす（patch_body 由来の行のため）
+    stripped = line[1:] if line and line[0] in "+- " else line
+    for pattern in patterns:
+        m = pattern.match(stripped)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _leading_whitespace_len(line: str) -> int:
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _find_enclosing_declaration(lines: list[str], start_idx: int, lang: str) -> str | None:
+    """start_idx（0-indexed）から手前へ、インデントに基づき最も内側の定義行を探す。
+
+    単純に「手前で最初に見つかった def/class」を返すと、対象行が実はその定義の
+    外（モジュールレベルの兄弟コードなど）にあっても誤って包含していると
+    判定してしまう（自信満々で間違える最悪の失敗 — design §2.4・§3.3）。
+    インデントが基準より浅い行だけを「外側の境界」として扱い、それが定義行で
+    なければ基準を更新してさらに外側へ探索を続ける。
+    """
+    patterns = _SYMBOL_PATTERNS.get(lang)
+    if not patterns:
+        return None
+
+    ref_idx = start_idx
+    while ref_idx >= 0 and not lines[ref_idx].strip():
+        ref_idx -= 1
+    if ref_idx < 0:
+        return None
+    ref_indent = _leading_whitespace_len(lines[ref_idx])
+
+    # 対象行自身が定義行ならそれを直接返す（シグネチャそのものを編集したケース）
+    name = _match_symbol_line(lines[ref_idx], lang)
+    if name is not None:
+        return name
+
+    idx = ref_idx - 1
+    while idx >= 0:
+        line = lines[idx]
+        if not line.strip():
+            idx -= 1
+            continue
+        indent = _leading_whitespace_len(line)
+        if indent < ref_indent:
+            name = _match_symbol_line(line, lang)
+            if name is not None:
+                return name
+            ref_indent = indent  # 定義行ではない外側の構文（if/for 等）。基準を更新してさらに外へ
+        idx -= 1
+    return None
+
+
+def resolve_symbol_name(
+    line_range: tuple[int, int] | None,
+    patch_body: list[str],
+    original_content: str | None,
+    lang: str,
+) -> tuple[str | None, str | None]:
+    """編集箇所を囲む関数・クラス名を best-effort で特定する（design §2.4・§5.3）。
+
+    戻り値は (symbol_name, resolved_by)。ディスクは読まない。
+    1. line_range と original_content（旧ファイル全文）が両方あれば、line_range の開始行
+       から手前へ向かって最初に見つかった定義行を使う → 'original_file'
+    2. 差分本文（patch_body）に定義行が含まれていればそこから読む → 'patch_body'
+    3. どちらも駄目なら (None, None)。symbol_id=NULL でファイル粒度に落ちる（不変条件2）
+    """
+    if line_range is not None and original_content:
+        lines = original_content.split("\n")
+        start_line = line_range[0]
+        if 1 <= start_line <= len(lines):
+            name = _find_enclosing_declaration(lines, start_line - 1, lang)
+            if name is not None:
+                return (name, "original_file")
+
+    # 追加行（+）を最優先で見る。リネームのような "-def old / +def new" では
+    # 現在の名前（+側）を残したいため。次に文脈行、最後に削除行（-）の順で探す。
+    added = [ln for ln in patch_body if ln.startswith("+")]
+    removed = [ln for ln in patch_body if ln.startswith("-")]
+    context = [ln for ln in patch_body if not ln.startswith("+") and not ln.startswith("-")]
+    for bucket in (added, context, removed):
+        for line in bucket:
+            name = _match_symbol_line(line, lang)
+            if name is not None:
+                return (name, "patch_body")
+
+    return (None, None)
