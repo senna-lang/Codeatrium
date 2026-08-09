@@ -1,8 +1,20 @@
-"""loci search / loci context コマンド"""
+"""
+loci context（主機能・コードから会話を思い出す） / loci search（副次機能・言葉で探す）
+コマンド（design §6.1）。
+
+loci context は3つの引き方を持つ:
+  U1: `<file>:<symbol>`（design §6.0）— ファイル内の関数・コンポーネントで引く。主な使い方
+  U2: `<file>`（design §6.0）— ファイルそのもので引く
+  行番号: `<file>:<line>`（design §6.1）— 含む関数へ変換して U1 として扱う（IDE選択範囲用）
+どちらも見つからなければ、symbol/file/directory の順に確信度を下げて段階的に探し
+（design §6.2）、最後は言葉によるセマンティック検索にフォールバックする。
+既存の `--symbol`/`--branch` フラグは互換のため残す（位置引数が無いときのみ使われる）。
+"""
 
 from __future__ import annotations
 
 import json
+import posixpath
 from typing import Annotated
 
 import typer
@@ -64,13 +76,37 @@ def search(
 
 
 def context(
-    symbol: Annotated[str | None, typer.Option("--symbol", "-s", help="シンボル名（部分一致）")] = None,
+    target: Annotated[
+        str | None,
+        typer.Argument(
+            help='<file>[:<symbol-or-line>]  例: "src/foo.py:greet"（U1、主な使い方）'
+            ' / "src/foo.py"（U2） / "src/foo.py:142"（行番号、IDE選択範囲用）'
+        ),
+    ] = None,
+    symbol: Annotated[
+        str | None,
+        typer.Option(
+            "--symbol", "-s", help="シンボル名（部分一致・非推奨）。ファイル指定付きの位置引数を推奨"
+        ),
+    ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="返す件数")] = 5,
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
     full: Annotated[bool, typer.Option("--full", help="全文（user_content / agent_content）を含める")] = False,
     branch: Annotated[str | None, typer.Option("--branch", "-b", help="ブランチ名で絞り込む（部分一致）")] = None,
 ) -> None:
-    """シンボル名から関連する過去会話を逆引きする"""
+    """コードから会話を思い出す（design §6.1 主機能）。
+
+    位置引数（U1/U2）があればそちらを使う。無ければ --symbol/--branch にフォールバックする。
+    """
+    if target is not None:
+        if symbol is not None or branch is not None:
+            typer.echo(
+                "Warning: positional <file>[:<symbol>] takes precedence over --symbol/--branch.",
+                err=True,
+            )
+        _context_u1_u2(target, limit, json_output, full)
+        return
+
     if symbol is None and branch is None:
         typer.echo("Error: --symbol or --branch is required.", err=True)
         raise typer.Exit(1)
@@ -219,3 +255,147 @@ def context(
                 if r["exchange_core"]:
                     typer.echo(f"    Core: {r['exchange_core']}")
                 typer.echo(f"    {r['source_path']}:ply={r['ply_start']}")
+
+
+# ---- U1/U2（design §6.1・§6.2） ----
+
+
+def _resolve_target_file_path(file_path: str, project_root: str) -> str | None:
+    """target のファイル部分を code_edges/code_symbols の規約（プロジェクトルート
+    相対パス）へ揃える。絶対パス（agent が Read/Edit から得るのは普通これ）は
+    normalize_repo_path で変換し、プロジェクト外なら None を返す。相対パスは
+    既にその規約どおりであるとみなしそのまま使う（design の例が一貫してこの形）。
+    """
+    if file_path.startswith("/"):
+        from codeatrium.code_touches import normalize_repo_path
+
+        return normalize_repo_path(file_path, project_root)
+    return file_path
+
+
+def _semantic_query_text(file_path: str, symbol_name: str | None) -> str:
+    """semantic 段（design §6.2 最終段）のクエリ文字列。
+    U1: シンボル名とモジュール名。U2: モジュール名とファイルパス。
+
+    モジュール名は拡張子を除いたファイル名（例: "config.py" -> "config"）。
+    BM25 は空白区切りでトークン化するため（`_fts5_query`）、フルパスだけを渡すと
+    1つの完全一致フレーズになってしまい、自然文の会話とはほぼマッチしない。
+    実際に語として現れやすいモジュール名を主なトークンにする。
+    """
+    module_name = posixpath.splitext(posixpath.basename(file_path))[0]
+    if symbol_name:
+        return f"{symbol_name} {module_name}"
+    return f"{module_name} {file_path}"
+
+
+def _semantic_fallback_hits(
+    db, file_path: str, symbol_name: str | None, limit: int
+):
+    """symbol/file/directory 段が全て空だったときの最終フォールバック（design §6.2）。
+    embedding を使うため、このモジュール（CLI層）でのみ組み立てる
+    （context_lookup.py は embedding に依存させない、design の意図的な分離）"""
+    from codeatrium.context_lookup import ContextHit
+    from codeatrium.embedder import Embedder
+    from codeatrium.search import search_combined
+
+    query_text = _semantic_query_text(file_path, symbol_name)
+    embedder = Embedder()
+    query_vec = embedder.embed(query_text)
+    results = search_combined(db, query_text, query_vec, limit=limit)
+    return [
+        ContextHit(
+            match_kind="semantic",
+            confidence=0.10,
+            exchange_id=r.exchange_id,
+            file_path=file_path,
+            symbol_name=symbol_name,
+            exchange_core=r.exchange_core,
+            specific_context=r.specific_context,
+            verbatim_ref=r.verbatim_ref,
+            git_branch=r.git_branch,
+            user_content=r.user_content,
+            agent_content=r.agent_content,
+        )
+        for r in results
+    ]
+
+
+def _print_context_hits(hits, json_output: bool, full: bool) -> None:
+    if json_output:
+        output = []
+        for h in hits:
+            item = {
+                "match_kind": h.match_kind,
+                "confidence": h.confidence,
+                "symbol_name": h.symbol_name,
+                "file_path": h.file_path,
+                "exchange_id": h.exchange_id,
+                "exchange_core": h.exchange_core,
+                "specific_context": h.specific_context,
+                "verbatim_ref": h.verbatim_ref,
+                "git_branch": h.git_branch,
+            }
+            if full:
+                item["user_content"] = h.user_content
+                item["agent_content"] = h.agent_content
+            output.append(item)
+        typer.echo(json.dumps(output, ensure_ascii=False, indent=2))
+    else:
+        for i, h in enumerate(hits, 1):
+            label = h.symbol_name or h.file_path
+            typer.echo(f"\n[{i}] {h.match_kind} (confidence={h.confidence:.2f}) {label}")
+            typer.echo(f"    {h.file_path}")
+            if h.exchange_core:
+                typer.echo(f"    Core: {h.exchange_core}")
+            if h.verbatim_ref:
+                typer.echo(f"    {h.verbatim_ref}")
+
+
+def _context_u1_u2(target: str, limit: int, json_output: bool, full: bool) -> None:
+    from codeatrium.context_lookup import (
+        parse_context_target,
+        pick_enclosing_symbol_name,
+        resolve_u1,
+        resolve_u2,
+    )
+    from codeatrium.db import get_connection
+    from codeatrium.paths import db_path, find_project_root
+
+    root = find_project_root()
+    db = db_path(root)
+    if not db.exists():
+        typer.echo("Not initialized. Run `loci init` first.", err=True)
+        raise typer.Exit(1)
+
+    parsed = parse_context_target(target)
+    file_path = _resolve_target_file_path(parsed.file_path, str(root))
+    if file_path is None:
+        typer.echo(f"Error: {parsed.file_path} is outside the project.", err=True)
+        raise typer.Exit(1)
+
+    con = get_connection(db)
+
+    symbol_name = parsed.symbol_name
+    if parsed.line is not None:
+        sym_rows = con.execute(
+            "SELECT symbol_name, line, end_line FROM code_symbols WHERE file_path = ?",
+            (file_path,),
+        ).fetchall()
+        symbols = [(r["symbol_name"], r["line"], r["end_line"]) for r in sym_rows]
+        symbol_name = pick_enclosing_symbol_name(parsed.line, symbols)
+
+    hits = (
+        resolve_u1(con, file_path, symbol_name, limit)
+        if symbol_name is not None
+        else resolve_u2(con, file_path, limit)
+    )
+    con.close()
+
+    if not hits:
+        hits = _semantic_fallback_hits(db, file_path, symbol_name, limit)
+
+    if not hits:
+        typer.echo("No results found.")
+        return
+
+    _print_context_hits(hits, json_output, full)

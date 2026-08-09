@@ -12,6 +12,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from codeatrium.cli import app
+from codeatrium.cli.search_cmd import _semantic_query_text
 from codeatrium.db import get_connection, init_db
 
 runner = CliRunner()
@@ -200,3 +201,219 @@ def test_search_json_has_git_branch_field(tmp_path, monkeypatch):
         assert len(data) > 0
         assert "git_branch" in data[0]
         assert data[0]["git_branch"] == "feature-branch"
+
+
+# ---- U1/U2 位置引数（design §6.1・§6.2） ----
+
+
+def _insert_code_edge_fixture(
+    con: sqlite3.Connection,
+    ex_id: str = "ex1",
+    conv_id: str = "conv1",
+    file_path: str = "src/foo.py",
+    symbol_name: str | None = "greet",
+    granularity: str = "line",
+    confidence: float = 1.0,
+    ply_start: int = 0,
+) -> None:
+    con.execute(
+        "INSERT OR IGNORE INTO conversations (id, source_path) VALUES (?, ?)",
+        (conv_id, "/fake/session.jsonl"),
+    )
+    con.execute(
+        """INSERT OR IGNORE INTO exchanges
+           (id, conversation_id, ply_start, ply_end, user_content, agent_content)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (ex_id, conv_id, ply_start, ply_start + 1, "user " + LONG, "agent " + LONG),
+    )
+    symbol_id = None
+    if symbol_name is not None:
+        symbol_id = f"sym-{symbol_name}"
+        con.execute(
+            """INSERT OR IGNORE INTO code_symbols
+               (id, file_path, symbol_name, symbol_kind, signature, line, end_line, lang, resolved_at)
+               VALUES (?, ?, ?, 'function', 'def f():', 1, 2, '.py', '2026-08-09T00:00:00Z')""",
+            (symbol_id, file_path, symbol_name),
+        )
+    con.execute(
+        """INSERT OR IGNORE INTO code_edges
+           (id, exchange_id, file_path, symbol_id, edge_kind, granularity, confidence, added, ts)
+           VALUES (?, ?, ?, ?, 'edit', ?, ?, 1, '2026-08-09T00:00:00Z')""",
+        (f"edge-{ex_id}-{file_path}-{symbol_name}", ex_id, file_path, symbol_id, granularity, confidence),
+    )
+    con.commit()
+
+
+def test_context_u1_symbol_match(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_code_edge_fixture(con)
+    con.close()
+
+    result = runner.invoke(app, ["context", "src/foo.py:greet", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data[0]["match_kind"] == "symbol"
+    assert data[0]["confidence"] == 1.0
+    assert data[0]["symbol_name"] == "greet"
+    assert "user_content" not in data[0]
+
+
+def test_context_u1_full_flag_includes_content(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_code_edge_fixture(con)
+    con.close()
+
+    result = runner.invoke(app, ["context", "src/foo.py:greet", "--json", "--full"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert "user_content" in data[0]
+    assert "agent_content" in data[0]
+
+
+def test_context_u2_file_match(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_code_edge_fixture(con)
+    con.close()
+
+    result = runner.invoke(app, ["context", "src/foo.py", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data[0]["match_kind"] == "file"
+    assert data[0]["confidence"] == 1.0
+
+
+def test_context_line_resolves_to_enclosing_symbol(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_code_edge_fixture(con)  # symbol spans line=1..end_line=2
+    con.close()
+
+    result = runner.invoke(app, ["context", "src/foo.py:1", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data[0]["match_kind"] == "symbol"
+    assert data[0]["symbol_name"] == "greet"
+
+
+def test_context_absolute_path_is_normalized(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_code_edge_fixture(con)
+    con.close()
+
+    abs_target = str(tmp_path / "src" / "foo.py") + ":greet"
+    result = runner.invoke(app, ["context", abs_target, "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data[0]["file_path"] == "src/foo.py"
+
+
+def test_context_absolute_path_outside_project_errors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    con.close()
+
+    result = runner.invoke(app, ["context", "/somewhere/else/foo.py:greet"])
+    assert result.exit_code == 1
+
+
+def test_context_positional_target_takes_precedence_over_symbol_flag(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_code_edge_fixture(con)
+    con.close()
+
+    result = runner.invoke(
+        app, ["context", "src/foo.py:greet", "--symbol", "SomethingElse", "--json"]
+    )
+    assert result.exit_code == 0
+    assert "Warning" in result.stderr
+    data = json.loads(result.stdout)
+    assert data[0]["symbol_name"] == "greet"
+
+
+def test_context_u1_no_edges_falls_back_to_semantic(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    from codeatrium.models import FusedResult
+
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    con.close()
+
+    mock_result = FusedResult(
+        exchange_id="ex1",
+        user_content="user content",
+        agent_content="agent content",
+        score=0.5,
+        exchange_core="core summary",
+        specific_context="specific detail",
+        verbatim_ref="/fake/session.jsonl:ply=0",
+        rooms=[],
+        symbols=[],
+        git_branch=None,
+    )
+
+    with (
+        patch("codeatrium.embedder.Embedder", return_value=MagicMock()),
+        patch("codeatrium.search.search_combined", return_value=[mock_result]),
+    ):
+        result = runner.invoke(app, ["context", "src/nomatch.py:missing", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data[0]["match_kind"] == "semantic"
+        assert data[0]["confidence"] == 0.10
+
+
+def test_context_no_results_at_all(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock, patch
+
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    con.close()
+
+    with (
+        patch("codeatrium.embedder.Embedder", return_value=MagicMock()),
+        patch("codeatrium.search.search_combined", return_value=[]),
+    ):
+        result = runner.invoke(app, ["context", "src/nomatch.py:missing"])
+        assert result.exit_code == 0
+        assert "No results found." in result.output
+
+
+def test_context_not_initialized_exits_1_for_target(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["context", "src/foo.py:greet"])
+    assert result.exit_code == 1
+
+
+def test_context_u1_line_miss_falls_back_to_u2(tmp_path, monkeypatch):
+    """行がどのシンボルにも含まれなければ U2（ファイル単位）へ落ちる（design §6.1）"""
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_code_edge_fixture(con)  # greet は line=1..end_line=2
+    con.close()
+
+    result = runner.invoke(app, ["context", "src/foo.py:999", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data[0]["match_kind"] == "file"
+
+
+# ---- _semantic_query_text（design §6.2 最終段のクエリ文字列） ----
+
+
+def test_semantic_query_text_u1_includes_symbol_and_module_stem():
+    text = _semantic_query_text("src/codeatrium/config.py", "Config")
+    assert "Config" in text
+    assert "config" in text
+    assert ".py" not in text
+
+
+def test_semantic_query_text_u2_includes_module_stem_and_path():
+    text = _semantic_query_text("src/codeatrium/config.py", None)
+    assert "config" in text
+    assert "src/codeatrium/config.py" in text
