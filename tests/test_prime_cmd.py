@@ -32,8 +32,24 @@ def test_prime_text_has_concrete_search_example():
 
 
 def test_prime_text_has_concrete_context_example():
-    """PRIME_TEXT must contain a concrete loci context example with a real symbol"""
-    assert 'loci context --symbol "SymbolResolver.extract"' in PRIME_TEXT
+    """PRIME_TEXT must contain a concrete U1 (file+symbol) loci context example
+    (design §6.1: --symbol is no longer the primary form shown to agents)"""
+    assert "loci context src/codeatrium/search.py:search_combined" in PRIME_TEXT
+
+
+def test_prime_text_context_section_is_marked_primary_and_comes_first():
+    """design §6.4: loci context must be introduced as the primary way to use the tool,
+    and its section must appear before the loci search section"""
+    assert "primary" in PRIME_TEXT.lower()
+    context_idx = PRIME_TEXT.index("### Context")
+    search_idx = PRIME_TEXT.index("### Search")
+    assert context_idx < search_idx
+
+
+def test_prime_text_search_section_is_marked_secondary():
+    """design §6.4: loci search must be demoted to a secondary fallback"""
+    search_heading_end = PRIME_TEXT.index("\n", PRIME_TEXT.index("### Search"))
+    assert "secondary" in PRIME_TEXT[PRIME_TEXT.index("### Search") : search_heading_end].lower()
 
 
 def test_prime_text_context_section_explains_bidirectional_recall():
@@ -66,9 +82,14 @@ def test_prime_text_ide_selection_guards_against_over_fire():
     assert "Do NOT recall" in PRIME_TEXT
 
 
-def test_prime_text_ide_selection_resolves_enclosing_symbol_for_fragments():
-    """A fragment selection must resolve its enclosing symbol before context lookup"""
-    assert "enclosing symbol" in PRIME_TEXT
+def test_prime_text_ide_selection_no_longer_requires_manual_symbol_resolution():
+    """design §6.4: the agent must NOT be asked to resolve the enclosing symbol itself
+    (e.g. via LSP) before calling loci context — codeatrium resolves <file>:<line> for it.
+    This intentionally supersedes the old instruction to look up the enclosing symbol
+    via LSP before calling loci context --symbol."""
+    assert "LSP" not in PRIME_TEXT
+    assert "resolves it for you" in PRIME_TEXT
+    assert "loci context <file>:<line>" in PRIME_TEXT
 
 
 def test_prime_text_ide_selection_has_search_fallback():

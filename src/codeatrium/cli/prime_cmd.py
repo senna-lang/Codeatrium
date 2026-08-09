@@ -14,38 +14,36 @@ PRIME_TEXT = """\
 
 codeatrium records every past conversation turn, decision, and code location. Retrieve that memory **before** acting — not after.
 
+### Context — recall from code (primary)
+
+**This is the main way to use this tool.** Touching a function, component, or file = recalling memory about it. Before changing any code, look up what was decided about it.
+
+```bash
+# U1: file + symbol (primary form) — a function or component you're about to touch
+loci context src/codeatrium/search.py:search_combined --json
+loci context src/components/Button.tsx:Button --json
+
+# U2: file only — before touching a file you don't know the history of
+loci context src/codeatrium/search.py --json
+```
+
+If there's no exact hit, codeatrium widens the search itself (same file → same directory → semantic) and returns an honest confidence score for each result rather than guessing silently — you don't need a separate fallback query.
+
 ### When to act (agent-initiated triggers)
 
-- **Before editing or refactoring a function** — recall past design decisions and known constraints for that symbol.
+- **Before editing or refactoring a function or component** — recall past design decisions and known constraints for that symbol.
 - **Before starting a new implementation** — check if similar work was done before; reuse decisions and avoid re-debating settled choices.
 - **When you encounter a known or recurring error** — search for past fixes; the solution may already be documented.
 - **When asked about work on a specific branch** — recall what was done and discussed on that branch.
 
-### Search — semantic query over past conversations
-
 ```bash
-# Find past discussions, decisions, or implementations
-loci search "BM25 RRF fusion ranking" --json --limit 5
-
-# Retrieve verbatim exchange (use verbatim_ref from search results)
-loci show "<verbatim_ref>" --json
-```
-
-### Context — reverse lookup from code symbol or git branch to past conversations
-
-Touching a symbol = recalling memory about that symbol. Before changing any function or class, look up what was decided about it.
-
-```bash
-# Retrieve all past conversations that involved this symbol
-loci context --symbol "SymbolResolver.extract" --json
-
 # Retrieve past conversations from work on a specific branch
 loci context --branch "feature/foo" --json
 ```
 
 ### IDE selection as a deictic anchor
 
-When the IDE injects an active editor selection (shown as `⧉ Selected N lines from <file>`), treat that selection as the referent of "this / これ / この〜" in the user's prompt. The selection resolves *which* symbol the memory lookup is about — it is NOT by itself a request to recall.
+When the IDE injects an active editor selection (shown as `⧉ Selected N lines from <file>`), treat that selection as the referent of "this / これ / この〜" in the user's prompt. The selection resolves *which* code the memory lookup is about — it is NOT by itself a request to recall.
 
 Recall from a selection ONLY when BOTH hold:
 
@@ -54,24 +52,30 @@ Recall from a selection ONLY when BOTH hold:
 
 Do NOT recall when the selection is present only because the user is about to edit it and asks nothing past-oriented.
 
-Map the selection to a query:
-
-- Selection IS a named function/class → look it up directly:
+Pass the selection straight through — you do not need to find the enclosing function yourself first, codeatrium resolves it for you:
 
 ```bash
-loci context --symbol "<name>" --json
+loci context <file>:<line> --json
 ```
 
-- Selection is a fragment INSIDE one function/class — the `def`/`class` line is usually not in the selection, so resolve the enclosing symbol first (LSP `workspaceSymbol`/`hover`, or read `<file>` around the selection), then:
-
-```bash
-loci context --symbol "<enclosing-symbol>" --json
-```
-
+- Selection IS a named function/class → look it up directly with its name instead of a line number: `loci context <file>:<name> --json`
+- Selection is a fragment INSIDE one function/class → just pass the line number as above; no need to locate the `def`/`class` line yourself
 - Selection spans multiple symbols or belongs to none (module-level code, config, comments), OR the lookups above return no results → fall back to semantic search over your question:
 
 ```bash
 loci search "<the user's question>" --json
+```
+
+### Search — semantic query over past conversations (secondary)
+
+Use this when you don't know which file or symbol to look at — you're searching for a concept, a design decision, or the reasoning behind something, not a specific piece of code.
+
+```bash
+# Find past discussions, decisions, or implementations
+loci search "BM25 RRF fusion ranking" --json --limit 5
+
+# Retrieve verbatim exchange (use verbatim_ref from search results)
+loci show "<verbatim_ref>" --json
 ```\
 """
 
