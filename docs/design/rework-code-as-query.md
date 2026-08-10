@@ -2,7 +2,7 @@
 
 作成日: 2026-08-07
 対象: codeatrium (`loci`)
-ステータス: 実装中（ステップ0〜7完了。ステップ8はCodexのインデックス統合完了、OpenCode以降が残る）
+ステータス: 実装中（ステップ0〜7完了。ステップ8はCodex・OpenCodeのインデックス統合完了、omp-pi・grokが残る）
 
 ---
 
@@ -1060,7 +1060,10 @@ Claude Code のみの対応だが、コードから会話を引く機能は**完
 
 **実装状況（2026-08-10）**: Codex は `loci index --harness codex` で rollout JSONL を
 exchange・`code_touches`・`code_edges` に取り込み、`move_path` を `file_renames` に記録する。
-OpenCode は編集位置の抽出器まで実装済みで、session DB のインデックス統合は未着手。
+OpenCode は `loci index --harness opencode` で session SQLite DB
+（`~/.local/share/opencode/opencode.db`）から `project.worktree` が一致するセッションだけを
+読み取り専用で取り込む（message/part を `time_created, id` 順に統合した座標系で claude/codex と
+同じ ply 契約に合わせる）。残るは omp-pi（独自パーサー）・grok（`TextAnchor` 経路）。
 
 #### ハーネス対応の順番（ステップ8の中身）
 

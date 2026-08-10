@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -10,6 +12,73 @@ from codeatrium.cli import app
 from codeatrium.db import get_connection, init_db
 
 runner = CliRunner()
+
+
+def _write_opencode_db(db_file: Path, project_root: Path) -> None:
+    """合成ログの /repo を一時プロジェクトの絶対パスへ置き換えて SQLite に書き出す。
+
+    既定の index_min_chars（50文字）を超えるよう会話文を水増しする。
+    """
+    fixture_path = Path(__file__).parent / "fixtures" / "harness_logs" / "opencode.json"
+    fixture = json.loads(
+        fixture_path.read_text()
+        .replace("/repo", str(project_root))
+        .replace("fs.list_dir を Result 型にして", "fs.list_dir を Result 型にして。" * 4)
+        .replace("list_dir を編集します。", "list_dir を編集します。" * 4)
+    )
+
+    con = sqlite3.connect(db_file)
+    con.executescript(
+        """
+        CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL, vcs TEXT, name TEXT);
+        CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, directory TEXT NOT NULL);
+        CREATE TABLE message (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL
+        );
+        CREATE TABLE part (
+            id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL,
+            time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL
+        );
+        """
+    )
+    project = fixture["project"]
+    con.execute(
+        "INSERT INTO project (id, worktree, vcs, name) VALUES (?, ?, ?, ?)",
+        (project["id"], project["worktree"], project["vcs"], project["name"]),
+    )
+    session = fixture["session"]
+    con.execute(
+        "INSERT INTO session (id, project_id, directory) VALUES (?, ?, ?)",
+        (session["id"], session["project_id"], session["directory"]),
+    )
+    for message in fixture["messages"]:
+        con.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                message["id"],
+                message["session_id"],
+                message["time_created"],
+                message["time_created"],
+                json.dumps(message["data"]),
+            ),
+        )
+    for part in fixture["parts"]:
+        con.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                part["id"],
+                part["message_id"],
+                part["session_id"],
+                part["time_created"],
+                part["time_created"],
+                json.dumps(part["data"]),
+            ),
+        )
+    con.commit()
+    con.close()
 
 
 def test_index_rejects_uninitialized_repo(tmp_path: Path, monkeypatch) -> None:
@@ -69,4 +138,34 @@ def test_index_ingests_codex_rollout(tmp_path: Path, monkeypatch) -> None:
     assert con.execute("SELECT COUNT(*) FROM code_touches").fetchone()[0] >= 4
     assert con.execute("SELECT COUNT(*) FROM code_edges").fetchone()[0] >= 4
     assert con.execute("SELECT COUNT(*) FROM file_renames").fetchone()[0] == 1
+    con.close()
+
+
+def test_index_ingests_opencode_session_db(tmp_path: Path, monkeypatch) -> None:
+    """--harness opencode は project_root にひも付くセッションだけを取り込む。"""
+    monkeypatch.chdir(tmp_path)
+    init_db(tmp_path / ".codeatrium" / "memory.db")
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "fs.py").write_text("def list_dir(path):\n    return path\n")
+    (source_dir / "result.py").write_text("class Result:\n    pass\n")
+
+    opencode_db = tmp_path / "opencode.db"
+    _write_opencode_db(opencode_db, tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["index", "--harness", "opencode", "--path", str(opencode_db)],
+    )
+
+    assert result.exit_code == 0
+    assert "Indexed 1 file(s), 1 exchange(s)." in result.output
+    con = get_connection(tmp_path / ".codeatrium" / "memory.db")
+    assert (
+        con.execute(
+            "SELECT COUNT(*) FROM code_touches WHERE harness = 'opencode'"
+        ).fetchone()[0]
+        >= 2
+    )
+    assert con.execute("SELECT COUNT(*) FROM code_edges").fetchone()[0] >= 2
     con.close()

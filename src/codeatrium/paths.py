@@ -83,6 +83,12 @@ def resolve_codex_sessions_path() -> Path | None:
     return None
 
 
+def resolve_opencode_db_path() -> Path | None:
+    """OpenCode のセッション SQLite DB（~/.local/share/opencode/opencode.db）を返す。"""
+    path = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+    return path if path.exists() else None
+
+
 def sock_path(project_root: Path) -> Path:
     return db_path(project_root).parent / "embedder.sock"
 

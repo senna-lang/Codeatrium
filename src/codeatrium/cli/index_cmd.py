@@ -7,25 +7,31 @@ from typing import Annotated
 
 import typer
 
+_HARNESS_CHOICES = {"claude", "codex", "opencode"}
+
 
 def index(
     path: Annotated[
-        Path | None, typer.Option(help="インデックス対象ディレクトリ")
+        Path | None,
+        typer.Option(
+            help="インデックス対象パス（claude/codex はディレクトリ、opencode は DB ファイル）"
+        ),
     ] = None,
     harness: Annotated[
-        str, typer.Option("--harness", help="ログ形式（claude または codex）")
+        str, typer.Option("--harness", help="ログ形式（claude / codex / opencode）")
     ] = "claude",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
-    """指定ハーネスの未処理 JSONL を exchange とコード編集記録へ取り込む。"""
+    """指定ハーネスの未処理ログを exchange とコード編集記録へ取り込む。"""
     from codeatrium.config import load_config
     from codeatrium.db import init_db
-    from codeatrium.indexer import index_file
+    from codeatrium.indexer import index_file, index_opencode_db
     from codeatrium.paths import (
         db_path,
         find_project_root,
         resolve_claude_projects_path,
         resolve_codex_sessions_path,
+        resolve_opencode_db_path,
     )
 
     root = find_project_root()
@@ -34,8 +40,9 @@ def index(
     if not db.exists() and not (root / ".codeatrium").exists():
         typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
-    if harness not in {"claude", "codex"}:
-        typer.echo("Unsupported harness. Choose claude or codex.", err=True)
+    if harness not in _HARNESS_CHOICES:
+        choices = ", ".join(sorted(_HARNESS_CHOICES))
+        typer.echo(f"Unsupported harness. Choose one of: {choices}.", err=True)
         raise typer.Exit(1)
 
     init_db(db)
@@ -48,6 +55,23 @@ def index(
             err=True,
         )
     cfg = load_config(root)
+
+    if harness == "opencode":
+        opencode_db = path or resolve_opencode_db_path()
+        if opencode_db is None or not opencode_db.exists():
+            typer.echo(
+                "OpenCode session DB not found. Use --path to specify.", err=True
+            )
+            raise typer.Exit(1)
+
+        total_exchanges = index_opencode_db(
+            opencode_db, db, min_chars=cfg.index_min_chars, project_root=root
+        )
+        if total_exchanges == 0:
+            typer.echo("Nothing new to index.")
+            return
+        typer.echo(f"Indexed 1 file(s), {total_exchanges} exchange(s).")
+        return
 
     if path is not None:
         target_dir = path

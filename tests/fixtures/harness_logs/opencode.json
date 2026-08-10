@@ -9,6 +9,7 @@
     "id": "ses_synth1",
     "project_id": "proj_synth1",
     "directory": "/repo",
+    "time_created": 1798761600000,
     "model": {
       "providerID": "anthropic",
       "modelID": "claude-sonnet-5"
@@ -18,6 +19,7 @@
     {
       "id": "msg_synth1",
       "session_id": "ses_synth1",
+      "time_created": 1798761600000,
       "data": {
         "role": "user",
         "time": {
@@ -33,6 +35,7 @@
     {
       "id": "msg_synth2",
       "session_id": "ses_synth1",
+      "time_created": 1798761601000,
       "data": {
         "role": "assistant",
         "mode": "build",
@@ -52,8 +55,29 @@
   "parts": [
     {
       "id": "prt_synth1",
+      "message_id": "msg_synth1",
+      "session_id": "ses_synth1",
+      "time_created": 1798761600100,
+      "data": {
+        "type": "text",
+        "text": "fs.list_dir を Result 型にして"
+      }
+    },
+    {
+      "id": "prt_synth2",
       "message_id": "msg_synth2",
       "session_id": "ses_synth1",
+      "time_created": 1798761601100,
+      "data": {
+        "type": "text",
+        "text": "list_dir を編集します。"
+      }
+    },
+    {
+      "id": "prt_synth3",
+      "message_id": "msg_synth2",
+      "session_id": "ses_synth1",
+      "time_created": 1798761601200,
       "data": {
         "type": "tool",
         "tool": "edit",
@@ -74,9 +98,10 @@
       }
     },
     {
-      "id": "prt_synth2",
+      "id": "prt_synth4",
       "message_id": "msg_synth2",
       "session_id": "ses_synth1",
+      "time_created": 1798761601300,
       "data": {
         "type": "tool",
         "tool": "write",
@@ -98,9 +123,10 @@
       }
     },
     {
-      "id": "prt_synth3",
+      "id": "prt_synth5",
       "message_id": "msg_synth2",
       "session_id": "ses_synth1",
+      "time_created": 1798761601400,
       "data": {
         "type": "tool",
         "tool": "write",
@@ -116,9 +142,10 @@
       }
     },
     {
-      "id": "prt_synth4",
+      "id": "prt_synth6",
       "message_id": "msg_synth2",
       "session_id": "ses_synth1",
+      "time_created": 1798761601500,
       "data": {
         "type": "patch",
         "hash": "synthhash0001",

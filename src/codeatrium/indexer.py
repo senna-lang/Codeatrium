@@ -17,6 +17,8 @@ project_root を渡すと、exchange と同じコミットで code_touches / cod
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from codeatrium.adapters.harness import claude as claude_adapter
 from codeatrium.adapters.harness import codex as codex_adapter
+from codeatrium.adapters.harness import opencode as opencode_adapter
 from codeatrium.code_touches import (
     build_code_touch_rows,
     is_external_path,
@@ -418,6 +421,229 @@ def _codex_git_branch(raw_entries: list[dict | None], start: int) -> str | None:
     return None
 
 
+def parse_opencode_exchanges(
+    source_path: str,
+    raw_entries: list[dict | None],
+    min_chars: int = 50,
+) -> list[Exchange]:
+    """OpenCode の message/part envelope 列をユーザーメッセージ単位の exchange に分割する。
+
+    raw_entries は _load_opencode_raw_entries が (time_created, id) 順に並べた
+    message/part envelope。message envelope のうち role="user" が exchange の境界になる。
+    """
+    conversation_id = sha256(source_path)
+    message_role: dict[str, str] = {
+        entry["id"]: entry["data"].get("role")
+        for entry in raw_entries
+        if isinstance(entry, dict) and entry.get("kind") == "message"
+    }
+    boundaries = [
+        index
+        for index, entry in enumerate(raw_entries)
+        if isinstance(entry, dict)
+        and entry.get("kind") == "message"
+        and entry["data"].get("role") == "user"
+    ]
+    assistant_ids = {
+        msg_id for msg_id, role in message_role.items() if role == "assistant"
+    }
+
+    exchanges: list[Exchange] = []
+    for boundary_index, start in enumerate(boundaries):
+        end = (
+            boundaries[boundary_index + 1] - 1
+            if boundary_index + 1 < len(boundaries)
+            else len(raw_entries) - 1
+        )
+        user_entry = raw_entries[start]
+        if user_entry is None:
+            continue
+        user_message_id = user_entry["id"]
+        user_text = _opencode_message_text(raw_entries, start, end, {user_message_id})
+        agent_text = _opencode_message_text(raw_entries, start, end, assistant_ids)
+        if len(user_text + agent_text) < min_chars:
+            continue
+
+        touch_slice = raw_entries[start : end + 1]
+        touches = opencode_adapter.extract_code_touches(touch_slice)
+        files = list(dict.fromkeys(touch.file_path for touch in touches))
+        exchanges.append(
+            Exchange(
+                id=sha256(f"{conversation_id}:{user_message_id}"),
+                conversation_id=conversation_id,
+                ply_start=start,
+                ply_end=end,
+                user_content=user_text,
+                agent_content=agent_text,
+                files=files,
+                git_branch=None,
+            )
+        )
+
+    return exchanges
+
+
+def _opencode_message_text(
+    raw_entries: list[dict | None],
+    start: int,
+    end: int,
+    message_ids: set[str],
+) -> str:
+    """[start, end] 範囲内で指定 message_id に属す text part の本文を連結する。"""
+    return "\n".join(
+        entry["data"]["text"]
+        for entry in raw_entries[start : end + 1]
+        if isinstance(entry, dict)
+        and entry.get("kind") == "part"
+        and entry.get("message_id") in message_ids
+        and isinstance(entry.get("data"), dict)
+        and entry["data"].get("type") == "text"
+        and isinstance(entry["data"].get("text"), str)
+    )
+
+
+def _epoch_ms_to_iso(epoch_ms: int) -> str:
+    return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC).isoformat()
+
+
+def _load_opencode_raw_entries(
+    src: sqlite3.Connection, session_id: str
+) -> tuple[list[dict | None], str]:
+    """OpenCode session DB から message/part を (time_created, id) 順の envelope 列にする。
+
+    id は opencode 側で時刻順に単調生成される保証がないため、time_created を
+    第一キーにし、id を tie-break にする。started_at には最初の envelope の時刻を使う
+    （DB ファイルの mtime は全セッションで同一になり使えないため）。
+    """
+    messages = src.execute(
+        "SELECT id, time_created, data FROM message WHERE session_id = ?",
+        (session_id,),
+    ).fetchall()
+    parts = src.execute(
+        "SELECT id, message_id, time_created, data FROM part WHERE session_id = ?",
+        (session_id,),
+    ).fetchall()
+
+    ordered: list[tuple[int, str, dict]] = []
+    for row in messages:
+        ordered.append(
+            (
+                row["time_created"],
+                row["id"],
+                {
+                    "kind": "message",
+                    "id": row["id"],
+                    "session_id": session_id,
+                    "timestamp": _epoch_ms_to_iso(row["time_created"]),
+                    "data": json.loads(row["data"]),
+                },
+            )
+        )
+    for row in parts:
+        ordered.append(
+            (
+                row["time_created"],
+                row["id"],
+                {
+                    "kind": "part",
+                    "id": row["id"],
+                    "message_id": row["message_id"],
+                    "session_id": session_id,
+                    "timestamp": _epoch_ms_to_iso(row["time_created"]),
+                    "data": json.loads(row["data"]),
+                },
+            )
+        )
+    ordered.sort(key=lambda item: (item[0], item[1]))
+
+    raw_entries: list[dict | None] = [entry for _, _, entry in ordered]
+    started_at = (
+        _epoch_ms_to_iso(ordered[0][0]) if ordered else datetime.now(UTC).isoformat()
+    )
+    return raw_entries, started_at
+
+
+def index_opencode_db(
+    opencode_db_path: Path,
+    db_path: Path,
+    min_chars: int = 50,
+    project_root: Path | None = None,
+) -> int:
+    """OpenCode の SQLite セッション DB から project_root に属すセッションだけを取り込む。
+
+    OpenCode の1 DB には全プロジェクトのセッションが混在するため、project.worktree が
+    project_root の実体パスと一致するセッションのみを対象にする
+    （openspec/changes/add-harness-adapters: 「OpenCode は worktree を信頼」）。
+    DB は使用中の可能性があるため読み取り専用で開く。
+    Returns: 新規登録した exchange 数（全セッション合計）
+    """
+    from codeatrium.db import get_connection
+
+    if project_root is None:
+        return 0
+
+    src = sqlite3.connect(f"file:{opencode_db_path}?mode=ro", uri=True)
+    src.row_factory = sqlite3.Row
+    try:
+        project_root_real = os.path.realpath(str(project_root))
+        project_ids = [
+            row["id"]
+            for row in src.execute("SELECT id, worktree FROM project")
+            if os.path.realpath(row["worktree"]) == project_root_real
+        ]
+        if not project_ids:
+            return 0
+
+        placeholders = ",".join("?" * len(project_ids))
+        session_rows = src.execute(
+            f"SELECT id FROM session WHERE project_id IN ({placeholders})",
+            project_ids,
+        ).fetchall()
+
+        con = get_connection(db_path)
+        total = 0
+        try:
+            for session_row in session_rows:
+                session_id = session_row["id"]
+                source_path = f"{opencode_db_path}#{session_id}"
+                conversation_id = sha256(source_path)
+
+                row = con.execute(
+                    "SELECT last_ply_end FROM conversations WHERE id = ?",
+                    (conversation_id,),
+                ).fetchone()
+                last_ply_end = row["last_ply_end"] if row is not None else -1
+
+                raw_entries, started_at = _load_opencode_raw_entries(src, session_id)
+                exchanges = parse_opencode_exchanges(
+                    source_path, raw_entries, min_chars=min_chars
+                )
+                new_exchanges = [
+                    ex for ex in exchanges if ex.ply_start > last_ply_end
+                ]
+                if not new_exchanges:
+                    continue
+
+                total += _persist_exchanges(
+                    con,
+                    conversation_id=conversation_id,
+                    source_path=source_path,
+                    started_at=started_at,
+                    conversation_exists=row is not None,
+                    new_exchanges=new_exchanges,
+                    raw_entries=raw_entries,
+                    harness="opencode",
+                    touch_adapter=opencode_adapter,
+                    project_root=project_root,
+                )
+            con.commit()
+        finally:
+            con.close()
+        return total
+    finally:
+        src.close()
+
+
 def index_file(
     jsonl_path: Path,
     db_path: Path,
@@ -466,13 +692,49 @@ def index_file(
         con.close()
         return 0
 
+    started_at = datetime.fromtimestamp(jsonl_path.stat().st_mtime, tz=UTC).isoformat()
+    count = _persist_exchanges(
+        con,
+        conversation_id=conversation_id,
+        source_path=str(jsonl_path),
+        started_at=started_at,
+        conversation_exists=row is not None,
+        new_exchanges=new_exchanges,
+        raw_entries=raw_entries,
+        harness=harness,
+        touch_adapter=touch_adapter,
+        project_root=project_root,
+    )
+    con.commit()
+    con.close()
+    return count
+
+
+def _persist_exchanges(
+    con: Any,
+    conversation_id: str,
+    source_path: str,
+    started_at: str,
+    conversation_exists: bool,
+    new_exchanges: list[Exchange],
+    raw_entries: list[dict | None],
+    harness: str,
+    touch_adapter: Any,
+    project_root: Path | None,
+) -> int:
+    """exchange と code_touches/code_symbols/code_edges を1コミットで書き込む共通処理。
+
+    JSONL 系（Claude/Codex）と SQLite 系（OpenCode）のどちらのローダーからも
+    同じ座標系（ply インデックスで raw_entries を切り出す）で呼べる。
+    呼び出し側はコミット/クローズの責務を持つ（複数 conversation をまとめて
+    1 コミットにできるように、ここではコミットしない）。
+    """
     # conversations に登録 or 更新
-    mtime = datetime.fromtimestamp(jsonl_path.stat().st_mtime, tz=UTC).isoformat()
-    if row is None:
+    if not conversation_exists:
         con.execute(
             "INSERT INTO conversations (id, source_path, started_at, last_ply_end) "
             "VALUES (?, ?, ?, ?)",
-            (conversation_id, str(jsonl_path), mtime, new_exchanges[-1].ply_end),
+            (conversation_id, source_path, started_at, new_exchanges[-1].ply_end),
         )
     else:
         con.execute(
@@ -622,6 +884,4 @@ def index_file(
                         ),
                     )
 
-    con.commit()
-    con.close()
     return len(new_exchanges)

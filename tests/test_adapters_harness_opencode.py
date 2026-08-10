@@ -53,6 +53,6 @@ def test_extract_code_touches_normalizes_completed_edits_and_writes() -> None:
 
 def test_extract_code_touches_ignores_failed_parts() -> None:
     """権限拒否など完了していないツール呼び出しは編集記録にしない。"""
-    failed_part = _parts()[2]
+    failed_part = next(p for p in _parts() if p is not None and p["id"] == "prt_synth5")
 
     assert extract_code_touches([failed_part]) == []
