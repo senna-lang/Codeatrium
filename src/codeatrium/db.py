@@ -15,12 +15,17 @@ SQLite DB の初期化・スキーマ定義・接続管理
   code_edges     - 会話とコードのひも付け（design §4.1）
   file_renames   - ファイル改名の記録（design §8.2、旧パス→新パス。問い合わせ時に逆向きにたどる）
   _MIGRATIONS    - 逐次マイグレーション関数リスト（user_version ベース）
+
+`_backfill_legacy_code_edges` は _MIGRATIONS に含めない別経路（design §7 段階B・C）。
+project_root（ファイルシステムのレイアウト）に依存する点が、DB だけに閉じた
+他の migration と性質が違うため、`meta` テーブルの完了フラグで一度だけ実行する。
 """
 
 import hashlib
 import os
 import sqlite3
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import sqlite_vec
@@ -345,6 +350,83 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
 ]
 
 
+def _backfill_legacy_code_edges(con: sqlite3.Connection, project_root: Path) -> None:
+    """design §7 段階B・C: exchange_files・旧 symbols から、まだ code_edges を
+    持たない exchange へファイル粒度の code_edges を作る。LLM は呼ばず、
+    ディスクも読まない（DB内で完結）。`meta` の完了フラグで一度だけ実行する
+    （project_root に依存するため `_MIGRATIONS`/user_version には含めない——
+    他の migration は DB だけに閉じた操作であり、性質が異なる）。
+
+    段階B（exchange_files）を先に処理し、段階C（旧 symbols）は
+    段階Bで既にひも付いた exchange をスキップする（exchange_files の方が
+    直接的な手がかりであり、蒸留経由の symbols より優先する）。
+    project_root 外のパスは記録しない（不変条件3、normalize_repo_path と同じ判定）。
+    """
+    # meta は v3 で全既存DBに作られるはずだが、念のため（他の migration 関数と同じ流儀）
+    con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+
+    done = con.execute(
+        "SELECT 1 FROM meta WHERE key = 'legacy_edges_backfilled'"
+    ).fetchone()
+    if done is not None:
+        return
+
+    from codeatrium.code_touches import FILE_CONFIDENCE, normalize_repo_path
+    from codeatrium.utils import sha256
+
+    def _insert_mention_edge(exchange_id: str, file_path: str) -> None:
+        rel_path = (
+            normalize_repo_path(file_path, str(project_root))
+            if file_path.startswith("/")
+            else file_path
+        )
+        if rel_path is None:
+            return
+        edge_id = sha256(f"{exchange_id}:{rel_path}::mention")
+        con.execute(
+            """INSERT OR IGNORE INTO code_edges
+               (id, exchange_id, file_path, symbol_id, edge_kind, granularity, confidence, added, ts)
+               VALUES (?, ?, ?, NULL, 'mention', 'file', ?, 0, NULL)""",
+            (edge_id, exchange_id, rel_path, FILE_CONFIDENCE),
+        )
+
+    exchange_files_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='exchange_files'"
+    ).fetchone()
+    if exchange_files_exists is not None:
+        rows = con.execute(
+            """
+            SELECT DISTINCT exchange_id, file_path FROM exchange_files
+            WHERE exchange_id NOT IN (SELECT DISTINCT exchange_id FROM code_edges)
+            """
+        ).fetchall()
+        for exchange_id, file_path in rows:
+            _insert_mention_edge(exchange_id, file_path)
+
+    symbols_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'"
+    ).fetchone()
+    palace_objects_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'"
+    ).fetchone()
+    if symbols_exists is not None and palace_objects_exists is not None:
+        rows = con.execute(
+            """
+            SELECT DISTINCT p.exchange_id, s.file_path
+            FROM symbols s
+            JOIN palace_objects p ON p.id = s.palace_object_id
+            WHERE p.exchange_id NOT IN (SELECT DISTINCT exchange_id FROM code_edges)
+            """
+        ).fetchall()
+        for exchange_id, file_path in rows:
+            _insert_mention_edge(exchange_id, file_path)
+
+    con.execute(
+        "INSERT OR IGNORE INTO meta(key, value) VALUES ('legacy_edges_backfilled', ?)",
+        (datetime.now(UTC).isoformat(),),
+    )
+
+
 def _run_migrations(con: sqlite3.Connection) -> None:
     """Run pending migrations based on PRAGMA user_version."""
     current_version: int = con.execute("PRAGMA user_version").fetchone()[0]
@@ -563,6 +645,8 @@ def init_db(db_path: Path) -> None:
     else:
         # Existing DB: run migrations
         _run_migrations(con)
+
+    _backfill_legacy_code_edges(con, db_path.parent.parent)
 
     # sqlite-vec の仮想テーブル（HNSW, Phase1 verbatim embedding 用）
     con.execute("""

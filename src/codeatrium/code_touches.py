@@ -30,8 +30,8 @@ if TYPE_CHECKING:
 
 # granularity ごとの確信度（design §6.3 の GRAN 重みをそのまま流用）。
 # line: シンボルの行範囲との重なりが確認できた「確信」。file: シンボル不明の下限。
-_LINE_CONFIDENCE = 1.0
-_FILE_CONFIDENCE = 0.5
+LINE_CONFIDENCE = 1.0
+FILE_CONFIDENCE = 0.5
 
 # 外部パス（サイトパッケージ・依存ディレクトリ）の判定用マーカー。
 # indexer.py の tool_use file 抽出と同じ基準を共有する。
@@ -328,7 +328,7 @@ def touches_to_edges(
                     symbol_id=symbol_id,
                     edge_kind=touch.touch_kind,
                     granularity="line",
-                    confidence=_LINE_CONFIDENCE,
+                    confidence=LINE_CONFIDENCE,
                     added=touch.added,
                     ts=touch.ts,
                 )
@@ -344,7 +344,7 @@ def touches_to_edges(
             symbol_id=None,
             edge_kind=touch.touch_kind,
             granularity="file",
-            confidence=_FILE_CONFIDENCE,
+            confidence=FILE_CONFIDENCE,
             added=touch.added,
             ts=touch.ts,
         )

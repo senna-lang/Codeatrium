@@ -650,8 +650,8 @@ Claude 分の既存データについては、パスの規則が分かってい�
 
 | テーブル | 方針 |
 |---|---|
-| `symbols` | **残す（読むだけ）**。v10 で中身を `code_edges` へ `edge_kind='mention'` として移す。移したあとも当面は消さない（元に戻せるように） |
-| `exchange_files` | 残す。v10 でファイル単位のひも付けを作る材料に使う |
+| `symbols` | **残す（読むだけ）**。段階Cで中身を `code_edges` へ `edge_kind='mention'` として移す。移したあとも当面は消さない（元に戻せるように） |
+| `exchange_files` | 残す。段階Bでファイル単位のひも付けを作る材料に使う |
 | `rooms` の `room_type='file'` | **ファイル索引としては使うのをやめる**（不具合C）。`concept` と `workflow` は言葉での検索用に残す |
 | `palace_objects` | **一切触らない。作り直さない**。1233件はすでに実際のトークン費用を払って作ったもの |
 
@@ -1007,7 +1007,13 @@ GRAN = {line: 1.0, file: 0.5}
 | — | 残り約1500件 | **材料が無い** | — | 0 |
 
 - **v9**：テーブルを作るだけ（何度実行しても安全）
-- **v10**：段階B・Cの移行（DB内で完結、外部の読み書きなし）
+- **段階B・C**：実装時に `_MIGRATIONS`（user_version ベース）には入れなかった。
+  段階Bは `exchange_files` の絶対パスを `project_root` で正規化する必要があり、
+  これは DB だけに閉じた他の migration と性質が違う（project_root はファイルシステムの
+  レイアウトに依存する）。代わりに `init_db` から呼ぶ別経路とし、`meta` テーブルの
+  完了フラグ（`legacy_edges_backfilled`）で一度だけ実行する（`db.py` の
+  `_backfill_legacy_code_edges`）。v10 は §8.2（ファイル改名の追従）の `file_renames` に
+  使ったため、schema 変更としての「段階B・C = vN」という対応は無い
 - **段階A** は migration ではなく `loci reindex --edges` として実行する
   （ファイルを読む処理なので migration には入れない）
 
@@ -1144,7 +1150,7 @@ G1 を掲げる以上、これは「未解決の課題」ではなく**対応必
 段1と段2で実測10件すべてを拾えるため、**初版は段1＋段2**とする。
 
 ```sql
--- 改名の記録（v9 に追加）
+-- 改名の記録（v10 に追加）
 CREATE TABLE file_renames (
     old_path TEXT NOT NULL,
     new_path TEXT NOT NULL,
@@ -1155,6 +1161,13 @@ CREATE TABLE file_renames (
 ```
 
 問い合わせ時に、`file_renames` を逆向きにたどって旧パスでも検索する。
+
+**実装時の変更**: 段2（git）はこのテーブルへ書き込まない。`loci context` は読み取り専用
+コマンドで、Stop hook の `loci index` と同じ DB に WAL で同時アクセスされ得るため、
+問い合わせ経路からの書き込みはロック競合のリスクがある（git 呼び出しは実測20ms程度と
+安いため、キャッシュしない代償は小さい）。`file_renames` への書き込みは段1
+（ハーネスの `move_path`、未実装）専用に空けてあり、`resolve_aliases` は読み取りは
+するが書かない（`file_renames.py`）。
 
 ### 8.3 G2（関数まで特定できた割合）をどう上げるか
 
