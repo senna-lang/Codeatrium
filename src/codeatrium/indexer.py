@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from codeatrium.adapters.harness import claude as claude_adapter
+from codeatrium.adapters.harness import codex as codex_adapter
 from codeatrium.code_touches import (
     build_code_touch_rows,
     is_external_path,
@@ -50,6 +51,7 @@ class Exchange:
 
 
 # ---- 内部ヘルパー ----
+
 
 def _extract_tool_use_files(entries: list[dict | None]) -> list[str]:
     """
@@ -80,7 +82,7 @@ def _extract_tool_use_files(entries: list[dict | None]) -> list[str]:
                 continue
 
             name = block.get("name")
-            if name not in {'Edit', 'Write', 'Read', 'MultiEdit', 'NotebookEdit'}:
+            if name not in {"Edit", "Write", "Read", "MultiEdit", "NotebookEdit"}:
                 continue
 
             input_dict = block.get("input")
@@ -89,7 +91,7 @@ def _extract_tool_use_files(entries: list[dict | None]) -> list[str]:
 
             # NotebookEdit の場合は notebook_path、その他は file_path
             path = None
-            if name == 'NotebookEdit':
+            if name == "NotebookEdit":
                 path = input_dict.get("notebook_path")
             else:
                 path = input_dict.get("file_path")
@@ -227,7 +229,9 @@ def parse_exchanges(
     conversation_id = sha256(str(jsonl_path))
 
     # exchange の境界インデックスを収集
-    boundaries: list[int] = [i for i, e in enumerate(raw_entries) if e is not None and _is_real_user_entry(e)]
+    boundaries: list[int] = [
+        i for i, e in enumerate(raw_entries) if e is not None and _is_real_user_entry(e)
+    ]
 
     exchanges: list[Exchange] = []
     for b_idx, start in enumerate(boundaries):
@@ -270,7 +274,11 @@ def parse_exchanges(
 
         user_uuid = user_entry.get("uuid", f"{start}")
         git_branch_raw = user_entry.get("gitBranch", "")
-        git_branch = git_branch_raw if isinstance(git_branch_raw, str) and git_branch_raw.strip() else None
+        git_branch = (
+            git_branch_raw
+            if isinstance(git_branch_raw, str) and git_branch_raw.strip()
+            else None
+        )
         exchange_id = sha256(f"{conversation_id}:{user_uuid}")
 
         # tool_use から file パスを抽出
@@ -292,20 +300,149 @@ def parse_exchanges(
     return exchanges
 
 
+def parse_codex_exchanges(
+    jsonl_path: Path,
+    min_chars: int = 50,
+    last_ply_end: int = -1,
+    raw_entries: list[dict | None] | None = None,
+) -> list[Exchange]:
+    """Codex rollout JSONL をユーザーターン単位の exchange に分割する。"""
+    if raw_entries is None:
+        if not jsonl_path.exists():
+            return []
+        raw_entries = _load_raw_entries(jsonl_path, last_ply_end)
+
+    conversation_id = sha256(str(jsonl_path))
+    boundaries = [
+        index
+        for index, entry in enumerate(raw_entries)
+        if _is_codex_user_message(entry)
+    ]
+
+    exchanges: list[Exchange] = []
+    for boundary_index, start in enumerate(boundaries):
+        end = (
+            boundaries[boundary_index + 1] - 1
+            if boundary_index + 1 < len(boundaries)
+            else len(raw_entries) - 1
+        )
+        user_entry = raw_entries[start]
+        if user_entry is None:
+            continue
+        user_text = _codex_message_text(user_entry, "input_text")
+        agent_text = "\n".join(
+            _codex_message_text(entry, "output_text")
+            for entry in raw_entries[start + 1 : end + 1]
+            if isinstance(entry, dict) and _is_codex_assistant_message(entry)
+        )
+        if len(user_text + agent_text) < min_chars:
+            continue
+
+        turn_id = _codex_turn_id(raw_entries, start) or f"ply:{start}"
+        touch_slice = raw_entries[start : end + 1]
+        touches = codex_adapter.extract_code_touches(touch_slice)
+        files = list(dict.fromkeys(touch.file_path for touch in touches))
+        exchanges.append(
+            Exchange(
+                id=sha256(f"{conversation_id}:{turn_id}"),
+                conversation_id=conversation_id,
+                ply_start=start,
+                ply_end=end,
+                user_content=user_text,
+                agent_content=agent_text,
+                files=files,
+                git_branch=_codex_git_branch(raw_entries, start),
+            )
+        )
+
+    return exchanges
+
+
+def _is_codex_user_message(entry: dict | None) -> bool:
+    return _is_codex_message(entry, "user")
+
+
+def _is_codex_assistant_message(entry: dict | None) -> bool:
+    return _is_codex_message(entry, "assistant")
+
+
+def _is_codex_message(entry: dict | None, role: str) -> bool:
+    if not isinstance(entry, dict) or entry.get("type") != "response_item":
+        return False
+    payload = entry.get("payload")
+    return (
+        isinstance(payload, dict)
+        and payload.get("type") == "message"
+        and payload.get("role") == role
+    )
+
+
+def _codex_message_text(entry: dict, content_type: str) -> str:
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        part["text"]
+        for part in content
+        if isinstance(part, dict)
+        and part.get("type") == content_type
+        and isinstance(part.get("text"), str)
+    )
+
+
+def _codex_turn_id(raw_entries: list[dict | None], start: int) -> str | None:
+    for entry in reversed(raw_entries[: start + 1]):
+        if not isinstance(entry, dict) or entry.get("type") != "turn_context":
+            continue
+        payload = entry.get("payload")
+        turn_id = payload.get("turn_id") if isinstance(payload, dict) else None
+        if isinstance(turn_id, str) and turn_id:
+            return turn_id
+    return None
+
+
+def _codex_git_branch(raw_entries: list[dict | None], start: int) -> str | None:
+    for entry in reversed(raw_entries[: start + 1]):
+        if not isinstance(entry, dict) or entry.get("type") != "session_meta":
+            continue
+        payload = entry.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        git = payload.get("git")
+        branch = git.get("branch") if isinstance(git, dict) else None
+        if isinstance(branch, str) and branch.strip():
+            return branch
+    return None
+
+
 def index_file(
     jsonl_path: Path,
     db_path: Path,
     min_chars: int = 50,
     project_root: Path | None = None,
+    harness: str = "claude",
 ) -> int:
     """
     .jsonl ファイルを DB に登録する。
     既存 conversation の場合は last_ply_end 以降の新規 exchange のみ追加する。
     project_root を渡すと、あわせて code_touches（design §4.1）を同じコミットで記録する。
     None の場合は code_touches の記録をスキップする（project_root が無いと相対パス化できないため）。
+    harness はログ形式と編集記録の抽出器を選ぶ。現在は claude と codex に対応する。
     Returns: 新規登録した exchange 数
     """
     from codeatrium.db import get_connection
+
+    if harness == "claude":
+        parse = parse_exchanges
+        touch_adapter = claude_adapter
+    elif harness == "codex":
+        parse = parse_codex_exchanges
+        touch_adapter = codex_adapter
+    else:
+        raise ValueError(f"Unsupported harness: {harness}")
 
     conversation_id = sha256(str(jsonl_path))
     con = get_connection(db_path)
@@ -317,8 +454,11 @@ def index_file(
     last_ply_end = row["last_ply_end"] if row is not None else -1
 
     raw_entries = _load_raw_entries(jsonl_path, last_ply_end)
-    exchanges = parse_exchanges(
-        jsonl_path, min_chars=min_chars, last_ply_end=last_ply_end, raw_entries=raw_entries
+    exchanges = parse(
+        jsonl_path,
+        min_chars=min_chars,
+        last_ply_end=last_ply_end,
+        raw_entries=raw_entries,
     )
     new_exchanges = [ex for ex in exchanges if ex.ply_start > last_ply_end]
 
@@ -380,12 +520,33 @@ def index_file(
 
         for ex in new_exchanges:
             exchange_slice = raw_entries[ex.ply_start : ex.ply_end + 1]
-            for touch in claude_adapter.extract_code_touches(exchange_slice):
+            if harness == "codex":
+                for old_path, new_path, timestamp in codex_adapter.extract_file_renames(
+                    exchange_slice
+                ):
+                    old_rel_path = normalize_repo_path(old_path, str(project_root))
+                    new_rel_path = normalize_repo_path(new_path, str(project_root))
+                    if old_rel_path is None or new_rel_path is None:
+                        continue
+                    con.execute(
+                        """
+                        INSERT INTO file_renames (old_path, new_path, source, ts)
+                        VALUES (?, ?, 'harness', ?)
+                        ON CONFLICT(old_path, new_path) DO UPDATE SET
+                            source = excluded.source,
+                            ts = excluded.ts
+                        """,
+                        (old_rel_path, new_rel_path, timestamp),
+                    )
+
+            for touch in touch_adapter.extract_code_touches(exchange_slice):
                 rel_path = normalize_repo_path(touch.file_path, str(project_root))
                 if rel_path is None:
                     continue
 
-                for touch_row in build_code_touch_rows(touch, exchange_id=ex.id, rel_file_path=rel_path):
+                for touch_row in build_code_touch_rows(
+                    touch, exchange_id=ex.id, rel_file_path=rel_path
+                ):
                     con.execute(
                         """
                         INSERT OR IGNORE INTO code_touches

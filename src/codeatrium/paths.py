@@ -75,6 +75,14 @@ def resolve_claude_projects_path(project_root: Path) -> Path | None:
     return None
 
 
+def resolve_codex_sessions_path() -> Path | None:
+    """Codex rollout JSONL を格納する既定セッションディレクトリを返す。"""
+    path = Path.home() / ".codex" / "sessions"
+    if path.exists() and any(path.rglob("rollout-*.jsonl")):
+        return path
+    return None
+
+
 def sock_path(project_root: Path) -> Path:
     return db_path(project_root).parent / "embedder.sock"
 
