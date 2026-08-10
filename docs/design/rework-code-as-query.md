@@ -2,7 +2,7 @@
 
 作成日: 2026-08-07
 対象: codeatrium (`loci`)
-ステータス: 設計（実装未着手）
+ステータス: 実装中（ステップ0〜7完了。ステップ8はCodexのインデックス統合完了、OpenCode以降が残る）
 
 ---
 
@@ -1057,6 +1057,10 @@ Claude Code のみの対応だが、コードから会話を引く機能は**完
 7. 段階B・Cの移行
 8. **他ハーネスのアダプター**（下記の順）
 9. 古い `symbols` への依存を外す（**ここで初めて正が1つになる**）
+
+**実装状況（2026-08-10）**: Codex は `loci index --harness codex` で rollout JSONL を
+exchange・`code_touches`・`code_edges` に取り込み、`move_path` を `file_renames` に記録する。
+OpenCode は編集位置の抽出器まで実装済みで、session DB のインデックス統合は未着手。
 
 #### ハーネス対応の順番（ステップ8の中身）
 
