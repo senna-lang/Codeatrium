@@ -36,15 +36,15 @@ FILE_CONFIDENCE = 0.5
 # 外部パス（サイトパッケージ・依存ディレクトリ）の判定用マーカー。
 # indexer.py の tool_use file 抽出と同じ基準を共有する。
 EXTERNAL_PATH_MARKERS = (
-    'site-packages/',
-    'dist-packages/',
-    '/lib/python',
-    '/opt/',
-    '/usr/lib/',
-    '/usr/local/lib/',
-    '.venv/',
-    '/venv/',
-    'node_modules/',
+    "site-packages/",
+    "dist-packages/",
+    "/lib/python",
+    "/opt/",
+    "/usr/lib/",
+    "/usr/local/lib/",
+    ".venv/",
+    "/venv/",
+    "node_modules/",
 )
 
 
@@ -57,19 +57,20 @@ def normalize_repo_path(file_path: str, project_root: str) -> str | None:
     """絶対パスをプロジェクトルートからの相対パスへ正規化する（design §5.3）。
 
     プロジェクト外・外部ライブラリ・相対パス入力は None を返す（不変条件3）。
-    文字列の前方一致では隣接リポジトリ（例: repo と repo-other）を誤って内部と
-    判定してしまうため、パス部品ごとに比較する（不具合G）。
+    ログと実行時のプロジェクトルートが別の symlink 経路を使っていても、
+    実体のパスで比較する。文字列の前方一致では隣接リポジトリ（例: repo と
+    repo-other）を誤って内部と判定してしまうため、パス部品ごとに比較する。
     """
     if not file_path.startswith("/"):
         return None
 
-    file_parts = PurePosixPath(os.path.normpath(file_path)).parts
-    root_parts = PurePosixPath(os.path.normpath(project_root)).parts
+    file_parts = PurePosixPath(os.path.realpath(file_path)).parts
+    root_parts = PurePosixPath(os.path.realpath(project_root)).parts
 
     if file_parts[: len(root_parts)] != root_parts:
         return None
 
-    rel_parts = file_parts[len(root_parts):]
+    rel_parts = file_parts[len(root_parts) :]
     if not rel_parts:
         return None
 
@@ -92,7 +93,9 @@ def build_code_touch_rows(
     line_ranges = [loc for loc in touch.locators if isinstance(loc, LineRange)]
     anchor = next((loc for loc in touch.locators if isinstance(loc, TextAnchor)), None)
 
-    def _row(seq: int, locator_kind: str, line_range: LineRange | None) -> dict[str, Any]:
+    def _row(
+        seq: int, locator_kind: str, line_range: LineRange | None
+    ) -> dict[str, Any]:
         row_id = sha256(f"{exchange_id}:{touch.tool_call_id}:{rel_file_path}:{seq}")
         return {
             "id": row_id,
@@ -193,7 +196,9 @@ def _leading_whitespace_len(line: str) -> int:
     return len(line) - len(line.lstrip(" \t"))
 
 
-def _find_enclosing_declaration(lines: list[str], start_idx: int, lang: str) -> str | None:
+def _find_enclosing_declaration(
+    lines: list[str], start_idx: int, lang: str
+) -> str | None:
     """start_idx（0-indexed）から手前へ、インデントに基づき最も内側の定義行を探す。
 
     単純に「手前で最初に見つかった def/class」を返すと、対象行が実はその定義の
@@ -260,7 +265,9 @@ def resolve_symbol_name(
     # 現在の名前（+側）を残したいため。次に文脈行、最後に削除行（-）の順で探す。
     added = [ln for ln in patch_body if ln.startswith("+")]
     removed = [ln for ln in patch_body if ln.startswith("-")]
-    context = [ln for ln in patch_body if not ln.startswith("+") and not ln.startswith("-")]
+    context = [
+        ln for ln in patch_body if not ln.startswith("+") and not ln.startswith("-")
+    ]
     for bucket in (added, context, removed):
         for line in bucket:
             name = _match_symbol_line(line, lang)

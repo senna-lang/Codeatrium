@@ -1,5 +1,7 @@
 """normalize_repo_path / build_code_touch_rows のテスト（design §5.3・§8.1 不変条件3）"""
 
+from pathlib import Path
+
 from codeatrium.code_touches import (
     build_code_touch_rows,
     intersect_span,
@@ -13,9 +15,7 @@ from codeatrium.utils import sha256
 
 
 def test_normalize_repo_path_inside_project_returns_relative() -> None:
-    result = normalize_repo_path(
-        "/Users/x/repo/src/codeatrium/db.py", "/Users/x/repo"
-    )
+    result = normalize_repo_path("/Users/x/repo/src/codeatrium/db.py", "/Users/x/repo")
     assert result == "src/codeatrium/db.py"
 
 
@@ -26,9 +26,7 @@ def test_normalize_repo_path_outside_project_returns_none() -> None:
 
 def test_normalize_repo_path_neighboring_repo_with_shared_prefix_returns_none() -> None:
     """不具合G: 文字列の前方一致だけで判定すると隣のリポジトリを誤って内部と判定してしまう"""
-    result = normalize_repo_path(
-        "/Users/x/repo-other/foo.py", "/Users/x/repo"
-    )
+    result = normalize_repo_path("/Users/x/repo-other/foo.py", "/Users/x/repo")
     assert result is None
 
 
@@ -43,16 +41,29 @@ def test_normalize_repo_path_relative_input_returns_none() -> None:
 
 
 def test_normalize_repo_path_trailing_slash_on_root_is_tolerated() -> None:
-    result = normalize_repo_path(
-        "/Users/x/repo/src/db.py", "/Users/x/repo/"
-    )
+    result = normalize_repo_path("/Users/x/repo/src/db.py", "/Users/x/repo/")
     assert result == "src/db.py"
 
 
-def test_normalize_repo_path_dotdot_escaping_root_returns_none() -> None:
+def test_normalize_repo_path_resolves_equivalent_symlink_paths(tmp_path: Path) -> None:
+    """ログの symlink 経由パスも、実体側 project root の配下として扱う。"""
+    project_root = tmp_path / "project"
+    source_file = project_root / "src" / "module.py"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_text("value = 1\n")
+    linked_root = tmp_path / "project-link"
+    linked_root.symlink_to(project_root, target_is_directory=True)
+
     result = normalize_repo_path(
-        "/Users/x/repo/../secrets/foo.py", "/Users/x/repo"
+        str(linked_root / "src" / "module.py"),
+        str(project_root),
     )
+
+    assert result == "src/module.py"
+
+
+def test_normalize_repo_path_dotdot_escaping_root_returns_none() -> None:
+    result = normalize_repo_path("/Users/x/repo/../secrets/foo.py", "/Users/x/repo")
     assert result is None
 
 
@@ -331,7 +342,9 @@ def test_touches_to_edges_no_symbols_falls_back_to_file_granularity() -> None:
     assert edge.confidence == 0.5
 
 
-def test_touches_to_edges_touch_between_symbols_falls_back_to_file_granularity() -> None:
+def test_touches_to_edges_touch_between_symbols_falls_back_to_file_granularity() -> (
+    None
+):
     touch = _touch(LineRange(old_start=10, old_lines=1, new_start=10, new_lines=1))
     symbols = [_symbol("a", line=1, end_line=5), _symbol("b", line=20, end_line=25)]
 
@@ -355,7 +368,9 @@ def test_touches_to_edges_anchor_only_touch_produces_file_edge() -> None:
         ts=None,
     )
 
-    edges = touches_to_edges(touch, "ex1", "src/foo.py", [_symbol("a", line=1, end_line=5)])
+    edges = touches_to_edges(
+        touch, "ex1", "src/foo.py", [_symbol("a", line=1, end_line=5)]
+    )
 
     assert len(edges) == 1
     assert edges[0].granularity == "file"
