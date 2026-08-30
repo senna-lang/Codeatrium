@@ -7,18 +7,19 @@ from typing import Annotated
 
 import typer
 
-_HARNESS_CHOICES = {"claude", "codex", "opencode"}
+_HARNESS_CHOICES = {"claude", "codex", "opencode", "omp-pi"}
 
 
 def index(
     path: Annotated[
         Path | None,
         typer.Option(
-            help="インデックス対象パス（claude/codex はディレクトリ、opencode は DB ファイル）"
+            help="インデックス対象パス（claude/codex/omp-pi はディレクトリ、opencode は DB ファイル）"
         ),
     ] = None,
     harness: Annotated[
-        str, typer.Option("--harness", help="ログ形式（claude / codex / opencode）")
+        str,
+        typer.Option("--harness", help="ログ形式（claude / codex / opencode / omp-pi）"),
     ] = "claude",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
@@ -31,6 +32,7 @@ def index(
         find_project_root,
         resolve_claude_projects_path,
         resolve_codex_sessions_path,
+        resolve_omp_pi_sessions_path,
         resolve_opencode_db_path,
     )
 
@@ -77,6 +79,8 @@ def index(
         target_dir = path
     elif harness == "claude":
         target_dir = resolve_claude_projects_path(root)
+    elif harness == "omp-pi":
+        target_dir = resolve_omp_pi_sessions_path(root)
     else:
         target_dir = resolve_codex_sessions_path()
     if target_dir is None:

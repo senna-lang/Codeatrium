@@ -46,12 +46,40 @@ role は `user` / `assistant` に加えて **`toolResult` が独立したロー�
 
 編集は `content` 内の `{type: "toolCall", name: "edit", arguments: {i, input}}`。
 `input` は独自形式のパッチ本文で `[path#hash]` ヘッダの後に `SWAP n.=m:` / `INS.HEAD:` / `MV a -> b`
-などのコマンドが続く（実測で6種類確認、design §3.3 参照）。**v1 では解読せず、`input` 全体を
-`TextAnchor.new_string` としてそのまま使う**（omp は `anchor` capability 扱い）。
+などのコマンドが続く（実測 SWAP 655 / INS 212 / PUT 134 / DEL 51 / CUT 2 / MV 2、design §3.3 参照）。
+**v1 では解読せず、`input` 全体を `TextAnchor.new_string` としてそのまま使う**
+（omp は `anchor` capability 扱い）。
 `write` は `arguments` に `input` ではなく `path` / `content` を持つ点に注意。
 
-含む行: user → assistant(`edit`, SWAP 1件) → toolResult → assistant(`write`) → toolResult →
-assistant(`edit`, INS.HEAD+SWAP+MV の複合パッチ) → toolResult。
+**2026-08-30 にアダプター実装のため実ログ99本を再調査し、当初の記載に無かった形を追加した**
+（この5点はいずれも取りこぼし・誤ひも付けに直結する）:
+
+1. **パスの正は toolCall ではなく toolResult 側**。toolCall のヘッダは入れ子の作業ディレクトリ
+   基準に切り詰められることがあり（実測1014件中95件が不一致。すべて basename は一致し
+   プレフィックスだけが欠ける。例: 呼び出し `config.py` → 実際 `src/codeatrium/config.py`）、
+   そのまま cwd と結合すると実在しないパスへひも付ける。`toolCallId` で対応する toolResult 本文の
+   `[path#hash]` ヘッダを優先すること。
+2. **パスの大半は相対**（edit ヘッダ 323/343・write の `path` 475/568）。絶対化には
+   `{type: "session", cwd}` エントリが要る（実測で常に2行目、`version: 3`）。
+3. **`*** Begin Patch` 前置き**が実測263件。その場合ヘッダは常に次行にある（263/263）。
+4. **1回の toolCall が複数ファイルを含む**（実測で最大6ヘッダ）。toolResult 側もヘッダ数が
+   一致するので順番に対応付けられる。
+5. **ファイルではない書き込み先**がある。`write` の `path` が `xd://mcp__serena_...` 形式の
+   URI（実測326件）。また toolResult に JSON 配列がそのまま出力され、`[{...}]` の1行が
+   素朴なヘッダ正規表現に誤マッチする。
+
+`edit` の `arguments` は4形（`{i,input}` 327 / `{input}` 263 / `{input,path}` 28 /
+`{edits,i,path}` 4）。`edits` は `{old_text, new_text}` の配列で TextAnchor へ直接写せる。
+`partialArgs` / `streamIndex` を持つ toolCall（114件）は中断ではなく完了済みで、
+`arguments` も完全（全件に toolResult が存在することを確認済み）。
+
+含む行: title → session(cwd) → user → assistant(`edit`, ヘッダ切り詰め) → toolResult(解決済みパス) →
+assistant(`write`, 相対 path + partialArgs) → toolResult →
+assistant(`edit`, `*** Begin Patch` + 複数ファイル) → toolResult →
+assistant(`edit`, `edits` 配列) → toolResult → **user（2ターン目）** →
+assistant(`edit`, MV) → toolResult → assistant(`write`, `xd://` 異常系) → toolResult →
+assistant(`edit`, ヘッダも path も無い異常系) → toolResult → assistant(text) →
+developer → custom。
 
 ## grok.jsonl
 

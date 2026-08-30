@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from codeatrium.adapters.harness import claude as claude_adapter
 from codeatrium.adapters.harness import codex as codex_adapter
+from codeatrium.adapters.harness import omp_pi as omp_pi_adapter
 from codeatrium.adapters.harness import opencode as opencode_adapter
 from codeatrium.code_touches import (
     build_code_touch_rows,
@@ -421,6 +422,142 @@ def _codex_git_branch(raw_entries: list[dict | None], start: int) -> str | None:
     return None
 
 
+def parse_omp_pi_exchanges(
+    jsonl_path: Path,
+    min_chars: int = 50,
+    last_ply_end: int = -1,
+    raw_entries: list[dict | None] | None = None,
+) -> list[Exchange]:
+    """omp-pi のセッション JSONL をユーザー発話単位の exchange に分割する。
+
+    envelope は `{type, id, parentId, timestamp, message}`。role は user / assistant に加えて
+    toolResult / developer があり、message 以外の type（custom が実測 6553件）も混ざるため、
+    exchange 境界は `type=="message"` かつ `role=="user"` に限定する。
+    """
+    if raw_entries is None:
+        if not jsonl_path.exists():
+            return []
+        raw_entries = _load_raw_entries(jsonl_path, last_ply_end)
+
+    conversation_id = sha256(str(jsonl_path))
+    boundaries = [
+        index
+        for index, entry in enumerate(raw_entries)
+        if _is_omp_pi_message(entry, "user")
+    ]
+
+    exchanges: list[Exchange] = []
+    for boundary_index, start in enumerate(boundaries):
+        end = (
+            boundaries[boundary_index + 1] - 1
+            if boundary_index + 1 < len(boundaries)
+            else len(raw_entries) - 1
+        )
+        user_entry = raw_entries[start]
+        if user_entry is None:
+            continue
+
+        user_text = _omp_pi_text(user_entry)
+        agent_text = "\n".join(
+            text
+            for entry in raw_entries[start + 1 : end + 1]
+            if isinstance(entry, dict)
+            and _is_omp_pi_message(entry, "assistant")
+            and (text := _omp_pi_text(entry))
+        )
+        if len(user_text + agent_text) < min_chars:
+            continue
+
+        touch_slice = raw_entries[start : end + 1]
+        touches = omp_pi_adapter.extract_code_touches(touch_slice)
+        files = list(dict.fromkeys(touch.file_path for touch in touches))
+        exchanges.append(
+            Exchange(
+                id=sha256(f"{conversation_id}:{user_entry.get('id', start)}"),
+                conversation_id=conversation_id,
+                ply_start=start,
+                ply_end=end,
+                user_content=user_text,
+                agent_content=agent_text,
+                files=files,
+                git_branch=None,
+            )
+        )
+
+    return exchanges
+
+
+def _is_omp_pi_message(entry: dict | None, role: str) -> bool:
+    if not isinstance(entry, dict) or entry.get("type") != "message":
+        return False
+    message = entry.get("message")
+    return isinstance(message, dict) and message.get("role") == role
+
+
+def _omp_pi_text(entry: dict) -> str:
+    """message.content の text ブロックだけを連結する（thinking / toolCall は含めない）。"""
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        block["text"]
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+
+
+def _annotate_omp_pi_cwd(jsonl_path: Path, raw_entries: list[dict | None]) -> None:
+    """session エントリの cwd を各 entry に載せる（相対パスの絶対化に必要）。
+
+    omp-pi の編集記録はパスの大半が相対（edit 323/343・write 475/568）で、
+    絶対化しないと不変条件3で全部落ちる。cwd を持つ session エントリはファイル先頭付近
+    （実測では常に2行目）にあり、増分インデックス時には None プレースホルダに
+    置き換えられて raw_entries から消えるため、その場合はファイルを直接読み直す。
+    """
+    cwd = None
+    for entry in raw_entries:
+        if isinstance(entry, dict) and entry.get("type") == "session":
+            candidate = entry.get("cwd")
+            if isinstance(candidate, str) and candidate:
+                cwd = candidate
+                break
+    if cwd is None:
+        cwd = _read_omp_pi_session_cwd(jsonl_path)
+    if cwd is None:
+        return
+
+    for entry in raw_entries:
+        if isinstance(entry, dict):
+            entry["cwd"] = cwd
+
+
+def _read_omp_pi_session_cwd(jsonl_path: Path, max_lines: int = 20) -> str | None:
+    """ファイル先頭から session エントリの cwd を読む（増分インデックス時の退避経路）。"""
+    if not jsonl_path.exists():
+        return None
+    with jsonl_path.open(encoding="utf-8") as f:
+        for index, line in enumerate(f):
+            if index >= max_lines:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict) and entry.get("type") == "session":
+                cwd = entry.get("cwd")
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    return None
+
+
 def parse_opencode_exchanges(
     source_path: str,
     raw_entries: list[dict | None],
@@ -632,7 +769,6 @@ def index_opencode_db(
                     conversation_exists=row is not None,
                     new_exchanges=new_exchanges,
                     raw_entries=raw_entries,
-                    harness="opencode",
                     touch_adapter=opencode_adapter,
                     project_root=project_root,
                 )
@@ -656,7 +792,7 @@ def index_file(
     既存 conversation の場合は last_ply_end 以降の新規 exchange のみ追加する。
     project_root を渡すと、あわせて code_touches（design §4.1）を同じコミットで記録する。
     None の場合は code_touches の記録をスキップする（project_root が無いと相対パス化できないため）。
-    harness はログ形式と編集記録の抽出器を選ぶ。現在は claude と codex に対応する。
+    harness はログ形式と編集記録の抽出器を選ぶ。現在は claude / codex / omp-pi に対応する。
     Returns: 新規登録した exchange 数
     """
     from codeatrium.db import get_connection
@@ -667,6 +803,9 @@ def index_file(
     elif harness == "codex":
         parse = parse_codex_exchanges
         touch_adapter = codex_adapter
+    elif harness == "omp-pi":
+        parse = parse_omp_pi_exchanges
+        touch_adapter = omp_pi_adapter
     else:
         raise ValueError(f"Unsupported harness: {harness}")
 
@@ -680,6 +819,9 @@ def index_file(
     last_ply_end = row["last_ply_end"] if row is not None else -1
 
     raw_entries = _load_raw_entries(jsonl_path, last_ply_end)
+    if harness == "omp-pi":
+        # 編集記録の抽出より前に cwd を載せる（相対パスの絶対化に必要）
+        _annotate_omp_pi_cwd(jsonl_path, raw_entries)
     exchanges = parse(
         jsonl_path,
         min_chars=min_chars,
@@ -701,7 +843,6 @@ def index_file(
         conversation_exists=row is not None,
         new_exchanges=new_exchanges,
         raw_entries=raw_entries,
-        harness=harness,
         touch_adapter=touch_adapter,
         project_root=project_root,
     )
@@ -718,7 +859,6 @@ def _persist_exchanges(
     conversation_exists: bool,
     new_exchanges: list[Exchange],
     raw_entries: list[dict | None],
-    harness: str,
     touch_adapter: Any,
     project_root: Path | None,
 ) -> int:
@@ -780,12 +920,14 @@ def _persist_exchanges(
         symbol_cache: dict[str, list[Symbol]] = {}
         resolved_at = datetime.now(UTC).isoformat()
 
+        # 改名の記録（§8.2 段1）はハーネスが extract_file_renames を持つ場合だけ行う。
+        # harness 名で分岐すると対応ハーネスが増えるたびに条件が伸びるため、能力で見る。
+        extract_renames = getattr(touch_adapter, "extract_file_renames", None)
+
         for ex in new_exchanges:
             exchange_slice = raw_entries[ex.ply_start : ex.ply_end + 1]
-            if harness == "codex":
-                for old_path, new_path, timestamp in codex_adapter.extract_file_renames(
-                    exchange_slice
-                ):
+            if extract_renames is not None:
+                for old_path, new_path, timestamp in extract_renames(exchange_slice):
                     old_rel_path = normalize_repo_path(old_path, str(project_root))
                     new_rel_path = normalize_repo_path(new_path, str(project_root))
                     if old_rel_path is None or new_rel_path is None:

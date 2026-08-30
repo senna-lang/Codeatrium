@@ -89,6 +89,28 @@ def resolve_opencode_db_path() -> Path | None:
     return path if path.exists() else None
 
 
+def resolve_omp_pi_sessions_path(project_root: Path) -> Path | None:
+    """project_root に対応する ~/.omp/agent/sessions/<slug>/ を解決する。
+
+    omp-pi は Claude Code と同様にプロジェクトパスからディレクトリ名を作るが、
+    ホームディレクトリからの相対パスを "-" でつないだ形になる
+    （/Users/x/Documents/Repos/foo → -Documents-Repos-foo）。
+    """
+    sessions_dir = Path.home() / ".omp" / "agent" / "sessions"
+    if not sessions_dir.exists():
+        return None
+
+    for base in (project_root, Path.cwd()):
+        try:
+            relative = base.relative_to(Path.home())
+        except ValueError:
+            continue
+        candidate = sessions_dir / ("-" + "-".join(relative.parts))
+        if candidate.exists() and any(candidate.glob("*.jsonl")):
+            return candidate
+    return None
+
+
 def sock_path(project_root: Path) -> Path:
     return db_path(project_root).parent / "embedder.sock"
 

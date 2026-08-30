@@ -169,3 +169,39 @@ def test_index_ingests_opencode_session_db(tmp_path: Path, monkeypatch) -> None:
     )
     assert con.execute("SELECT COUNT(*) FROM code_edges").fetchone()[0] >= 2
     con.close()
+
+
+def test_index_ingests_omp_pi_session(tmp_path: Path, monkeypatch) -> None:
+    """--harness omp-pi は相対パスのパッチを cwd で絶対化して取り込む。"""
+    monkeypatch.chdir(tmp_path)
+    init_db(tmp_path / ".codeatrium" / "memory.db")
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    (source_dir / "fs.py").write_text("def list_dir(path):\n    return path\n")
+    (source_dir / "result.py").write_text("class Result:\n    pass\n")
+
+    fixture = Path(__file__).parent / "fixtures" / "harness_logs" / "omp_pi.jsonl"
+    sessions_dir = tmp_path / "sessions"
+    sessions_dir.mkdir()
+    session = sessions_dir / "2026-08-01T00-00-00-000Z_synthetic.jsonl"
+    session.write_text(
+        fixture.read_text()
+        .replace('"/repo', f'"{tmp_path}')
+        .replace("list_dir を Result 型にして", "list_dir を Result 型にして。" * 4)
+    )
+
+    result = runner.invoke(
+        app,
+        ["index", "--harness", "omp-pi", "--path", str(sessions_dir)],
+    )
+
+    assert result.exit_code == 0
+    con = get_connection(tmp_path / ".codeatrium" / "memory.db")
+    touched = {
+        row[0]
+        for row in con.execute(
+            "SELECT DISTINCT file_path FROM code_touches WHERE harness = 'omp-pi'"
+        )
+    }
+    con.close()
+    assert {"src/fs.py", "src/result.py"} <= touched

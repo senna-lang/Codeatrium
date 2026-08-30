@@ -2,7 +2,7 @@
 
 作成日: 2026-08-07
 対象: codeatrium (`loci`)
-ステータス: 実装中（ステップ0〜7完了。ステップ8はCodex・OpenCodeのインデックス統合完了、omp-pi・grokが残る）
+ステータス: 実装中（ステップ0〜7完了。ステップ8はCodex・OpenCode・omp-piのインデックス統合完了、grokが残る）
 
 ---
 
@@ -1063,7 +1063,17 @@ exchange・`code_touches`・`code_edges` に取り込み、`move_path` を `file
 OpenCode は `loci index --harness opencode` で session SQLite DB
 （`~/.local/share/opencode/opencode.db`）から `project.worktree` が一致するセッションだけを
 読み取り専用で取り込む（message/part を `time_created, id` 順に統合した座標系で claude/codex と
-同じ ply 契約に合わせる）。残るは omp-pi（独自パーサー）・grok（`TextAnchor` 経路）。
+同じ ply 契約に合わせる）。
+
+omp-pi は `loci index --harness omp-pi` で `~/.omp/agent/sessions/<slug>/*.jsonl` を取り込む。
+DSL は宣言どおり解読せず `anchor` 止まりだが、**パスの解決だけは toolResult 側を正とする**
+——toolCall のヘッダは入れ子ディレクトリ基準に切り詰められることがあり（実測1014件中95件）、
+`session.cwd` と結合すると実在しないパスへひも付けてしまうため。`MV 旧 -> 新` は行番号を
+含まず誤解読の危険が無いので §8.2 段1 の改名記録として拾う。
+実ログ実測: edit/write toolCall の 99.0%（1178/1190）が編集記録になり、
+残り12件はヘッダも `path` も持たず場所を特定できないもの（推測しない＝§3.3 の方針どおり）。
+
+残るは grok（`TextAnchor` 経路の唯一の利用者）。
 
 #### ハーネス対応の順番（ステップ8の中身）
 
