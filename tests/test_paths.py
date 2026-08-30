@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from codeatrium.paths import find_project_root
 
 
@@ -111,3 +113,34 @@ def test_find_project_root_non_git_does_not_walk_parent(
     # cwd を返す（親の .codeatrium/ は拾わない）
     assert root == sub
     assert captured.err == ""
+
+
+def test_resolve_grok_sessions_path_percent_encodes_project_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """grok は cwd の絶対パスを percent-encode（`/` も `%2F`）したディレクトリ名を使う。"""
+    from urllib.parse import quote
+
+    from codeatrium.paths import resolve_grok_sessions_path
+
+    home = tmp_path / "home"
+    project_root = tmp_path / "work" / "myrepo"
+    session_dir = home / ".grok" / "sessions" / quote(str(project_root), safe="")
+    (session_dir / "019f-abcd").mkdir(parents=True)
+    (session_dir / "019f-abcd" / "updates.jsonl").write_text("{}\n")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    assert resolve_grok_sessions_path(project_root) == session_dir
+
+
+def test_resolve_grok_sessions_path_returns_none_for_unknown_project(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """セッションが無いプロジェクトでは None を返す（誤って別プロジェクトを拾わない）。"""
+    from codeatrium.paths import resolve_grok_sessions_path
+
+    home = tmp_path / "home"
+    (home / ".grok" / "sessions").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    assert resolve_grok_sessions_path(tmp_path / "work" / "other") is None

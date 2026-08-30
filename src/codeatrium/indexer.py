@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from codeatrium.adapters.harness import claude as claude_adapter
 from codeatrium.adapters.harness import codex as codex_adapter
+from codeatrium.adapters.harness import grok as grok_adapter
 from codeatrium.adapters.harness import omp_pi as omp_pi_adapter
 from codeatrium.adapters.harness import opencode as opencode_adapter
 from codeatrium.code_touches import (
@@ -422,6 +423,83 @@ def _codex_git_branch(raw_entries: list[dict | None], start: int) -> str | None:
     return None
 
 
+def parse_grok_exchanges(
+    jsonl_path: Path,
+    min_chars: int = 50,
+    last_ply_end: int = -1,
+    raw_entries: list[dict | None] | None = None,
+) -> list[Exchange]:
+    """grok の ACP セッション JSONL をユーザー発話単位の exchange に分割する。
+
+    envelope は `{timestamp, method, params: {sessionId, update}}`。会話は
+    `user_message_chunk` / `agent_message_chunk` で届く（実測ではどちらも1エントリに
+    1メッセージが収まり、連続分割はされない）。`agent_thought_chunk` は思考なので
+    agent_content に含めない。`hook_execution` など他の sessionUpdate は無視する。
+    """
+    if raw_entries is None:
+        if not jsonl_path.exists():
+            return []
+        raw_entries = _load_raw_entries(jsonl_path, last_ply_end)
+
+    conversation_id = sha256(str(jsonl_path))
+    boundaries = [
+        index
+        for index, entry in enumerate(raw_entries)
+        if _grok_chunk_text(entry, "user_message_chunk") is not None
+    ]
+
+    exchanges: list[Exchange] = []
+    for boundary_index, start in enumerate(boundaries):
+        end = (
+            boundaries[boundary_index + 1] - 1
+            if boundary_index + 1 < len(boundaries)
+            else len(raw_entries) - 1
+        )
+        user_text = _grok_chunk_text(raw_entries[start], "user_message_chunk") or ""
+        agent_text = "\n".join(
+            text
+            for entry in raw_entries[start + 1 : end + 1]
+            if (text := _grok_chunk_text(entry, "agent_message_chunk")) is not None
+        )
+        if len(user_text + agent_text) < min_chars:
+            continue
+
+        touch_slice = raw_entries[start : end + 1]
+        touches = grok_adapter.extract_code_touches(touch_slice)
+        files = list(dict.fromkeys(touch.file_path for touch in touches))
+        exchanges.append(
+            Exchange(
+                id=sha256(f"{conversation_id}:{start}"),
+                conversation_id=conversation_id,
+                ply_start=start,
+                ply_end=end,
+                user_content=user_text,
+                agent_content=agent_text,
+                files=files,
+                git_branch=None,
+            )
+        )
+
+    return exchanges
+
+
+def _grok_chunk_text(entry: dict | None, session_update: str) -> str | None:
+    """指定 sessionUpdate のチャンク本文を返す。該当しなければ None。"""
+    if not isinstance(entry, dict):
+        return None
+    params = entry.get("params")
+    if not isinstance(params, dict):
+        return None
+    update = params.get("update")
+    if not isinstance(update, dict) or update.get("sessionUpdate") != session_update:
+        return None
+    content = update.get("content")
+    if not isinstance(content, dict) or content.get("type") != "text":
+        return None
+    text = content.get("text")
+    return text if isinstance(text, str) else None
+
+
 def parse_omp_pi_exchanges(
     jsonl_path: Path,
     min_chars: int = 50,
@@ -792,7 +870,8 @@ def index_file(
     既存 conversation の場合は last_ply_end 以降の新規 exchange のみ追加する。
     project_root を渡すと、あわせて code_touches（design §4.1）を同じコミットで記録する。
     None の場合は code_touches の記録をスキップする（project_root が無いと相対パス化できないため）。
-    harness はログ形式と編集記録の抽出器を選ぶ。現在は claude / codex / omp-pi に対応する。
+    harness はログ形式と編集記録の抽出器を選ぶ。claude / codex / omp-pi / grok に対応する
+    （opencode は SQLite なので index_opencode_db が別経路になる）。
     Returns: 新規登録した exchange 数
     """
     from codeatrium.db import get_connection
@@ -806,6 +885,9 @@ def index_file(
     elif harness == "omp-pi":
         parse = parse_omp_pi_exchanges
         touch_adapter = omp_pi_adapter
+    elif harness == "grok":
+        parse = parse_grok_exchanges
+        touch_adapter = grok_adapter
     else:
         raise ValueError(f"Unsupported harness: {harness}")
 

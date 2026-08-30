@@ -7,19 +7,24 @@ from typing import Annotated
 
 import typer
 
-_HARNESS_CHOICES = {"claude", "codex", "opencode", "omp-pi"}
+_HARNESS_CHOICES = {"claude", "codex", "opencode", "omp-pi", "grok"}
+
+# ハーネスごとのログファイル名パターン。同じディレクトリに別形式のファイルが
+# 同居することがあるため（grok の prompt_history.jsonl / events.jsonl）、
+# 素朴な "*.jsonl" では拾いすぎる。
+_LOG_PATTERNS = {"codex": "rollout-*.jsonl", "grok": "updates.jsonl"}
 
 
 def index(
     path: Annotated[
         Path | None,
         typer.Option(
-            help="インデックス対象パス（claude/codex/omp-pi はディレクトリ、opencode は DB ファイル）"
+            help="インデックス対象パス（opencode は DB ファイル、それ以外はディレクトリ）"
         ),
     ] = None,
     harness: Annotated[
         str,
-        typer.Option("--harness", help="ログ形式（claude / codex / opencode / omp-pi）"),
+        typer.Option("--harness", help="ログ形式（claude / codex / opencode / omp-pi / grok）"),
     ] = "claude",
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
@@ -32,6 +37,7 @@ def index(
         find_project_root,
         resolve_claude_projects_path,
         resolve_codex_sessions_path,
+        resolve_grok_sessions_path,
         resolve_omp_pi_sessions_path,
         resolve_opencode_db_path,
     )
@@ -81,6 +87,8 @@ def index(
         target_dir = resolve_claude_projects_path(root)
     elif harness == "omp-pi":
         target_dir = resolve_omp_pi_sessions_path(root)
+    elif harness == "grok":
+        target_dir = resolve_grok_sessions_path(root)
     else:
         target_dir = resolve_codex_sessions_path()
     if target_dir is None:
@@ -90,8 +98,7 @@ def index(
         )
         raise typer.Exit(1)
 
-    pattern = "rollout-*.jsonl" if harness == "codex" else "*.jsonl"
-    jsonl_files = list(target_dir.rglob(pattern))
+    jsonl_files = list(target_dir.rglob(_LOG_PATTERNS.get(harness, "*.jsonl")))
     if not jsonl_files:
         typer.echo("No session files found.")
         return

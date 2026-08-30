@@ -94,9 +94,31 @@ developer → custom。
 （`rawInput` 側）と `oldText`/`newText`（`diff` content 側）の**2種類が両方存在する**。
 どちらも文字列マッチ用の `TextAnchor` に変換できる。
 
-含む行: `search_replace` の tool_call→tool_call_update（正常系）、`write` の同様のペア、
-`search_replace` が `old_string not found` で失敗する異常系（`tool_call_update.status == "failed"`,
-`content: []`）。
+**2026-08-30 にアダプター実装のため実ログ39本を再調査して追記**:
+
+1. **1つの `toolCallId` に更新が複数回届く**。`in_progress` と `completed` で同じ diff ブロックが
+   2回来るのが 600件中595件。エントリを素朴に列挙すると編集記録が**二重になる**。
+   `toolCallId` ごとに1件へ畳み込むこと。
+2. **パスの正は `rawInput` ではなく diff ブロック**。`rawInput.file_path` は相対のことがあり
+   （実測60/600）、diff 側は常に絶対パス。これを使えば cwd を引く必要がない。
+3. ツールの識別は `name` ではなく **`title`**（`write` 320 / `search_replace` 280）。
+4. **編集に行番号は無い**。`locations` は `read_file` など別ツールにしか付かず、
+   `write`/`search_replace` には1件も無い（`anchor` capability の裏付け）。
+5. `timestamp` は **整数 epoch 秒**（実測819/819）。他ハーネスの ISO 文字列に揃える必要がある。
+6. method は `session/update` と **`_x.ai/session/update`** の2系統。`hook_execution` が3651件
+   混ざるので `sessionUpdate` で判定する（`method` では絞らない）。
+7. 会話は `user_message_chunk` / `agent_message_chunk` で届くが、実測ではどちらも
+   連続分割されない（連続run長は全て1）。`agent_thought_chunk` は思考なので本文に含めない。
+
+**実ログの置き場所**: `~/.grok/sessions/<cwd を percent-encode したディレクトリ>/<session-uuid>/updates.jsonl`
+（`/` も `%2F` になる）。同じ階層に別形式の `prompt_history.jsonl` / `events.jsonl` が同居するため、
+`*.jsonl` で拾うと誤って読み込む。
+
+含む行: user_message_chunk → agent_thought_chunk → hook_execution（ノイズ） →
+`search_replace` の tool_call（絶対パス）→ tool_call_update ×2（diff 重複）→
+`write` の tool_call（**相対 rawInput**）→ tool_call_update（絶対 diff パス、`oldText: ""`）→
+`search_replace` の失敗（`status: "failed"`）→ `read_file`（編集以外）→
+agent_message_chunk → turn_completed。
 
 ## opencode.json
 

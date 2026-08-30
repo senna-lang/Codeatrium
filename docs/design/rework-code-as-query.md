@@ -2,7 +2,7 @@
 
 作成日: 2026-08-07
 対象: codeatrium (`loci`)
-ステータス: 実装中（ステップ0〜7完了。ステップ8はCodex・OpenCode・omp-piのインデックス統合完了、grokが残る）
+ステータス: 実装中（ステップ0〜7完了。ステップ8は5ハーネス全て完了。残るはステップ9と anchor→行の配線）
 
 ---
 
@@ -1073,7 +1073,20 @@ DSL は宣言どおり解読せず `anchor` 止まりだが、**パスの解決�
 実ログ実測: edit/write toolCall の 99.0%（1178/1190）が編集記録になり、
 残り12件はヘッダも `path` も持たず場所を特定できないもの（推測しない＝§3.3 の方針どおり）。
 
-残るは grok（`TextAnchor` 経路の唯一の利用者）。
+grok は `loci index --harness grok` で
+`~/.grok/sessions/<cwd を percent-encode>/<session-uuid>/updates.jsonl` を取り込む。
+編集に行番号は無く（`locations` は read_file 等にしか付かない）、宣言どおり `anchor`。
+**パスの正は `rawInput` ではなく diff ブロック**（`rawInput.file_path` は実測600件中60件が相対、
+diff 側は常に絶対）。1つの `toolCallId` に更新が複数回届き diff が2回来るため（595/600）、
+`toolCallId` 単位に畳み込まないと編集記録が二重になる。
+実ログ実測: 600件の edit/write のうち失敗5件を除く **595件すべてが編集記録になり、取りこぼし0**。
+
+**ステップ8はこれで完了**（5ハーネス全て）。ただし `anchor` 宣言の omp-pi・grok は
+`intersect_span` が空を返すため全 edge がファイル粒度に留まっており、U1（関数で引く）には
+まだ届いていない。§3.3 が grok に求める「文字列が一意に見つかったときだけひも付ける」経路は
+未配線で、これは独立した変更として行う（§5.3 の `resolve_line_range` は old_string を
+編集前の内容と照合する Claude 向けの形で、記録時にディスクにあるのは編集**後**の内容なので
+そのままでは使えない。new_string と現在の内容を照合する別関数が要る）。
 
 #### ハーネス対応の順番（ステップ8の中身）
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CODEATRIUM_DIR = ".codeatrium"
@@ -107,6 +108,24 @@ def resolve_omp_pi_sessions_path(project_root: Path) -> Path | None:
             continue
         candidate = sessions_dir / ("-" + "-".join(relative.parts))
         if candidate.exists() and any(candidate.glob("*.jsonl")):
+            return candidate
+    return None
+
+
+def resolve_grok_sessions_path(project_root: Path) -> Path | None:
+    """project_root に対応する ~/.grok/sessions/<percent-encoded-path>/ を解決する。
+
+    grok は作業ディレクトリの絶対パスをそのまま percent-encode した
+    （`/` も `%2F` に変換する）ディレクトリ名を使う。実体のログはさらにその下の
+    `<session-uuid>/updates.jsonl` にあるため、存在確認は再帰で行う。
+    """
+    sessions_dir = Path.home() / ".grok" / "sessions"
+    if not sessions_dir.exists():
+        return None
+
+    for base in (project_root, Path.cwd()):
+        candidate = sessions_dir / quote(str(base), safe="")
+        if candidate.exists() and any(candidate.rglob("updates.jsonl")):
             return candidate
     return None
 
