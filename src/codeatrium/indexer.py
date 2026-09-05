@@ -30,15 +30,12 @@ from codeatrium.adapters.harness import grok as grok_adapter
 from codeatrium.adapters.harness import omp_pi as omp_pi_adapter
 from codeatrium.adapters.harness import opencode as opencode_adapter
 from codeatrium.code_touches import (
-    build_code_touch_rows,
     is_external_path,
-    normalize_repo_path,
-    touches_to_edges,
 )
 from codeatrium.utils import sha256
 
 if TYPE_CHECKING:
-    from codeatrium.resolver import Symbol
+    pass
 
 
 @dataclass
@@ -839,16 +836,76 @@ def index_opencode_db(
                 if not new_exchanges:
                     continue
 
-                total += _persist_exchanges(
+                from codeatrium.core.ingest import ingest_parse_result
+                from codeatrium.core.models import (
+                    CanonicalExchange,
+                    CanonicalSession,
+                    ExchangeArtifacts,
+                    FileRename,
+                    ParseResult,
+                )
+
+                artifacts = []
+                extract_renames = getattr(
+                    opencode_adapter, "extract_file_renames", None
+                )
+                for exchange in new_exchanges:
+                    entry_slice = raw_entries[
+                        exchange.ply_start : exchange.ply_end + 1
+                    ]
+                    renames = (
+                        tuple(
+                            FileRename(old_path, new_path, ts)
+                            for old_path, new_path, ts in extract_renames(
+                                entry_slice
+                            )
+                        )
+                        if extract_renames is not None
+                        else ()
+                    )
+                    touches = tuple(
+                        opencode_adapter.extract_code_touches(entry_slice)
+                    )
+                    if touches or renames:
+                        artifacts.append(
+                            ExchangeArtifacts(
+                                source_turn_id=str(exchange.ply_start),
+                                code_touches=touches,
+                                file_renames=renames,
+                            )
+                        )
+                result = ParseResult(
+                    exchanges=tuple(
+                        CanonicalExchange(
+                            harness="opencode",
+                            session_ref=(
+                                f"{source_path}#ply="
+                                f"{exchange.ply_start}-{exchange.ply_end}"
+                            ),
+                            source_session_id=session_id,
+                            source_turn_id=str(exchange.ply_start),
+                            ply_start=exchange.ply_start,
+                            ply_end=exchange.ply_end,
+                            user_content=exchange.user_content,
+                            agent_content=exchange.agent_content,
+                            files_touched=tuple(exchange.files),
+                            git_branch=exchange.git_branch,
+                        )
+                        for exchange in new_exchanges
+                    ),
+                    next_cursor=f"v1:ply:{new_exchanges[-1].ply_end}",
+                    artifacts=tuple(artifacts),
+                )
+                total += ingest_parse_result(
                     con,
-                    conversation_id=conversation_id,
-                    source_path=source_path,
-                    started_at=started_at,
-                    conversation_exists=row is not None,
-                    new_exchanges=new_exchanges,
-                    raw_entries=raw_entries,
-                    touch_adapter=opencode_adapter,
-                    project_root=project_root,
+                    CanonicalSession(
+                        harness="opencode",
+                        source_session_id=session_id,
+                        primary_ref=source_path,
+                        project_key=str(project_root),
+                        started_at=started_at,
+                    ),
+                    result,
                 )
             con.commit()
         finally:
@@ -916,196 +973,68 @@ def index_file(
         con.close()
         return 0
 
-    started_at = datetime.fromtimestamp(jsonl_path.stat().st_mtime, tz=UTC).isoformat()
-    count = _persist_exchanges(
-        con,
-        conversation_id=conversation_id,
-        source_path=str(jsonl_path),
-        started_at=started_at,
-        conversation_exists=row is not None,
-        new_exchanges=new_exchanges,
-        raw_entries=raw_entries,
-        touch_adapter=touch_adapter,
-        project_root=project_root,
+    from codeatrium.core.ingest import ingest_parse_result
+    from codeatrium.core.models import (
+        CanonicalExchange,
+        CanonicalSession,
+        ExchangeArtifacts,
+        FileRename,
+        ParseResult,
     )
+
+    source_session_id = str(jsonl_path.resolve())
+    session = CanonicalSession(
+        harness=harness,
+        source_session_id=source_session_id,
+        primary_ref=str(jsonl_path),
+        project_key=str(project_root) if project_root is not None else "",
+        started_at=datetime.fromtimestamp(
+            jsonl_path.stat().st_mtime, tz=UTC
+        ).isoformat(),
+    )
+    artifacts = []
+    extract_renames = getattr(touch_adapter, "extract_file_renames", None)
+    for exchange in new_exchanges:
+        entry_slice = raw_entries[exchange.ply_start : exchange.ply_end + 1]
+        renames = (
+            tuple(
+                FileRename(old_path, new_path, ts)
+                for old_path, new_path, ts in extract_renames(entry_slice)
+            )
+            if extract_renames is not None
+            else ()
+        )
+        touches = tuple(touch_adapter.extract_code_touches(entry_slice))
+        if touches or renames:
+            artifacts.append(
+                ExchangeArtifacts(
+                    source_turn_id=str(exchange.ply_start),
+                    code_touches=touches,
+                    file_renames=renames,
+                )
+            )
+    result = ParseResult(
+        exchanges=tuple(
+            CanonicalExchange(
+                harness=harness,
+                session_ref=f"{jsonl_path}#ply={exchange.ply_start}-{exchange.ply_end}",
+                source_session_id=source_session_id,
+                source_turn_id=str(exchange.ply_start),
+                ply_start=exchange.ply_start,
+                ply_end=exchange.ply_end,
+                user_content=exchange.user_content,
+                agent_content=exchange.agent_content,
+                files_touched=tuple(exchange.files),
+                git_branch=exchange.git_branch,
+            )
+            for exchange in new_exchanges
+        ),
+        next_cursor=f"v1:ply:{new_exchanges[-1].ply_end}",
+        artifacts=tuple(artifacts),
+    )
+    count = ingest_parse_result(con, session, result)
     con.commit()
     con.close()
     return count
 
 
-def _persist_exchanges(
-    con: Any,
-    conversation_id: str,
-    source_path: str,
-    started_at: str,
-    conversation_exists: bool,
-    new_exchanges: list[Exchange],
-    raw_entries: list[dict | None],
-    touch_adapter: Any,
-    project_root: Path | None,
-) -> int:
-    """exchange と code_touches/code_symbols/code_edges を1コミットで書き込む共通処理。
-
-    JSONL 系（Claude/Codex）と SQLite 系（OpenCode）のどちらのローダーからも
-    同じ座標系（ply インデックスで raw_entries を切り出す）で呼べる。
-    呼び出し側はコミット/クローズの責務を持つ（複数 conversation をまとめて
-    1 コミットにできるように、ここではコミットしない）。
-    """
-    # conversations に登録 or 更新
-    if not conversation_exists:
-        con.execute(
-            "INSERT INTO conversations (id, source_path, started_at, last_ply_end) "
-            "VALUES (?, ?, ?, ?)",
-            (conversation_id, source_path, started_at, new_exchanges[-1].ply_end),
-        )
-    else:
-        con.execute(
-            "UPDATE conversations SET last_ply_end = ? WHERE id = ?",
-            (new_exchanges[-1].ply_end, conversation_id),
-        )
-
-    for ex in new_exchanges:
-        con.execute(
-            """
-            INSERT OR IGNORE INTO exchanges
-                (id, conversation_id, ply_start, ply_end, user_content, agent_content, git_branch)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                ex.id,
-                ex.conversation_id,
-                ex.ply_start,
-                ex.ply_end,
-                ex.user_content,
-                ex.agent_content,
-                ex.git_branch,
-            ),
-        )
-
-    # exchange_files を登録
-    for ex in new_exchanges:
-        for file_path in ex.files:
-            con.execute(
-                "INSERT OR IGNORE INTO exchange_files (exchange_id, file_path) VALUES (?, ?)",
-                (ex.id, file_path),
-            )
-
-    # code_touches / code_symbols / code_edges を登録
-    # （design §5.3: 解析 → まとめて INSERT → 既存コミットにまとめる。
-    #  §8.1 の不変条件（編集したファイルは100%）は蒸留を待たずに満たす必要があるため、
-    #  ここ index 時点で code_edges まで作り切る — distill 待ちにすると、蒸留の
-    #  batch_limit/distill_min_chars でスキップされた touch が永久に0件のままになる）
-    if project_root is not None:
-        from codeatrium.resolver import SymbolResolver
-
-        resolver = SymbolResolver()
-        symbol_cache: dict[str, list[Symbol]] = {}
-        resolved_at = datetime.now(UTC).isoformat()
-
-        # 改名の記録（§8.2 段1）はハーネスが extract_file_renames を持つ場合だけ行う。
-        # harness 名で分岐すると対応ハーネスが増えるたびに条件が伸びるため、能力で見る。
-        extract_renames = getattr(touch_adapter, "extract_file_renames", None)
-
-        for ex in new_exchanges:
-            exchange_slice = raw_entries[ex.ply_start : ex.ply_end + 1]
-            if extract_renames is not None:
-                for old_path, new_path, timestamp in extract_renames(exchange_slice):
-                    old_rel_path = normalize_repo_path(old_path, str(project_root))
-                    new_rel_path = normalize_repo_path(new_path, str(project_root))
-                    if old_rel_path is None or new_rel_path is None:
-                        continue
-                    con.execute(
-                        """
-                        INSERT INTO file_renames (old_path, new_path, source, ts)
-                        VALUES (?, ?, 'harness', ?)
-                        ON CONFLICT(old_path, new_path) DO UPDATE SET
-                            source = excluded.source,
-                            ts = excluded.ts
-                        """,
-                        (old_rel_path, new_rel_path, timestamp),
-                    )
-
-            for touch in touch_adapter.extract_code_touches(exchange_slice):
-                rel_path = normalize_repo_path(touch.file_path, str(project_root))
-                if rel_path is None:
-                    continue
-
-                for touch_row in build_code_touch_rows(
-                    touch, exchange_id=ex.id, rel_file_path=rel_path
-                ):
-                    con.execute(
-                        """
-                        INSERT OR IGNORE INTO code_touches
-                            (id, exchange_id, harness, tool_call_id, file_path, touch_kind,
-                             locator_kind, old_start, old_lines, new_start, new_lines,
-                             old_string, new_string, added, removed, ts)
-                        VALUES (:id, :exchange_id, :harness, :tool_call_id, :file_path, :touch_kind,
-                                :locator_kind, :old_start, :old_lines, :new_start, :new_lines,
-                                :old_string, :new_string, :added, :removed, :ts)
-                        """,
-                        touch_row,
-                    )
-
-                if rel_path not in symbol_cache:
-                    symbol_cache[rel_path] = resolver.extract(Path(touch.file_path))
-                symbols = symbol_cache[rel_path]
-
-                for sym in symbols:
-                    symbol_id = sha256(f"{rel_path}:{sym.symbol_name}")
-                    # REPLACE は id が変わらないシンボルの line/end_line/signature を
-                    # 最新の解析結果へ更新するために使う（code_symbols が「唯一の正しい
-                    # 定義元」であるため、§4.1）。SQLite の REPLACE は delete→insert だが、
-                    # code_edges.symbol_id に FK は無いので安全。将来 FK を張るなら、
-                    # ON DELETE CASCADE と組み合わせないこと（このREPLACEでedgeが消える）
-                    con.execute(
-                        """
-                        INSERT OR REPLACE INTO code_symbols
-                            (id, file_path, symbol_name, symbol_kind, signature,
-                             line, end_line, lang, resolved_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            symbol_id,
-                            rel_path,
-                            sym.symbol_name,
-                            sym.symbol_kind,
-                            sym.signature,
-                            sym.line,
-                            sym.end_line,
-                            sym.lang,
-                            resolved_at,
-                        ),
-                    )
-
-                edges = touches_to_edges(
-                    touch, exchange_id=ex.id, rel_file_path=rel_path, symbols=symbols
-                )
-                for edge in edges:
-                    # id は (exchange_id, file_path, symbol_id, edge_kind) から決まるため、
-                    # 同じ exchange 内で同じシンボルを別の touch（別 tool_call）が触ると
-                    # 衝突する。INSERT OR IGNORE だと後から来た touch の added が
-                    # 静かに失われる（§6.3 の log1p(added) が過小評価になる）ので、
-                    # 衝突時は加算する。code_touches は last_ply_end で重複処理されない
-                    # ため、この加算が再インデックスで二重計上されることもない。
-                    con.execute(
-                        """
-                        INSERT INTO code_edges
-                            (id, exchange_id, file_path, symbol_id, edge_kind,
-                             granularity, confidence, added, ts)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET added = added + excluded.added
-                        """,
-                        (
-                            edge.id,
-                            edge.exchange_id,
-                            edge.file_path,
-                            edge.symbol_id,
-                            edge.edge_kind,
-                            edge.granularity,
-                            edge.confidence,
-                            edge.added,
-                            edge.ts,
-                        ),
-                    )
-
-    return len(new_exchanges)

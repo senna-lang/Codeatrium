@@ -140,6 +140,61 @@ def test_index_ingests_codex_rollout(tmp_path: Path, monkeypatch) -> None:
     assert con.execute("SELECT COUNT(*) FROM file_renames").fetchone()[0] == 1
     con.close()
 
+def test_index_codex_excludes_foreign_project_rollout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    init_db(tmp_path / ".codeatrium" / "memory.db")
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        "[index]\nmin_chars = 1\n"
+    )
+    fixtures = Path(__file__).parent / "fixtures" / "harness_logs" / "codex.jsonl"
+    rollout_dir = tmp_path / "sessions"
+    rollout_dir.mkdir()
+    (rollout_dir / "rollout-local.jsonl").write_text(
+        fixtures.read_text().replace("/repo", str(tmp_path))
+    )
+    (rollout_dir / "rollout-foreign.jsonl").write_text(
+        fixtures.read_text().replace("/repo", str(tmp_path.parent / "foreign"))
+    )
+    con = get_connection(tmp_path / ".codeatrium" / "memory.db")
+    con.execute(
+        "INSERT INTO conversations (id, source_path) VALUES (?, ?)",
+        ("foreign-conversation", str(rollout_dir / "rollout-foreign.jsonl")),
+    )
+    con.execute(
+        """
+        INSERT INTO exchanges
+            (id, conversation_id, ply_start, ply_end, user_content, agent_content,
+             harness, session_ref)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "foreign-codex",
+            "foreign-conversation",
+            0,
+            1,
+            "foreign user",
+            "foreign agent",
+            "codex",
+            f"{rollout_dir / 'rollout-foreign.jsonl'}#ply=0-1",
+        ),
+    )
+    con.commit()
+    con.close()
+
+    result = runner.invoke(
+        app, ["index", "--harness", "codex", "--path", str(rollout_dir)]
+    )
+
+    assert result.exit_code == 0
+    assert "Indexed 1 file(s)" in result.output
+    con = get_connection(tmp_path / ".codeatrium" / "memory.db")
+    assert con.execute(
+        "SELECT 1 FROM exchanges WHERE id = 'foreign-codex'"
+    ).fetchone() is None
+    con.close()
+
 
 def test_index_ingests_opencode_session_db(tmp_path: Path, monkeypatch) -> None:
     """--harness opencode は project_root にひも付くセッションだけを取り込む。"""

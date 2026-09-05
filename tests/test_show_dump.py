@@ -69,19 +69,12 @@ def _insert_palace(con, palace_id, exchange_id, core, distilled_at):
 # ---- loci show ----
 
 
-def test_show_invalid_ref(tmp_path, monkeypatch):
+def test_show_unknown_exchange_id_fails(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    db, con = _setup(tmp_path)
+    _db, con = _setup(tmp_path)
     con.close()
-    result = runner.invoke(app, ["show", "badformat"])
+    result = runner.invoke(app, ["show", "missing-exchange"])
     assert result.exit_code != 0
-
-
-def test_show_not_found(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    db, con = _setup(tmp_path)
-    con.close()
-    result = runner.invoke(app, ["show", "/some/path.jsonl:ply=0"])
     assert "not found" in result.output.lower()
 
 
@@ -92,7 +85,7 @@ def test_show_returns_content(tmp_path, monkeypatch):
     _insert_exchange(con, "ex1", "conv1", source, ply_start=5)
     con.close()
 
-    result = runner.invoke(app, ["show", f"{source}:ply=5"])
+    result = runner.invoke(app, ["show", "ex1"])
     assert result.exit_code == 0
     assert LONG in result.output
 
@@ -104,9 +97,10 @@ def test_show_json_output(tmp_path, monkeypatch):
     _insert_exchange(con, "ex1", "conv1", source, ply_start=0)
     con.close()
 
-    result = runner.invoke(app, ["show", f"{source}:ply=0", "--json"])
+    result = runner.invoke(app, ["show", "ex1", "--json"])
     assert result.exit_code == 0
     data = json.loads(result.output)
+    assert data["exchange_id"] == "ex1"
     assert "user_content" in data
     assert "agent_content" in data
     assert "ply_start" in data

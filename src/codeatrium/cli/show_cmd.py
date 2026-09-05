@@ -9,22 +9,12 @@ import typer
 
 
 def show(
-    ref: Annotated[str, typer.Argument(help="verbatim_ref (path:ply=N)")],
+    exchange_id: Annotated[str, typer.Argument(help="exchange id from search/context")],
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
-    """verbatim_ref から exchange の原文を取得する"""
+    """exchange id から保存済みの原文を取得する。"""
     from codeatrium.db import get_connection
     from codeatrium.paths import db_path, find_project_root
-
-    if ":ply=" not in ref:
-        typer.echo("Invalid ref format. Expected: <path>:ply=<N>", err=True)
-        raise typer.Exit(1)
-    path_part, ply_part = ref.rsplit(":ply=", 1)
-    try:
-        ply = int(ply_part)
-    except ValueError:
-        typer.echo(f"Invalid ply value: {ply_part}", err=True)
-        raise typer.Exit(1)
 
     root = find_project_root()
     db = db_path(root)
@@ -35,27 +25,30 @@ def show(
     con = get_connection(db)
     row = con.execute(
         """
-        SELECT e.user_content, e.agent_content, e.ply_start, e.ply_end
-        FROM exchanges e
-        JOIN conversations c ON c.id = e.conversation_id
-        WHERE c.source_path = ? AND e.ply_start = ?
+        SELECT id, user_content, agent_content, ply_start, ply_end,
+               harness, session_ref
+        FROM exchanges
+        WHERE id = ?
         """,
-        (path_part, ply),
+        (exchange_id,),
     ).fetchone()
     con.close()
 
     if row is None:
-        typer.echo("Exchange not found.")
-        return
+        typer.echo(f"Exchange not found: {exchange_id}", err=True)
+        raise typer.Exit(1)
 
     if json_output:
         typer.echo(
             json.dumps(
                 {
+                    "exchange_id": row["id"],
                     "user_content": row["user_content"],
                     "agent_content": row["agent_content"],
                     "ply_start": row["ply_start"],
                     "ply_end": row["ply_end"],
+                    "harness": row["harness"],
+                    "session_ref": row["session_ref"],
                 },
                 ensure_ascii=False,
                 indent=2,
