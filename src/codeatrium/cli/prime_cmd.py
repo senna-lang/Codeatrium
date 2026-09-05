@@ -79,12 +79,13 @@ loci show "<verbatim_ref>" --json
 ```\
 """
 
-CLAUDE_MD_SECTION = f"""\
+AGENTS_MD_SECTION = f"""\
 {BEGIN_MARKER}
 ## Past Memory Search (codeatrium)
 
-IMPORTANT: Full usage instructions are injected automatically at session start via `loci prime` (SessionStart hook).
-If not in context, run `loci prime`.
+IMPORTANT: Before changing code, retrieve relevant project memory with
+`loci context <file>:<symbol> --json`. Run `loci prime` when the full
+instructions are not already in context.
 {END_MARKER}\
 """
 
@@ -92,9 +93,8 @@ If not in context, run `loci prime`.
 def prime() -> None:
     """エージェント向けインストラクションを stdout に出力する。
 
-    SessionStart Hook で自動実行され、エージェントのコンテキストウィンドウに
-    使い方を注入する。CLAUDE.md にテンプレートを貼る必要がなくなる。
-
+    SessionStart integration sends these instructions to the agent context.
+    AGENTS.md provides the harness-independent durable reminder.
     未初期化プロジェクト（.codeatrium/ なし）では hook を無音で抜ける。
     エージェントのコンテキストや stderr を汚さないため。
     """
@@ -106,28 +106,22 @@ def prime() -> None:
     typer.echo(PRIME_TEXT)
 
 
-def inject_claude_md(project_root: Path) -> bool:
-    """CLAUDE.md にマーカー付きセクションを挿入・更新する。
+def inject_agents_md(project_root: Path) -> bool:
+    """Insert or update the codeatrium section in the common AGENTS.md."""
+    agents_md = project_root / "AGENTS.md"
 
-    Returns: True if file was modified.
-    """
-    claude_md = project_root / "CLAUDE.md"
-
-    if claude_md.exists():
-        content = claude_md.read_text()
+    if agents_md.exists():
+        content = agents_md.read_text()
         if BEGIN_MARKER in content:
-            # マーカー内を更新
             before = content[: content.index(BEGIN_MARKER)]
             after = content[content.index(END_MARKER) + len(END_MARKER) :]
-            new_content = before + CLAUDE_MD_SECTION + after
+            new_content = before + AGENTS_MD_SECTION + after
             if new_content == content:
                 return False
-            claude_md.write_text(new_content)
+            agents_md.write_text(new_content)
             return True
-        else:
-            # 末尾に追加
-            claude_md.write_text(content.rstrip() + "\n\n" + CLAUDE_MD_SECTION + "\n")
-            return True
-    else:
-        claude_md.write_text("# CLAUDE.md\n\n" + CLAUDE_MD_SECTION + "\n")
+        agents_md.write_text(content.rstrip() + "\n\n" + AGENTS_MD_SECTION + "\n")
         return True
+
+    agents_md.write_text("# AGENTS.md\n\n" + AGENTS_MD_SECTION + "\n")
+    return True

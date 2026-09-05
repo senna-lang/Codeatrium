@@ -16,7 +16,7 @@ Primary user is **the agent itself**, not a human. The main entry point is `loci
 
 ```bash
 loci init                                    # Initialize .codeatrium/ in project root
-loci index                                   # Index new .jsonl files
+loci index [--harness all|claude|codex|opencode|omp-pi|grok]  # Index detected harness logs
 loci distill [--limit N]                     # Distill queued exchanges via claude --print
 loci context <file>:<symbol> --json          # U1: recall from a function/component (primary)
 loci context <file> --json                   # U2: recall from a file
@@ -25,8 +25,10 @@ loci context --symbol "Foo.bar" --json       # Legacy form (no file scope, may c
 loci context --branch NAME --json            # Branch reverse lookup (undistilled exchanges included)
 loci search "query" --json --limit 5         # Semantic search (secondary, word-based)
 loci search "query" --branch NAME --json     # Branch-filtered semantic search
-loci show "~/.claude/.../abc.jsonl:ply=42"   # Fetch verbatim exchange
+loci show "<exchange-id>" --json                 # Fetch a stored exchange by ID
 loci status                                  # Show index state
 loci server start / stop / status            # Embedding server management
-loci hook install                            # Register hooks to ~/.claude/settings.json
+loci hook install [--harness NAME]                # Install Claude hooks or print fallback
+loci eval gen --dataset symbol-recall             # Build the symbol-recall eval dataset from this repo's own corpus
+loci eval run --dataset symbol-recall --adapter symbol --json  # Recall@k/MRR@10 for the code→conversation lookup (completeness, no baseline)
 ```

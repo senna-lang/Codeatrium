@@ -151,26 +151,27 @@ def test_init_prints_banner(tmp_path, monkeypatch):
     assert "memory palace for AI coding agents" in result.output
 
 
-def test_init_creates_claude_md_section(tmp_path, monkeypatch):
+def test_init_creates_agents_md_section(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
     result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 0
-    claude_md = tmp_path / "CLAUDE.md"
-    assert claude_md.exists()
-    content = claude_md.read_text()
+    agents_md = tmp_path / "AGENTS.md"
+    assert agents_md.exists()
+    content = agents_md.read_text()
     assert "<!-- BEGIN CODEATRIUM -->" in content
     assert "<!-- END CODEATRIUM -->" in content
     assert "loci prime" in content
+    assert not (tmp_path / "CLAUDE.md").exists()
 
 
-def test_init_appends_to_existing_claude_md(tmp_path, monkeypatch):
+def test_init_appends_to_existing_agents_md(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
-    claude_md = tmp_path / "CLAUDE.md"
-    claude_md.write_text("# My Project\n\nExisting content.\n")
+    agents_md = tmp_path / "AGENTS.md"
+    agents_md.write_text("# My Project\n\nExisting content.\n")
     runner.invoke(app, ["init", "--no-local-distiller"])
-    content = claude_md.read_text()
+    content = agents_md.read_text()
     assert content.startswith("# My Project")
     assert "<!-- BEGIN CODEATRIUM -->" in content
 
@@ -178,14 +179,14 @@ def test_init_appends_to_existing_claude_md(tmp_path, monkeypatch):
 def test_init_updates_existing_codeatrium_section(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
-    claude_md = tmp_path / "CLAUDE.md"
-    claude_md.write_text(
+    agents_md = tmp_path / "AGENTS.md"
+    agents_md.write_text(
         "# Proj\n\n"
         "<!-- BEGIN CODEATRIUM -->\nold content\n<!-- END CODEATRIUM -->\n\n"
         "## Other\n"
     )
     runner.invoke(app, ["init", "--no-local-distiller"])
-    content = claude_md.read_text()
+    content = agents_md.read_text()
     assert "old content" not in content
     assert "loci prime" in content
     assert "## Other" in content
@@ -501,7 +502,7 @@ def test_init_cleanup_on_execution_failure(tmp_path, monkeypatch):
     def _boom(_root):
         raise RuntimeError("simulated failure")
 
-    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_claude_md", _boom)
+    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_agents_md", _boom)
 
     result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 1
@@ -525,7 +526,7 @@ def test_init_preserves_preexisting_dir_on_failure(tmp_path, monkeypatch):
     def _boom(_root):
         raise RuntimeError("simulated failure")
 
-    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_claude_md", _boom)
+    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_agents_md", _boom)
 
     result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 1
@@ -543,7 +544,7 @@ def test_init_cleanup_on_keyboard_interrupt(tmp_path, monkeypatch):
     def _interrupt(_root):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_claude_md", _interrupt)
+    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_agents_md", _interrupt)
 
     result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 130

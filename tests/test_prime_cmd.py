@@ -1,4 +1,4 @@
-"""tests for prime_cmd — PRIME_TEXT contract + inject_claude_md idempotency"""
+"""Tests for PRIME_TEXT and AGENTS.md instruction injection."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from codeatrium.cli.prime_cmd import (
     BEGIN_MARKER,
     END_MARKER,
     PRIME_TEXT,
-    inject_claude_md,
+    inject_agents_md,
 )
 
 # ---- PRIME_TEXT contract ----
@@ -99,32 +99,28 @@ def test_prime_text_ide_selection_has_search_fallback():
     assert "return no results" in text_lower
 
 
-# ---- inject_claude_md idempotency ----
+# ---- inject_agents_md idempotency ----
 
 
-def test_inject_claude_md_creates_file_when_absent(tmp_path: Path):
-    """inject_claude_md creates CLAUDE.md when it does not exist"""
-    result = inject_claude_md(tmp_path)
+def test_inject_agents_md_creates_file_when_absent(tmp_path: Path):
+    """The common injector creates AGENTS.md when it is absent."""
+    result = inject_agents_md(tmp_path)
     assert result is True
-    claude_md = tmp_path / "CLAUDE.md"
-    assert claude_md.exists()
-    content = claude_md.read_text()
+    agents_md = tmp_path / "AGENTS.md"
+    assert agents_md.exists()
+    content = agents_md.read_text()
     assert BEGIN_MARKER in content
     assert END_MARKER in content
 
 
-def test_inject_claude_md_idempotent_on_second_call(tmp_path: Path):
-    """inject_claude_md returns False on second call when content is already up-to-date"""
-    inject_claude_md(tmp_path)
-    result2 = inject_claude_md(tmp_path)
-    assert result2 is False
+def test_inject_agents_md_idempotent_on_second_call(tmp_path: Path):
+    inject_agents_md(tmp_path)
+    assert inject_agents_md(tmp_path) is False
 
 
-def test_inject_claude_md_second_call_does_not_modify_content(tmp_path: Path):
-    """inject_claude_md leaves file content unchanged on second call"""
-    inject_claude_md(tmp_path)
-    claude_md = tmp_path / "CLAUDE.md"
-    content_after_first = claude_md.read_text()
-    inject_claude_md(tmp_path)
-    content_after_second = claude_md.read_text()
-    assert content_after_first == content_after_second
+def test_inject_agents_md_preserves_content_on_second_call(tmp_path: Path):
+    inject_agents_md(tmp_path)
+    agents_md = tmp_path / "AGENTS.md"
+    content_after_first = agents_md.read_text()
+    inject_agents_md(tmp_path)
+    assert agents_md.read_text() == content_after_first

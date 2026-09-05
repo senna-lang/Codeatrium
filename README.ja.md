@@ -18,7 +18,7 @@ AI コーディングエージェントは、自分がやってきたことを 2
 
 CLI コマンド `loci` は**エージェント自身が呼び出す**ことを想定しています — `loci search "..." --json` をプロンプト内から実行します。*(名前は記憶術 [Method of Loci＝記憶の宮殿](https://ja.wikipedia.org/wiki/%E5%A0%B4%E6%89%80%E6%B3%95) に由来します。内部では会話を「palace object」に蒸留します（[仕組み](#仕組み)を参照）。アーキテクチャは [arXiv:2603.13017](https://arxiv.org/abs/2603.13017) の会話記憶モデルをコーディングエージェント向けに拡張したものです。)*
 
-> **Note:** 現在は [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 専用です — インデックスは Claude Code のセッションログ（`.jsonl`）を読み込みます。蒸留は既定で `claude --print`（Haiku）ですが、ローカルの OpenAI 互換 LLM でも実行できます（[設定](#設定)を参照）。
+> **対応 harness:** Claude Code、Codex CLI、Oh My Pi、OpenCode、Grok のセッションログを、同一の exchange・code touch・symbol・search・context・`show` 契約で扱います。蒸留は harness から独立しており、`claude --print` またはローカルの OpenAI 互換 LLM を選べます。
 
 ## ミニマルなインターフェース
 
@@ -29,7 +29,7 @@ CLI コマンド `loci` は**エージェント自身が呼び出す**ことを�
   - tree-sitter のシンボル解決（Python / TypeScript / Go）により、エージェントは編集前に実装意図を把握できる
   - `--branch "名前"` は特定の git ブランチで何をしたか・議論したかを想起（`loci search "クエリ" --branch "名前"` でも可）
 
-これは意図的な設計です。ここでの利用者はエージェント自身であり、50 個のツールを渡されたエージェントは迷い、選び間違え、どれを呼ぶか決めるだけでトークンを消費します。表面がこれだけ小さく — かつ MCP のツール定義がコンテキストウィンドウに常駐しない — ので、エージェントは毎回・最初から正しい呼び出しに手を伸ばします。*(会話原文が必要なときは `loci show "<ref>"` で任意の結果を原文に展開できます。)*
+これは意図的な設計です。ここでの利用者はエージェント自身であり、50 個のツールを渡されたエージェントは迷い、選び間違え、どれを呼ぶか決めるだけでトークンを消費します。表面がこれだけ小さく — かつ MCP のツール定義がコンテキストウィンドウに常駐しない — ので、エージェントは毎回・最初から正しい呼び出しに手を伸ばします。*(会話原文が必要なときは `loci show "<exchange-id>"` で検索結果の原文を取り出せます。)*
 
 シンボルに触れることは、それについて決めたことを想起すること — `loci context` は正確なコード位置・シグネチャと、その背後にある会話を逆引きします:
 
@@ -60,11 +60,11 @@ Python 3.11 以上が必要です。
 ## クイックスタート
 
 ```bash
-# プロジェクトルートで初期化（Claude Code フックも自動登録）
+# プロジェクトルートで初期化。共有エージェント指示を AGENTS.md に追加します。
 loci init
 ```
 
-`loci init` は DB 初期化・既存セッション検出・Claude Code フック登録をすべて一度に済ませます。`--no-hooks` を付けるとフック登録をスキップします。途中で失敗した場合は `.codeatrium/` が自動で掃除されるので、再実行して問題ありません。
+`loci init` は project-local DB を作成し、共通の `AGENTS.md` 指示を追加します。Claude Code フックは `--no-hooks` を指定しない限り登録します。Codex の native hook は `loci hook install --harness codex` で明示的に登録します。native hook 非対応 harness では完全な fallback recipe を表示します。
 
 `loci init` を実行すると、過去のセッションログが検出された場合に以下の質問が表示されます:
 
@@ -83,42 +83,36 @@ loci init
 
 ## エージェント向けインストラクション
 
-エージェントへのインストラクションは自動挿入されるので手動で書く必要はありません:
-
-- **`loci init`** — `CLAUDE.md` にマーカー付きセクション（`<!-- BEGIN CODEATRIUM -->...<!-- END CODEATRIUM -->`）を挿入。
-- **`loci prime`** — SessionStart Hook で毎セッション開始時にコマンドの使い方をコンテキストウィンドウに動的注入
+`loci init` は全 harness 共通の正本である **`AGENTS.md`** に、マーカー付きセクション（`<!-- BEGIN CODEATRIUM -->...<!-- END CODEATRIUM -->`）を挿入します。`loci prime` は native lifecycle があるセッションへ詳細なコマンド利用法を注入します。
 
 ## CLI コマンド
 
 | コマンド | 説明 |
 |---------|------|
-| `loci init` | `.codeatrium/` を初期化し Claude Code フックを登録（`--no-hooks` で省略可） |
-| `loci index` | 新しいセッションログをインデックス |
+| `loci init` | `.codeatrium/` を初期化し、共通 `AGENTS.md` 指示を追加、Claude Code フックを登録（`--no-hooks` で省略可） |
+| `loci index [--harness all\|claude\|codex\|opencode\|omp-pi\|grok]` | 新しいセッションログをインデックス（既定は検出した全 harness） |
 | `loci distill [--limit N]` | 未蒸留の exchange を LLM で蒸留 |
 | `loci search "クエリ" --json` | セマンティック検索（エージェント向け）。`--branch NAME` で git ブランチ絞り込み |
 | `loci context --symbol "名前" --json` | コードシンボル → 過去の会話（軽量。`--full` で会話原文も含める） |
 | `loci context --branch "名前" --json` | git ブランチ → 過去の会話（未蒸留の exchange も含む） |
-| `loci show "<ref>" --json` | 会話原文を取得 |
+| `loci show "<exchange-id>" --json` | primary ID から会話原文を取得 |
 | `loci status` | インデックス状態を表示 |
-| `loci prime` | コマンドの使い方をセッションコンテキストに注入（SessionStart フックで自動実行） |
+| `loci prime` | コマンドの使い方をセッションコンテキストに注入 |
 | `loci server start/stop/status` | 埋め込みサーバー管理 |
-| `loci hook install` | フックを再登録（通常は `loci init` で済む） |
-| `loci hook uninstall` | codeatrium のフックを `settings.json` から削除 |
+| `loci hook install --harness NAME` | native lifecycle hook を登録、または fallback recipe を表示 |
+| `loci hook uninstall --harness NAME` | native codeatrium lifecycle hook を削除 |
 
-## 自動化（Claude Code フック）
+## Harness lifecycle
 
-`loci init`（または `loci hook install`）後、すべて自動で動作します:
+| Harness | transcript | native lifecycle | fallback |
+|---------|------------|------------------|----------|
+| Claude Code | project JSONL | `~/.claude/settings.json` | — |
+| Codex CLI | recorded cwd で絞る rollout JSONL | `~/.codex/hooks.json` | compact は SessionStart で `loci prime` |
+| Oh My Pi | project JSONL | — | 各 turn 後に index、session start に server / distill / prime |
+| OpenCode | local session SQLite | — | 各 turn 後に index、session start に server / distill / prime |
+| Grok | project streaming JSONL | — | 各 turn 後に index、session start に server / distill / prime |
 
-| フック | トリガー | コマンド |
-|--------|---------|---------|
-| Stop (async) | 毎ラリー後 | `loci index` |
-| SessionStart | 起動時 / `/clear` / `/resume` / `compact` | `loci prime` |
-| SessionStart | 起動時 / `/clear` / `/resume` / `compact` | `loci server start` |
-| SessionStart | 起動時 / `/clear` / `/resume` / `compact` | `loci distill` |
-
-- **`loci index`** — 毎ラリー後に非同期で実行。セッション途中でも差分のみインデックスするので高速
-- **`loci distill`** — セッション開始時に未蒸留の exchange を蒸留。既定は `claude --print`（Haiku、ユーザーの Claude Code 経由）ですが、ローカルの OpenAI 互換 LLM でも実行できます（[設定](#設定)を参照）
-- **`loci server start`** — 埋め込みモデル（約500MB）をメモリに常駐させ、以降の検索を 0.2 秒以内に
+Native hook は turn end を `loci index`、session start を `loci server start`、`loci distill`、`loci prime`、compact を `loci prime` に写像します。fallback は `loci hook install --harness NAME` が表示し、Claude settings を変更しません。
 
 ## 検索出力
 

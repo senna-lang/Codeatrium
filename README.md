@@ -18,7 +18,7 @@ An AI coding agent recalls everything it has done through just two commands: `lo
 
 The CLI command `loci` is designed to be **called by the agent itself** — running `loci search "..." --json` from within a prompt. *(The name comes from the [Method of Loci](https://en.wikipedia.org/wiki/Method_of_loci) — the memory-palace technique. Under the hood, conversations are distilled into "palace objects"; see [How It Works](#how-it-works). The architecture extends the conversational memory model from [arXiv:2603.13017](https://arxiv.org/abs/2603.13017) for coding agents.)*
 
-> **Note:** Currently [Claude Code](https://docs.anthropic.com/en/docs/claude-code) only — indexing reads Claude Code's session logs (`.jsonl`). Distillation defaults to `claude --print` (Haiku) but can run on a local OpenAI-compatible LLM instead (see [Configuration](#configuration)).
+> **Harnesses:** Claude Code, Codex CLI, Oh My Pi, OpenCode, and Grok session logs are indexed into the same exchange, code-touch, symbol, search, context, and `show` contracts. Distillation is independent of the harness and can use `claude --print` or a local OpenAI-compatible LLM.
 
 ## Minimal Interface
 
@@ -29,7 +29,7 @@ The whole recall interface is two commands:
   - tree-sitter symbol resolution (Python / TypeScript / Go) lets agents understand implementation intent before editing
   - `--branch "name"` recalls what was done and discussed on a specific git branch (also available as `loci search "query" --branch "name"`)
 
-That's deliberate. The user here is the agent, and an agent handed a 50-tool palette hesitates, mis-picks, and burns tokens just deciding which to call. With a surface this small — and no MCP tool schemas sitting resident in the context window — the agent reaches for the right call the first time, every time. *(When the full transcript is needed, `loci show "<ref>"` expands any result to its verbatim source.)*
+That's deliberate. The user here is the agent, and an agent handed a 50-tool palette hesitates, mis-picks, and burns tokens just deciding which to call. With a surface this small — and no MCP tool schemas sitting resident in the context window — the agent reaches for the right call the first time, every time. *(When the full transcript is needed, `loci show "<exchange-id>"` expands a search result to its stored verbatim source.)*
 
 Touching a symbol means recalling what was decided about it — `loci context` reverse-looks-up the exact code location, signature, and the conversation behind it:
 
@@ -60,11 +60,12 @@ Requires Python 3.11+.
 ## Quick Start
 
 ```bash
-# Initialize in project root (also registers Claude Code hooks)
+# Initialize in project root. This creates `.codeatrium/` and adds the shared
+# agent reminder to AGENTS.md.
 loci init
 ```
 
-`loci init` now handles everything in one step — database setup, existing session detection, and Claude Code hook registration. Pass `--no-hooks` to skip hook registration. If init fails partway through, `.codeatrium/` is cleaned up automatically so re-running is safe.
+`loci init` creates the project-local database, writes the common `AGENTS.md` instruction section, and installs Claude Code hooks unless `--no-hooks` is supplied. Register Codex hooks explicitly with `loci hook install --harness codex`; unsupported native hooks print a complete fallback recipe. If init fails partway through, `.codeatrium/` is cleaned up automatically so re-running is safe.
 
 When running `loci init`, if past session logs are detected, you'll be prompted with:
 
@@ -87,42 +88,36 @@ Invalid input on any prompt re-prompts instead of silently falling back to a def
 
 ## Agent Instructions
 
-Agent instructions are injected automatically — no manual setup required:
-
-- **`loci init`** — Inserts a marker section (`<!-- BEGIN CODEATRIUM -->...<!-- END CODEATRIUM -->`) into `CLAUDE.md`
-- **`loci prime`** — Dynamically injects command usage into the context window at every session start via SessionStart Hook
+`loci init` installs the marker section (`<!-- BEGIN CODEATRIUM -->...<!-- END CODEATRIUM -->`) in **`AGENTS.md`**, the common instruction source for every supported harness. `loci prime` injects full command usage into a session context when native lifecycle support is available.
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `loci init` | Initialize `.codeatrium/` and register Claude Code hooks (`--no-hooks` to skip, `--no-local-distiller` to skip the local-model prompt) |
-| `loci index` | Index new session logs |
+| `loci init` | Initialize `.codeatrium/`, write common `AGENTS.md` instructions, and install Claude hooks (`--no-hooks` to skip, `--no-local-distiller` to skip the local-model prompt) |
+| `loci index [--harness all\|claude\|codex\|opencode\|omp-pi\|grok]` | Index new session logs; the default indexes every detected harness |
 | `loci distill [--limit N]` | Distill undistilled exchanges via LLM |
 | `loci search "query" --json` | Semantic search (agent-facing); add `--branch NAME` to filter by git branch |
 | `loci context --symbol "name" --json` | Code symbol → past conversations (lightweight; add `--full` for verbatim text) |
 | `loci context --branch "name" --json` | Git branch → past conversations (includes undistilled exchanges) |
-| `loci show "<ref>" --json` | Retrieve verbatim conversation |
+| `loci show "<exchange-id>" --json` | Retrieve a stored exchange by its primary ID |
 | `loci status` | Show index state |
-| `loci prime` | Inject command usage into the session context (run automatically by the SessionStart hook) |
+| `loci prime` | Inject command usage into the session context |
 | `loci server start/stop/status` | Embedding server management |
-| `loci hook install` | Re-register hooks (normally already done by `loci init`) |
-| `loci hook uninstall` | Remove codeatrium hooks from `settings.json` |
+| `loci hook install --harness NAME` | Install native lifecycle hooks or print the harness fallback recipe |
+| `loci hook uninstall --harness NAME` | Remove native codeatrium lifecycle hooks |
 
-## Automation (Claude Code Hooks)
+## Harness Lifecycle
 
-After `loci init` (or `loci hook install`), everything runs automatically:
+| Harness | Transcript source | Native lifecycle | Fallback |
+|---------|-------------------|------------------|----------|
+| Claude Code | Project JSONL | `~/.claude/settings.json` | — |
+| Codex CLI | Global rollout JSONL filtered by recorded cwd | `~/.codex/hooks.json` | Compact runs `loci prime` through SessionStart |
+| Oh My Pi | Project JSONL | — | Index after each turn; run server, distill, and prime at session start |
+| OpenCode | Local session SQLite | — | Index after each turn; run server, distill, and prime at session start |
+| Grok | Project streaming JSONL | — | Index after each turn; run server, distill, and prime at session start |
 
-| Hook | Trigger | Command |
-|------|---------|---------|
-| Stop (async) | After every turn | `loci index` |
-| SessionStart | startup / `/clear` / `/resume` / `compact` | `loci prime` |
-| SessionStart | startup / `/clear` / `/resume` / `compact` | `loci server start` |
-| SessionStart | startup / `/clear` / `/resume` / `compact` | `loci distill` |
-
-- **`loci index`** — Runs asynchronously after every turn. Indexes only new exchanges, so it's fast even mid-session
-- **`loci distill`** — Distills undistilled exchanges at session start. Defaults to `claude --print` (Haiku, through the user's Claude Code); can use a local OpenAI-compatible LLM instead (see [Configuration](#configuration))
-- **`loci server start`** — Keeps the embedding model (~500MB) resident in memory for sub-0.2s search latency
+Native hooks map turn end to `loci index`, session start to `loci server start`, `loci distill`, and `loci prime`, and compact to `loci prime`. Fallback recipes are emitted by `loci hook install --harness NAME` and never modify Claude settings.
 
 ## Search Output
 

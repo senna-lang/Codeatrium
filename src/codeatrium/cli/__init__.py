@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 
 from codeatrium.cli.distill_cmd import distill
+from codeatrium.cli.eval_cmd import eval_app
 from codeatrium.cli.hook_cmd import hook_app
 from codeatrium.cli.index_cmd import index
 from codeatrium.cli.prime_cmd import prime
@@ -179,10 +180,10 @@ def init(
 
         typer.echo(f"Initialized: {db}")
 
-        from codeatrium.cli.prime_cmd import inject_claude_md
+        from codeatrium.cli.prime_cmd import inject_agents_md
 
-        if inject_claude_md(root):
-            typer.echo(f"Updated: {root / 'CLAUDE.md'} (codeatrium section)")
+        if inject_agents_md(root):
+            typer.echo(f"Updated: {root / 'AGENTS.md'} (codeatrium section)")
 
         if total_exchanges > 0:
             actual_total = 0
@@ -540,3 +541,4 @@ app.command()(dump)
 app.command()(prime)
 app.add_typer(hook_app, name="hook")
 app.add_typer(server_app, name="server")
+app.add_typer(eval_app, name="eval")
