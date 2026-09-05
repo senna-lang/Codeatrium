@@ -153,6 +153,46 @@ def test_hook_install_creates_settings(tmp_path, monkeypatch):
     assert "hooks" in data
     assert "Stop" in data["hooks"]
 
+def test_hook_install_non_claude_uses_fallback_without_settings_write(
+    tmp_path, monkeypatch
+):
+    settings_path = tmp_path / ".claude" / "settings.json"
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+
+    result = runner.invoke(app, ["hook", "install", "--harness", "omp-pi"])
+
+    assert result.exit_code == 0
+    assert "loci index --harness omp-pi" in result.output
+    assert not settings_path.exists()
+
+
+def test_hook_install_codex_uses_native_hooks_file(tmp_path, monkeypatch):
+    hooks_path = tmp_path / ".codex" / "hooks.json"
+    monkeypatch.setattr(
+        "codeatrium.adapters.harness.hooks.Path.home", lambda: tmp_path
+    )
+
+    result = runner.invoke(app, ["hook", "install", "--harness", "codex"])
+
+    assert result.exit_code == 0
+    data = json.loads(hooks_path.read_text())
+    stop_commands = [
+        hook["command"]
+        for entry in data["hooks"]["Stop"]
+        for hook in entry["hooks"]
+    ]
+    assert any("loci index --harness codex" in command for command in stop_commands)
+    session_commands = [
+        hook["command"]
+        for entry in data["hooks"]["SessionStart"]
+        for hook in entry["hooks"]
+    ]
+    assert any("loci server start" in command for command in session_commands)
+    assert any("loci distill" in command for command in session_commands)
+    assert any("loci prime" in command for command in session_commands)
+
+    second = runner.invoke(app, ["hook", "install", "--harness", "codex"])
+    assert "already up to date" in second.output
 
 def test_hook_install_adds_command(tmp_path, monkeypatch):
     monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
