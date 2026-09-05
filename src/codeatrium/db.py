@@ -335,6 +335,139 @@ def _migrate_v10_add_file_renames(con: sqlite3.Connection) -> None:
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_file_renames_new_path ON file_renames(new_path)")
 
+def _migrate_v11_add_canonical_sessions(con: sqlite3.Connection) -> None:
+    """Migration v11: persist harness-neutral sessions and exchange provenance."""
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id                TEXT PRIMARY KEY,
+            harness           TEXT NOT NULL,
+            source_session_id TEXT NOT NULL,
+            primary_ref       TEXT NOT NULL,
+            project_key       TEXT NOT NULL,
+            cursor            TEXT,
+            cursor_version    INTEGER NOT NULL DEFAULT 1,
+            started_at        TEXT,
+            title             TEXT,
+            git_branch_last   TEXT,
+            updated_at        TEXT NOT NULL,
+            UNIQUE(harness, source_session_id)
+        )
+    """)
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sessions_harness ON sessions(harness)"
+    )
+    exchanges_exists = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'exchanges'"
+    ).fetchone()
+    if exchanges_exists is None:
+        return
+
+    exchange_columns = {
+        row[1] for row in con.execute("PRAGMA table_info(exchanges)").fetchall()
+    }
+    for name, definition in (
+        ("session_id", "TEXT"),
+        ("harness", "TEXT"),
+        ("session_ref", "TEXT"),
+        ("source_session_id", "TEXT"),
+        ("source_turn_id", "TEXT"),
+        ("agent_model", "TEXT"),
+        ("agent_provider", "TEXT"),
+    ):
+        if name not in exchange_columns:
+            con.execute(f"ALTER TABLE exchanges ADD COLUMN {name} {definition}")
+
+    rows = con.execute(
+        "SELECT id, source_path, started_at, last_ply_end FROM conversations"
+    ).fetchall()
+    for row in rows:
+        source_path = row["source_path"]
+        session_id = hashlib.sha256(f"claude:{source_path}".encode()).hexdigest()
+        cursor = f"v1:ply:{row['last_ply_end']}"
+        con.execute(
+            """
+            INSERT OR IGNORE INTO sessions
+                (id, harness, source_session_id, primary_ref, project_key, cursor,
+                 started_at, updated_at)
+            VALUES (?, 'claude', ?, ?, '', ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+            """,
+            (session_id, source_path, source_path, cursor, row["started_at"], row["started_at"]),
+        )
+        con.execute(
+            """
+            UPDATE exchanges
+            SET session_id = ?,
+                harness = COALESCE(harness, 'claude'),
+                session_ref = COALESCE(
+                    session_ref, ? || '#ply=' || ply_start || '-' || ply_end
+                ),
+                source_session_id = COALESCE(source_session_id, ?),
+                source_turn_id = COALESCE(source_turn_id, CAST(ply_start AS TEXT))
+            WHERE conversation_id = ?
+            """,
+            (session_id, source_path, source_path, row["id"]),
+        )
+
+def _backfill_exchange_provenance(con: sqlite3.Connection) -> None:
+    exists = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'exchanges'"
+    ).fetchone()
+    if exists is None:
+        return
+    rows = con.execute(
+        """
+        SELECT e.id, e.conversation_id, e.ply_start, e.ply_end, c.source_path,
+               c.started_at
+        FROM exchanges e JOIN conversations c ON c.id = e.conversation_id
+        WHERE e.session_id IS NULL OR e.harness IS NULL
+        """
+    ).fetchall()
+    for row in rows:
+        source_path = row["source_path"]
+        if "opencode.db#" in source_path:
+            harness = "opencode"
+            source_session_id = source_path.rsplit("#", 1)[1]
+        elif "rollout-" in source_path:
+            harness = "codex"
+            source_session_id = source_path
+        elif "/.omp/" in source_path:
+            harness = "omp-pi"
+            source_session_id = source_path
+        elif "/.grok/" in source_path:
+            harness = "grok"
+            source_session_id = source_path
+        else:
+            harness = "claude"
+            source_session_id = source_path
+        session_id = hashlib.sha256(
+            f"{harness}:{source_session_id}".encode()
+        ).hexdigest()
+        con.execute(
+            """
+            INSERT OR IGNORE INTO sessions (
+                id, harness, source_session_id, primary_ref, project_key,
+                cursor, cursor_version, started_at, updated_at
+            ) VALUES (?, ?, ?, ?, '', NULL, 1, ?, CURRENT_TIMESTAMP)
+            """,
+            (session_id, harness, source_session_id, source_path, row["started_at"]),
+        )
+        con.execute(
+            """
+            UPDATE exchanges SET
+                session_id = COALESCE(session_id, ?),
+                harness = COALESCE(harness, ?),
+                session_ref = COALESCE(
+                    session_ref, ? || '#ply=' || ply_start || '-' || ply_end
+                ),
+                source_session_id = COALESCE(source_session_id, ?),
+                source_turn_id = COALESCE(source_turn_id, CAST(ply_start AS TEXT))
+            WHERE id = ?
+            """,
+            (session_id, harness, source_path, source_session_id, row["id"]),
+        )
+
+
+
 
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_add_last_ply_end,
@@ -347,6 +480,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v8_add_git_branch,
     _migrate_v9_add_code_touches,
     _migrate_v10_add_file_renames,
+    _migrate_v11_add_canonical_sessions,
 ]
 
 
@@ -392,6 +526,7 @@ def _backfill_legacy_code_edges(con: sqlite3.Connection, project_root: Path) -> 
 
     exchange_files_exists = con.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='exchange_files'"
+
     ).fetchone()
     if exchange_files_exists is not None:
         rows = con.execute(
@@ -427,6 +562,154 @@ def _backfill_legacy_code_edges(con: sqlite3.Connection, project_root: Path) -> 
     )
 
 
+def _backfill_touch_time_symbol_edges(con: sqlite3.Connection, project_root: Path) -> None:
+    """Upgrade stale file-granularity `code_edges` to symbol-level where a
+    point-in-time git blob now allows a match.
+
+    Historical `code_touches` rows carry line ranges frozen at the moment of
+    that edit. Before this backfill, symbol resolution always read the
+    *live* working-tree file at index time, so a touch's line numbers drift
+    out of alignment with the file's *current* symbol boundaries the more
+    the file is edited afterward — old touches degrade to file-level
+    `mention` edges even though a real symbol-level match exists against
+    the file as it looked when that touch happened. `core.ingest` now
+    resolves new touches against the git blob nearest their own timestamp;
+    this backfill applies the same resolution retroactively to touches
+    already persisted under the old (live-disk) behavior.
+
+    Purely additive: only inserts new `line`-granularity edges (via the
+    same deterministic id `touches_to_edges` always uses, so re-running is
+    a no-op). Never deletes the coarser `file`-granularity edges the old
+    behavior already created — those stay harmless alongside a precise
+    match (`resolve_u1`'s symbol tier only ever joins on a non-null
+    `symbol_id`, so a leftover file-level row is never consulted once a
+    line-level row for the same exchange/file exists).
+
+    project_root-dependent (like `_backfill_legacy_code_edges`), so this
+    stays outside `_MIGRATIONS`/`user_version` and runs once via a `meta`
+    completion flag.
+    """
+    con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+
+    done = con.execute(
+        "SELECT 1 FROM meta WHERE key = 'touch_time_symbol_edges_backfilled'"
+    ).fetchone()
+    if done is not None:
+        return
+
+    code_touches_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='code_touches'"
+    ).fetchone()
+    if code_touches_exists is None or not project_root.is_dir():
+        return
+
+    from codeatrium.code_touches import touches_to_edges
+    from codeatrium.core.ingest import _resolve_symbols_at
+    from codeatrium.models import CodeTouch, LineRange
+    from codeatrium.resolver import Symbol, SymbolResolver
+    from codeatrium.utils import sha256
+
+    resolver = SymbolResolver()
+    symbol_cache: dict[tuple[str, str | None], list[Symbol]] = {}
+    resolved_at = datetime.now(UTC).isoformat()
+
+    rows = con.execute(
+        """
+        SELECT exchange_id, harness, tool_call_id, file_path, touch_kind,
+               old_start, old_lines, new_start, new_lines, added, removed, ts
+        FROM code_touches
+        WHERE locator_kind = 'line'
+        """
+    ).fetchall()
+
+    for row in rows:
+        rel_path = row["file_path"]
+        cache_key = (rel_path, row["ts"])
+        symbols = symbol_cache.get(cache_key)
+        if symbols is None:
+            symbols = _resolve_symbols_at(
+                resolver,
+                project_root,
+                str(project_root / rel_path),
+                rel_path,
+                row["ts"],
+            )
+            symbol_cache[cache_key] = symbols
+        if not symbols:
+            continue
+
+        touch = CodeTouch(
+            harness=row["harness"],
+            tool_call_id=row["tool_call_id"],
+            file_path=str(project_root / rel_path),
+            touch_kind=row["touch_kind"],
+            locators=(
+                LineRange(
+                    old_start=row["old_start"],
+                    old_lines=row["old_lines"],
+                    new_start=row["new_start"],
+                    new_lines=row["new_lines"],
+                ),
+            ),
+            added=row["added"],
+            removed=row["removed"],
+            ts=row["ts"],
+        )
+        edges = touches_to_edges(
+            touch, exchange_id=row["exchange_id"], rel_file_path=rel_path, symbols=symbols
+        )
+        line_edges = [e for e in edges if e.granularity == "line"]
+        if not line_edges:
+            continue
+
+        for symbol in symbols:
+            symbol_id = sha256(f"{rel_path}:{symbol.symbol_name}")
+            con.execute(
+                """
+                INSERT OR IGNORE INTO code_symbols
+                    (id, file_path, symbol_name, symbol_kind, signature,
+                     line, end_line, lang, resolved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    symbol_id,
+                    rel_path,
+                    symbol.symbol_name,
+                    symbol.symbol_kind,
+                    symbol.signature,
+                    symbol.line,
+                    symbol.end_line,
+                    symbol.lang,
+                    resolved_at,
+                ),
+            )
+        for edge in line_edges:
+            con.execute(
+                """
+                INSERT INTO code_edges
+                    (id, exchange_id, file_path, symbol_id, edge_kind,
+                     granularity, confidence, added, ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (
+                    edge.id,
+                    edge.exchange_id,
+                    edge.file_path,
+                    edge.symbol_id,
+                    edge.edge_kind,
+                    edge.granularity,
+                    edge.confidence,
+                    edge.added,
+                    edge.ts,
+                ),
+            )
+
+    con.execute(
+        "INSERT OR IGNORE INTO meta(key, value) VALUES ('touch_time_symbol_edges_backfilled', ?)",
+        (datetime.now(UTC).isoformat(),),
+    )
+
 def _run_migrations(con: sqlite3.Connection) -> None:
     """Run pending migrations based on PRAGMA user_version."""
     current_version: int = con.execute("PRAGMA user_version").fetchone()[0]
@@ -455,6 +738,38 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     return con
 
 
+
+def _backfill_canonical_exchange_ids(con: sqlite3.Connection) -> None:
+    """Record canonical identities without rewriting stable exchange IDs."""
+    if con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'exchanges'"
+    ).fetchone() is None:
+        return
+    columns = {row[1] for row in con.execute("PRAGMA table_info(exchanges)")}
+    if "canonical_exchange_id" not in columns:
+        con.execute("ALTER TABLE exchanges ADD COLUMN canonical_exchange_id TEXT")
+        con.execute(
+            """
+            CREATE UNIQUE INDEX idx_exchanges_canonical_id
+            ON exchanges(canonical_exchange_id)
+            WHERE canonical_exchange_id IS NOT NULL
+            """
+        )
+    rows = con.execute(
+        """
+        SELECT id, harness, source_session_id, source_turn_id FROM exchanges
+        WHERE canonical_exchange_id IS NULL AND harness IS NOT NULL
+          AND source_session_id IS NOT NULL AND source_turn_id IS NOT NULL
+        """
+    ).fetchall()
+    for row in rows:
+        canonical_id = hashlib.sha256(
+            f"{row['harness']}:{row['source_session_id']}:{row['source_turn_id']}".encode()
+        ).hexdigest()
+        con.execute(
+            "UPDATE exchanges SET canonical_exchange_id = ? WHERE id = ?",
+            (canonical_id, row["id"]),
+        )
 def init_db(db_path: Path) -> None:
     """DB を初期化してスキーマを作成する（冪等）"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -475,6 +790,22 @@ def init_db(db_path: Path) -> None:
     if table_exists is None:
         # New DB: run core schema
         con.executescript("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id                TEXT PRIMARY KEY,
+                harness           TEXT NOT NULL,
+                source_session_id TEXT NOT NULL,
+                primary_ref       TEXT NOT NULL,
+                project_key       TEXT NOT NULL,
+                cursor            TEXT,
+                cursor_version    INTEGER NOT NULL DEFAULT 1,
+                started_at        TEXT,
+                title             TEXT,
+                git_branch_last   TEXT,
+                updated_at        TEXT NOT NULL,
+                UNIQUE(harness, source_session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_harness ON sessions(harness);
+
             CREATE TABLE IF NOT EXISTS conversations (
                 id                 TEXT PRIMARY KEY,   -- sha256(source_path)
                 source_path        TEXT NOT NULL UNIQUE,
@@ -492,7 +823,14 @@ def init_db(db_path: Path) -> None:
                 agent_content   TEXT NOT NULL,
                 distilled_at    TIMESTAMP,         -- NULL = 未蒸留
                 distill_status  TEXT NOT NULL DEFAULT 'pending',
-                git_branch      TEXT
+                git_branch        TEXT,
+                session_id        TEXT,
+                harness           TEXT,
+                session_ref       TEXT,
+                source_session_id TEXT,
+                source_turn_id    TEXT,
+                agent_model       TEXT,
+                agent_provider    TEXT
             );
 
             CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
@@ -645,8 +983,11 @@ def init_db(db_path: Path) -> None:
     else:
         # Existing DB: run migrations
         _run_migrations(con)
+    _backfill_exchange_provenance(con)
+    _backfill_canonical_exchange_ids(con)
 
     _backfill_legacy_code_edges(con, db_path.parent.parent)
+    _backfill_touch_time_symbol_edges(con, db_path.parent.parent)
 
     # sqlite-vec の仮想テーブル（HNSW, Phase1 verbatim embedding 用）
     con.execute("""

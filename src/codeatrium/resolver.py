@@ -59,26 +59,32 @@ class SymbolResolver:
     """ソースファイルからシンボルを抽出する"""
 
     def extract(self, file_path: Path) -> list[Symbol]:
-        """file_path を tree-sitter で解析してシンボルリストを返す"""
-        suffix = file_path.suffix.lower()
+        """file_path をディスクから読み tree-sitter で解析してシンボルリストを返す"""
+        if not file_path.exists():
+            return []
+        return self.extract_source(file_path.read_bytes(), str(file_path))
+
+    def extract_source(self, source: bytes, path_hint: str) -> list[Symbol]:
+        """任意のソースバイト列（ディスク・git blob 問わず）を tree-sitter で解析する。
+
+        `extract` の読み取り専用部分を切り出したもの。呼び出し側が git blob 等
+        ディスク以外から取得したソースを渡せるようにするため（design: touch 時点
+        の symbol 境界を再現する point-in-time resolve、core/ingest.py 参照）。
+        """
+        suffix = Path(path_hint).suffix.lower()
         language = _LANGUAGES.get(suffix)
         if language is None:
             return []
-        if not file_path.exists():
-            return []
 
-        source = file_path.read_bytes()
         parser = Parser(language)
         tree = parser.parse(source)
 
         if suffix == ".py":
-            return self._extract_python(tree.root_node, source, str(file_path), suffix)
+            return self._extract_python(tree.root_node, source, path_hint, suffix)
         if suffix in (".ts", ".tsx"):
-            return self._extract_typescript(
-                tree.root_node, source, str(file_path), suffix
-            )
+            return self._extract_typescript(tree.root_node, source, path_hint, suffix)
         if suffix == ".go":
-            return self._extract_go(tree.root_node, source, str(file_path), suffix)
+            return self._extract_go(tree.root_node, source, path_hint, suffix)
         return []
 
     # ---- Python ----

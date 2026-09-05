@@ -29,6 +29,23 @@ def test_python_class(tmp_path):
     assert "Foo" in names
 
 
+def test_extract_source_matches_extract_for_equivalent_bytes(tmp_path):
+    """`extract_source` (used for git-blob resolution) must produce the same
+    symbols as `extract` (disk read) for identical content."""
+    f = tmp_path / "foo.py"
+    source = b"def greet(name: str) -> str:\n    return name\n"
+    f.write_bytes(source)
+
+    from_disk = resolver.extract(f)
+    from_bytes = resolver.extract_source(source, str(f))
+
+    assert from_disk == from_bytes
+
+
+def test_extract_source_unsupported_suffix_returns_empty(tmp_path):
+    assert resolver.extract_source(b"anything", "foo.rs") == []
+
+
 def test_python_method(tmp_path):
     f = tmp_path / "foo.py"
     f.write_text("class Foo:\n    def bar(self) -> None:\n        pass\n")

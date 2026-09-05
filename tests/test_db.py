@@ -3,10 +3,18 @@ DB 初期化・スキーマのテスト
 """
 
 import hashlib
+import os
 import sqlite3
+import subprocess
 from pathlib import Path
 
-from codeatrium.db import _MIGRATIONS, check_drift, get_connection, init_db
+from codeatrium.db import (
+    _MIGRATIONS,
+    _backfill_touch_time_symbol_edges,
+    check_drift,
+    get_connection,
+    init_db,
+)
 
 
 def test_init_db_creates_conversations_table(tmp_path: Path) -> None:
@@ -1752,6 +1760,151 @@ def test_backfill_sets_meta_flag_so_later_init_db_calls_do_not_rescan(tmp_path: 
 
     con = sqlite3.connect(db_path)
     row = con.execute("SELECT 1 FROM code_edges WHERE exchange_id='ex2'").fetchone()
+    con.close()
+
+    assert row is None
+
+
+def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
+
+
+def _seed_drifted_touch(con: sqlite3.Connection) -> None:
+    """One exchange whose touch line range only aligns with the OLD commit,
+    plus the stale file-only edge the pre-fix pipeline would have produced."""
+    con.execute("INSERT INTO conversations (id, source_path) VALUES ('c1', '/p')")
+    con.execute(
+        "INSERT INTO exchanges (id, conversation_id, ply_start, ply_end, user_content, agent_content) "
+        "VALUES ('ex1', 'c1', 0, 1, 'touch foo', 'done')"
+    )
+    con.execute(
+        """
+        INSERT INTO code_touches
+            (id, exchange_id, harness, tool_call_id, file_path, touch_kind,
+             locator_kind, old_start, old_lines, new_start, new_lines, added, removed, ts)
+        VALUES ('t1', 'ex1', 'claude', 'call1', 'src.py', 'edit', 'line', 1, 2, 1, 2, 2, 0, '2026-01-01T00:00:00')
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO code_edges
+            (id, exchange_id, file_path, symbol_id, edge_kind, granularity, confidence, added, ts)
+        VALUES ('stale-edge', 'ex1', 'src.py', NULL, 'edit', 'file', 0.5, 2, '2026-01-01T00:00:00')
+        """
+    )
+
+
+def test_backfill_touch_time_symbol_edges_upgrades_stale_file_edge(tmp_path: Path) -> None:
+    """A `code_touches` row valid against an OLD commit, but stale against
+    the live (later-edited) file, gets a new line-level edge; the coarser
+    file edge the old pipeline made is left in place, not deleted."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    db_path = project_root / ".codeatrium" / "memory.db"
+
+    _git(project_root, "init")
+    _git(project_root, "config", "user.email", "t@t.com")
+    _git(project_root, "config", "user.name", "T")
+    src = project_root / "src.py"
+    src.write_text("def foo():\n    pass\n")
+    _git(project_root, "add", ".")
+    old_env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
+    }
+    _git(project_root, "commit", "-m", "old", env=old_env)
+
+    padding = "\n".join(f"x{i} = {i}" for i in range(100))
+    src.write_text(f"{padding}\n\ndef foo():\n    pass\n")
+    _git(project_root, "add", ".")
+    new_env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-06-01T00:00:00",
+        "GIT_COMMITTER_DATE": "2026-06-01T00:00:00",
+    }
+    _git(project_root, "commit", "-m", "new", env=new_env)
+
+    init_db(db_path)
+    con = get_connection(db_path)
+    con.execute("DELETE FROM meta WHERE key = 'touch_time_symbol_edges_backfilled'")
+    _seed_drifted_touch(con)
+    con.commit()
+
+    _backfill_touch_time_symbol_edges(con, project_root)
+    con.commit()
+
+    edges = con.execute(
+        "SELECT granularity, symbol_id FROM code_edges WHERE exchange_id='ex1'"
+    ).fetchall()
+    con.close()
+
+    granularities = {e["granularity"] for e in edges}
+    assert granularities == {"file", "line"}
+    line_edge = next(e for e in edges if e["granularity"] == "line")
+    assert line_edge["symbol_id"] is not None
+
+
+def test_backfill_touch_time_symbol_edges_is_idempotent(tmp_path: Path) -> None:
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    db_path = project_root / ".codeatrium" / "memory.db"
+
+    _git(project_root, "init")
+    _git(project_root, "config", "user.email", "t@t.com")
+    _git(project_root, "config", "user.name", "T")
+    (project_root / "src.py").write_text("def foo():\n    pass\n")
+    _git(project_root, "add", ".")
+    _git(project_root, "commit", "-m", "only")
+
+    init_db(db_path)
+    con = get_connection(db_path)
+    con.execute("DELETE FROM meta WHERE key = 'touch_time_symbol_edges_backfilled'")
+    _seed_drifted_touch(con)
+    con.commit()
+
+    _backfill_touch_time_symbol_edges(con, project_root)
+    con.commit()
+    first_count = con.execute("SELECT COUNT(*) FROM code_edges").fetchone()[0]
+
+    _backfill_touch_time_symbol_edges(con, project_root)
+    con.commit()
+    second_count = con.execute("SELECT COUNT(*) FROM code_edges").fetchone()[0]
+    con.close()
+
+    assert second_count == first_count
+
+
+def test_backfill_touch_time_symbol_edges_flag_prevents_rescan_via_init_db(
+    tmp_path: Path,
+) -> None:
+    """Once `init_db()` has run the backfill once, seeding a NEW drifted
+    touch afterward must not get upgraded by a later `init_db()` call —
+    matches the once-only contract of `_backfill_legacy_code_edges`."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    db_path = project_root / ".codeatrium" / "memory.db"
+
+    _git(project_root, "init")
+    _git(project_root, "config", "user.email", "t@t.com")
+    _git(project_root, "config", "user.name", "T")
+    (project_root / "src.py").write_text("def foo():\n    pass\n")
+    _git(project_root, "add", ".")
+    _git(project_root, "commit", "-m", "only")
+
+    init_db(db_path)  # sets the flag over an empty code_touches table
+
+    con = get_connection(db_path)
+    _seed_drifted_touch(con)
+    con.commit()
+    con.close()
+
+    init_db(db_path)  # flag already set — must not rescan
+
+    con = get_connection(db_path)
+    row = con.execute(
+        "SELECT 1 FROM code_edges WHERE exchange_id='ex1' AND granularity='line'"
+    ).fetchone()
     con.close()
 
     assert row is None
