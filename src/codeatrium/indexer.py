@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from codeatrium.adapters.harness import claude as claude_adapter
 from codeatrium.adapters.harness import codex as codex_adapter
@@ -718,6 +719,29 @@ def _epoch_ms_to_iso(epoch_ms: int) -> str:
     return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC).isoformat()
 
 
+def _parse_opencode_row(
+    kind: str, row: sqlite3.Row, session_id: str
+) -> tuple[int, str, dict] | None:
+    """message/part の1行を envelope に変換する。
+
+    不正 JSON・NULL の time_created/data など破損行は None を返す
+    （1行の破損が DB 全体の取り込みを中断させないよう、呼び出し側でスキップする）。
+    """
+    try:
+        envelope: dict = {
+            "kind": kind,
+            "id": row["id"],
+            "session_id": session_id,
+            "timestamp": _epoch_ms_to_iso(row["time_created"]),
+            "data": json.loads(row["data"]),
+        }
+        if kind == "part":
+            envelope["message_id"] = row["message_id"]
+        return row["time_created"], row["id"], envelope
+    except (TypeError, ValueError, OverflowError, json.JSONDecodeError):
+        return None
+
+
 def _load_opencode_raw_entries(
     src: sqlite3.Connection, session_id: str
 ) -> tuple[list[dict | None], str]:
@@ -738,34 +762,13 @@ def _load_opencode_raw_entries(
 
     ordered: list[tuple[int, str, dict]] = []
     for row in messages:
-        ordered.append(
-            (
-                row["time_created"],
-                row["id"],
-                {
-                    "kind": "message",
-                    "id": row["id"],
-                    "session_id": session_id,
-                    "timestamp": _epoch_ms_to_iso(row["time_created"]),
-                    "data": json.loads(row["data"]),
-                },
-            )
-        )
+        parsed = _parse_opencode_row("message", row, session_id)
+        if parsed is not None:
+            ordered.append(parsed)
     for row in parts:
-        ordered.append(
-            (
-                row["time_created"],
-                row["id"],
-                {
-                    "kind": "part",
-                    "id": row["id"],
-                    "message_id": row["message_id"],
-                    "session_id": session_id,
-                    "timestamp": _epoch_ms_to_iso(row["time_created"]),
-                    "data": json.loads(row["data"]),
-                },
-            )
-        )
+        parsed = _parse_opencode_row("part", row, session_id)
+        if parsed is not None:
+            ordered.append(parsed)
     ordered.sort(key=lambda item: (item[0], item[1]))
 
     raw_entries: list[dict | None] = [entry for _, _, entry in ordered]
@@ -794,14 +797,16 @@ def index_opencode_db(
     if project_root is None:
         return 0
 
-    src = sqlite3.connect(f"file:{opencode_db_path}?mode=ro", uri=True)
+    db_uri = f"file:{quote(str(opencode_db_path), safe='/')}?mode=ro"
+    src = sqlite3.connect(db_uri, uri=True)
     src.row_factory = sqlite3.Row
     try:
         project_root_real = os.path.realpath(str(project_root))
         project_ids = [
             row["id"]
             for row in src.execute("SELECT id, worktree FROM project")
-            if os.path.realpath(row["worktree"]) == project_root_real
+            if row["worktree"] is not None
+            and os.path.realpath(row["worktree"]) == project_root_real
         ]
         if not project_ids:
             return 0
@@ -818,20 +823,26 @@ def index_opencode_db(
             for session_row in session_rows:
                 session_id = session_row["id"]
                 source_path = f"{opencode_db_path}#{session_id}"
-                conversation_id = sha256(source_path)
 
-                row = con.execute(
-                    "SELECT last_ply_end FROM conversations WHERE id = ?",
-                    (conversation_id,),
-                ).fetchone()
-                last_ply_end = row["last_ply_end"] if row is not None else -1
+                # ply_start はセッション内での位置添字で、新規メッセージが既存より
+                # 古い time_created で到着すると添字が全体シフトする。位置ではなく
+                # exchange.id（user message id 由来で位置非依存）で既取り込み分を
+                # 判定し、旧ターンの再emit/新規ターンの取りこぼしを防ぐ。
+                known_exchange_ids = {
+                    row["source_turn_id"]
+                    for row in con.execute(
+                        "SELECT source_turn_id FROM exchanges "
+                        "WHERE harness = 'opencode' AND source_session_id = ?",
+                        (session_id,),
+                    )
+                }
 
                 raw_entries, started_at = _load_opencode_raw_entries(src, session_id)
                 exchanges = parse_opencode_exchanges(
                     source_path, raw_entries, min_chars=min_chars
                 )
                 new_exchanges = [
-                    ex for ex in exchanges if ex.ply_start > last_ply_end
+                    ex for ex in exchanges if ex.id not in known_exchange_ids
                 ]
                 if not new_exchanges:
                     continue
@@ -869,7 +880,7 @@ def index_opencode_db(
                     if touches or renames:
                         artifacts.append(
                             ExchangeArtifacts(
-                                source_turn_id=str(exchange.ply_start),
+                                source_turn_id=exchange.id,
                                 code_touches=touches,
                                 file_renames=renames,
                             )
@@ -883,7 +894,7 @@ def index_opencode_db(
                                 f"{exchange.ply_start}-{exchange.ply_end}"
                             ),
                             source_session_id=session_id,
-                            source_turn_id=str(exchange.ply_start),
+                            source_turn_id=exchange.id,
                             ply_start=exchange.ply_start,
                             ply_end=exchange.ply_end,
                             user_content=exchange.user_content,
