@@ -473,6 +473,12 @@ def parse_grok_exchanges(
                 user_content=user_text,
                 agent_content=agent_text,
                 files=files,
+                # grok の ACP envelope (`session/update`) には git ブランチが一切載らない
+                # (tests/fixtures/harness_logs/README.md の実ログ39本再調査で確認済み。
+                # session/update・tool_call・tool_call_update いずれの params にも
+                # git 関連フィールドは存在しない)。claude の gitBranch・codex の
+                # session_meta.git.branch に相当するデータがそもそも無いため、
+                # 実在しないフィールドを捏造せず None のままにする（issue #19）。
                 git_branch=None,
             )
         )
@@ -555,6 +561,13 @@ def parse_omp_pi_exchanges(
                 user_content=user_text,
                 agent_content=agent_text,
                 files=files,
+                # omp-pi のセッション envelope には `{type: "session", cwd}` の
+                # 作業ディレクトリしか無く、git ブランチは記録されない
+                # (tests/fixtures/harness_logs/README.md の実ログ99本再調査で確認済み)。
+                # cwd から index 時点のブランチを別途 git 問い合わせすることは、
+                # 発話当時のブランチではなく現在のブランチを記録してしまい claude/codex の
+                # 意味と食い違うため行わない。実在しないフィールドを捏造せず None のままに
+                # する（issue #19）。
                 git_branch=None,
             )
         )
@@ -688,6 +701,11 @@ def parse_opencode_exchanges(
                 user_content=user_text,
                 agent_content=agent_text,
                 files=files,
+                # opencode の project/session テーブルには worktree/directory/vcs は
+                # あるが git ブランチ列は無い (tests/fixtures/harness_logs/README.md の
+                # 実 opencode.db 再調査で確認済み。message/part の data JSON にも
+                # ブランチ相当のキーは登場しない)。実在しないフィールドを捏造せず
+                # None のままにする（issue #19）。
                 git_branch=None,
             )
         )

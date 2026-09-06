@@ -1454,6 +1454,62 @@ def test_migration_v12_adds_exchange_conversation_ply_index_to_existing_db(tmp_p
     con.close()
 
 
+def test_migration_v11_infers_harness_from_source_path_for_non_claude_sessions(
+    tmp_path: Path,
+) -> None:
+    """v11 が pre-existing conversation を無条件に harness='claude' 固定すると、
+    直後の _backfill_exchange_provenance が `harness IS NULL` にヒットせず
+    grok/omp-pi/opencode/codex 由来の会話も claude 誤ラベルのまま恒久化する
+    (issue #19)。v11 は _backfill_exchange_provenance と同じヒューリスティックで
+    非claude の source_path を正しく判定しなければならない。
+    """
+    db_path = tmp_path / "memory.db"
+    grok_path = tmp_path / ".grok" / "session.jsonl"
+
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1,
+            parent_session_ref TEXT
+        )"""
+    )
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', ?)",
+        (str(grok_path),),
+    )
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id              TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            ply_start       INT NOT NULL,
+            ply_end         INT NOT NULL,
+            user_content    TEXT NOT NULL,
+            agent_content   TEXT NOT NULL,
+            distilled_at    TIMESTAMP,
+            distill_status  TEXT NOT NULL DEFAULT 'pending',
+            git_branch      TEXT
+        )"""
+    )
+    raw_con.execute(
+        "INSERT INTO exchanges VALUES ('ex1', 'conv1', 0, 1, 'user', 'agent', NULL, 'pending', NULL)"
+    )
+    raw_con.execute("PRAGMA user_version = 10")
+    raw_con.commit()
+    raw_con.close()
+
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    row = con.execute("SELECT harness FROM exchanges WHERE id='ex1'").fetchone()
+    con.close()
+
+    assert row["harness"] == "grok"
+
+
 def test_backfill_parent_session_ref_populates_subagent_conversations(tmp_path: Path) -> None:
     """design §2.3・§4.2: 既存 DB のサブエージェント会話にも parent_session_ref を後付けする"""
     db_path = tmp_path / "memory.db"
