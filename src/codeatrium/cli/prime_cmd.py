@@ -111,12 +111,25 @@ def prime() -> None:
 
 
 def inject_agents_md(project_root: Path) -> bool:
-    """Insert or update the codeatrium section in the common AGENTS.md."""
+    """Insert or update the codeatrium section in the common AGENTS.md.
+
+    BEGIN マーカーはあるが END マーカーが無い（手動編集などで破損した）場合は、
+    content.index(END_MARKER) の ValueError を起こさせず、警告を出した上で
+    ファイルを一切変更せずに False を返す。
+    """
     agents_md = project_root / "AGENTS.md"
 
     if agents_md.exists():
         content = agents_md.read_text()
         if BEGIN_MARKER in content:
+            if END_MARKER not in content:
+                typer.echo(
+                    f"⚠ {agents_md}: found '{BEGIN_MARKER}' without a matching "
+                    f"'{END_MARKER}' — leaving the file untouched. "
+                    "Remove or fix the marker manually, then re-run.",
+                    err=True,
+                )
+                return False
             before = content[: content.index(BEGIN_MARKER)]
             after = content[content.index(END_MARKER) + len(END_MARKER) :]
             new_content = before + AGENTS_MD_SECTION + after
