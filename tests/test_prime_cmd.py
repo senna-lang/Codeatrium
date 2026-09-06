@@ -60,6 +60,23 @@ def test_prime_text_context_section_explains_bidirectional_recall():
     )
 
 
+def test_prime_text_documents_the_context_field():
+    """PRIME_TEXT must tell the agent about the additive `context` array on each hit
+    (ply_adjacent / parent_session lanes) so it doesn't miss the surrounding discussion
+    already returned in the response."""
+    assert "`context` array" in PRIME_TEXT
+    assert "ply_adjacent" in PRIME_TEXT
+    assert "parent_session" in PRIME_TEXT
+
+
+def test_prime_text_context_field_notes_no_confidence_score():
+    """Context entries must be explicitly framed as weaker than the main hit
+    (no confidence score) so the agent does not treat them as equally certain."""
+    context_section_start = PRIME_TEXT.index("`context` array")
+    context_section_end = PRIME_TEXT.index("\n\n", context_section_start)
+    assert "no confidence score" in PRIME_TEXT[context_section_start:context_section_end]
+
+
 # ---- IDE selection trigger contract ----
 
 

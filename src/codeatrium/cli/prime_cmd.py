@@ -29,6 +29,8 @@ loci context src/codeatrium/search.py --json
 
 If there's no exact hit, codeatrium widens the search itself (same file → same directory → semantic) and returns an honest confidence score for each result rather than guessing silently — you don't need a separate fallback query.
 
+Each result also carries a `context` array — related exchanges codeatrium found on its own, so you don't need a follow-up query. Two kinds appear: `ply_adjacent` (the discussion right before/after the hit, same conversation) and `parent_session` (when the hit is a subagent's mechanical instruction, the parent conversation's reasoning for that same file instead). Context entries carry no confidence score — read them as supporting background, not as certain as the main hit.
+
 ### When to act (agent-initiated triggers)
 
 - **Before editing or refactoring a function or component** — recall past design decisions and known constraints for that symbol.
