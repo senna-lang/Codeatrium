@@ -794,9 +794,12 @@ def _backfill_canonical_exchange_ids(con: sqlite3.Connection) -> None:
 def _backfill_parent_session_ref(con: sqlite3.Connection) -> None:
     """既存 conversations の parent_session_ref を埋める（design §2.3・§4.2）。
 
-    サブエージェントの transcript パス規約はアダプター（claude.py）だけが知っている
+    サブエージェントの transcript パス規約は各ハーネスアダプターだけが知っている
     ——core はパス形状を解釈しない、という設計方針を backfill でも守り、判定は
-    adapters.harness.claude.parent_session_ref に委譲する。冪等（NULL の行だけ処理）。
+    ingest と同じ port（`JsonlLogSource.parent_ref_resolver`、
+    `adapters/harness/registry.py:detected_jsonl_sources()`）に委譲する
+    （issue #39: persistence 層が特定ハーネスを直 import する抜け道を解消）。
+    冪等（NULL の行だけ処理）。
     """
     conversations_exists = con.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'"
@@ -807,20 +810,29 @@ def _backfill_parent_session_ref(con: sqlite3.Connection) -> None:
     if "parent_session_ref" not in columns:
         return
 
-    from codeatrium.adapters.harness.claude import (
-        parent_session_ref as derive_claude_parent_ref,
-    )
+    from codeatrium.adapters.harness.registry import detected_jsonl_sources
+
+    resolvers = [
+        source.parent_ref_resolver
+        for source in detected_jsonl_sources()
+        if source.parent_ref_resolver is not None
+    ]
+    if not resolvers:
+        return
 
     rows = con.execute(
         "SELECT id, source_path FROM conversations WHERE parent_session_ref IS NULL"
     ).fetchall()
     for row in rows:
-        ref = derive_claude_parent_ref(Path(row["source_path"]))
-        if ref is not None:
-            con.execute(
-                "UPDATE conversations SET parent_session_ref = ? WHERE id = ?",
-                (ref, row["id"]),
-            )
+        path = Path(row["source_path"])
+        for resolver in resolvers:
+            ref = resolver(path)
+            if ref is not None:
+                con.execute(
+                    "UPDATE conversations SET parent_session_ref = ? WHERE id = ?",
+                    (ref, row["id"]),
+                )
+                break
 
 
 def init_db(db_path: Path) -> None:

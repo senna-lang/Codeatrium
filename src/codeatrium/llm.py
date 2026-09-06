@@ -15,7 +15,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from codeatrium.json_utils import extract_json
 
@@ -368,13 +368,50 @@ def _call_openai(prompt: str, backend: DistillBackend) -> dict[str, Any]:
     raise RuntimeError("retry exhausted")
 
 
+# ---- DistillTransport port（issue #39: provider 文字列の if 分岐を廃し、
+# call_claude の分岐点を _build_transport 1箇所に閉じ込める） ----
+
+
+class DistillTransport(Protocol):
+    """蒸留プロンプトを実行し、未検証の palace dict を返す transport の port。"""
+
+    def run(self, prompt: str) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class ClaudeCliTransport:
+    """`claude --print` CLI 経由のトランスポート（実体は _call_claude_cli、#15 のエラー処理込み）。"""
+
+    model: str | None = None
+
+    def run(self, prompt: str) -> dict[str, Any]:
+        return _call_claude_cli(prompt, self.model)
+
+
+@dataclass(frozen=True)
+class OpenAICompatTransport:
+    """OpenAI 互換 chat/completions 経由のトランスポート（実体は _call_openai、#15 のリトライ込み）。"""
+
+    backend: DistillBackend
+
+    def run(self, prompt: str) -> dict[str, Any]:
+        return _call_openai(prompt, self.backend)
+
+
+def _build_transport(backend: DistillBackend) -> DistillTransport:
+    """DistillBackend から transport を組み立てる（3つ目の provider 追加時はここに1行足すだけ）。"""
+    if backend.provider == "openai":
+        return OpenAICompatTransport(backend)
+    return ClaudeCliTransport(backend.model)
+
+
 # ---- LLM 呼び出し ----
 
 
 def call_claude(
     prompt: str, model: str | None = None, *, backend: DistillBackend | None = None
 ) -> dict[str, Any]:
-    """Dispatch to configured backend (claude CLI or OpenAI API) and return validated palace object"""
+    """Dispatch to configured backend (claude CLI or OpenAI API) via DistillTransport port, return validated palace object"""
     if backend is None:
         from codeatrium.config import DEFAULT_DISTILL_MODEL
 
@@ -384,9 +421,6 @@ def call_claude(
             base_url=None,
         )
 
-    if backend.provider == "openai":
-        raw = _call_openai(prompt, backend)
-    else:
-        raw = _call_claude_cli(prompt, backend.model)
+    raw = _build_transport(backend).run(prompt)
 
     return _validate_palace(raw)

@@ -1,4 +1,5 @@
-"""loci CLI エントリポイント — サブコマンド登録のみ"""
+"""loci CLI エントリポイント — app 定義・サブコマンド登録に加え、`init` 実装（プロジェクト
+初期化・AGENTS.md 注入・蒸留クライアント選択の対話プロンプト）を持つ（CLAUDE.md 構成表と一致、issue #39）。"""
 
 from __future__ import annotations
 
