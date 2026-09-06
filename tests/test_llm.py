@@ -12,8 +12,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from codeatrium.llm import (
+    _MAX_NETWORK_ATTEMPTS,
     DistillBackend,
     LLMValidationError,
+    _call_claude_cli,
     _call_openai,
     _strip_json_fence,
     _validate_palace,
@@ -480,3 +482,195 @@ def test_call_openai_raises_on_connection_error() -> None:
     ):
         with pytest.raises(RuntimeError):
             _call_openai("prompt", backend)
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        url="http://localhost:11434/v1/chat/completions",
+        code=code,
+        msg="error",
+        hdrs=None,  # type: ignore[arg-type]
+        fp=None,
+    )
+
+
+def test_call_openai_missing_choices_raises_runtime_error() -> None:
+    """
+    Ollama 等の互換サーバが HTTP 200 でエラーボディ ({"error": ...}) を返した場合、
+    無ガードの choices[0] アクセスで KeyError が漏れず RuntimeError にラップされることを確認する
+    """
+    backend = DistillBackend(
+        provider="openai", model="m", base_url="http://localhost:11434/v1"
+    )
+    mock_response = MagicMock()
+    mock_response.__enter__ = MagicMock(return_value=mock_response)
+    mock_response.__exit__ = MagicMock(return_value=None)
+    mock_response.read.return_value = json.dumps(
+        {"error": {"message": "model not found"}}
+    ).encode()
+
+    with patch("urllib.request.urlopen", return_value=mock_response):
+        with pytest.raises(RuntimeError, match="unexpected response shape"):
+            _call_openai("prompt", backend)
+
+
+def test_call_openai_non_json_content_raises_runtime_error() -> None:
+    """
+    message.content が JSON として解釈できない場合、無ガードの json.loads が
+    JSONDecodeError を漏らさず RuntimeError にラップされることを確認する
+    """
+    backend = DistillBackend(
+        provider="openai", model="m", base_url="http://localhost:11434/v1"
+    )
+    mock_response = MagicMock()
+    mock_response.__enter__ = MagicMock(return_value=mock_response)
+    mock_response.__exit__ = MagicMock(return_value=None)
+    mock_response.read.return_value = json.dumps(
+        {"choices": [{"message": {"content": "no json here at all"}}]}
+    ).encode()
+
+    with patch("urllib.request.urlopen", return_value=mock_response):
+        with pytest.raises(RuntimeError, match="not valid JSON"):
+            _call_openai("prompt", backend)
+
+
+def test_call_claude_cli_non_json_stdout_raises_runtime_error() -> None:
+    """
+    claude --print が exit 0 で非JSON (バナー等) を出した場合、無ガードの
+    json.loads が JSONDecodeError を漏らさず RuntimeError にラップされることを確認する
+    """
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "Welcome to Claude Code\n(not json)"
+
+    with patch("codeatrium.llm.subprocess.run", return_value=mock_result):
+        with patch("shutil.which", return_value="/usr/bin/claude"):
+            with pytest.raises(RuntimeError, match="non-JSON stdout"):
+                _call_claude_cli("prompt")
+
+
+def test_call_claude_cli_result_field_non_json_raises_runtime_error() -> None:
+    """
+    outer JSON は妥当だが result フィールドの中身が JSON でない場合も
+    RuntimeError にラップされることを確認する
+    """
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = json.dumps({"result": "not json inside result field"})
+
+    with patch("codeatrium.llm.subprocess.run", return_value=mock_result):
+        with patch("shutil.which", return_value="/usr/bin/claude"):
+            with pytest.raises(RuntimeError, match="'result' field is not valid JSON"):
+                _call_claude_cli("prompt")
+
+
+def test_call_openai_validation_retry_changes_request_body() -> None:
+    """
+    validation 失敗後のリトライは、決定論的バックエンドが同じ失敗を繰り返さないよう
+    是正メッセージを追記し temperature を変更した別の body を送ることを確認する
+    (issue #15: 同一 body + temperature:0 の再送は無意味だった)
+    """
+    backend = DistillBackend(
+        provider="openai", model="m", base_url="http://localhost:11434/v1"
+    )
+    mock_response = _mock_openai_response(MOCK_JSON_RESPONSE["structured_output"])
+
+    call_count = {"count": 0}
+
+    def validate_side_effect(palace: dict[str, Any]) -> dict[str, Any]:
+        call_count["count"] += 1
+        if call_count["count"] == 1:
+            raise LLMValidationError("room_assignments must be a list")
+        return palace
+
+    with patch("urllib.request.urlopen", return_value=mock_response) as mock_urlopen:
+        with patch(
+            "codeatrium.llm._validate_palace", side_effect=validate_side_effect
+        ):
+            _call_openai("prompt", backend)
+
+    assert mock_urlopen.call_count == 2
+    first_body = json.loads(mock_urlopen.call_args_list[0][0][0].data)
+    second_body = json.loads(mock_urlopen.call_args_list[1][0][0].data)
+
+    assert first_body["temperature"] == 0
+    assert second_body["temperature"] != first_body["temperature"]
+    assert second_body["messages"][0]["content"] != first_body["messages"][0]["content"]
+    assert "room_assignments must be a list" in second_body["messages"][0]["content"]
+
+
+def test_call_openai_retries_on_5xx_then_succeeds() -> None:
+    """
+    HTTP 5xx はネットワーク層で bounded retry され、後続の成功応答を返すことを確認する
+    """
+    backend = DistillBackend(
+        provider="openai", model="m", base_url="http://localhost:11434/v1"
+    )
+    mock_response = _mock_openai_response(MOCK_JSON_RESPONSE["structured_output"])
+
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=[_http_error(503), mock_response],
+    ) as mock_urlopen:
+        with patch("codeatrium.llm.time.sleep"):
+            result = _call_openai("prompt", backend)
+
+    assert mock_urlopen.call_count == 2
+    assert result == MOCK_JSON_RESPONSE["structured_output"]
+
+
+def test_call_openai_retries_on_timeout_then_succeeds() -> None:
+    """
+    タイムアウトはネットワーク層で bounded retry され、後続の成功応答を返すことを確認する
+    """
+    backend = DistillBackend(
+        provider="openai", model="m", base_url="http://localhost:11434/v1"
+    )
+    mock_response = _mock_openai_response(MOCK_JSON_RESPONSE["structured_output"])
+
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=[TimeoutError("timed out"), mock_response],
+    ) as mock_urlopen:
+        with patch("codeatrium.llm.time.sleep"):
+            result = _call_openai("prompt", backend)
+
+    assert mock_urlopen.call_count == 2
+    assert result == MOCK_JSON_RESPONSE["structured_output"]
+
+
+def test_call_openai_does_not_retry_on_4xx() -> None:
+    """
+    4xx は恒久的失敗として扱い、リトライせず即 RuntimeError を送出することを確認する
+    """
+    backend = DistillBackend(
+        provider="openai", model="m", base_url="http://localhost:11434/v1"
+    )
+
+    with patch(
+        "urllib.request.urlopen", side_effect=_http_error(400)
+    ) as mock_urlopen:
+        with patch("codeatrium.llm.time.sleep") as mock_sleep:
+            with pytest.raises(RuntimeError):
+                _call_openai("prompt", backend)
+
+    assert mock_urlopen.call_count == 1
+    assert not mock_sleep.called
+
+
+def test_call_openai_raises_after_network_retries_exhausted() -> None:
+    """
+    5xx が bounded retry の回数を使い切った場合、最終的に RuntimeError を送出することを確認する
+    """
+    backend = DistillBackend(
+        provider="openai", model="m", base_url="http://localhost:11434/v1"
+    )
+
+    with patch(
+        "urllib.request.urlopen", side_effect=_http_error(503)
+    ) as mock_urlopen:
+        with patch("codeatrium.llm.time.sleep"):
+            with pytest.raises(RuntimeError):
+                _call_openai("prompt", backend)
+
+    assert mock_urlopen.call_count == _MAX_NETWORK_ATTEMPTS
