@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Embedding server lifecycle races (issue #16): `loci server start` now serializes
+  the check→spawn→ready-wait sequence behind a process-wide `server.lock`
+  (`fcntl.flock`), eliminating double-spawn/orphaning under concurrent sessions.
+  `run_server` pings an existing socket before binding and refuses to clobber a
+  live server. `loci server status` is now strictly read-only and never deletes
+  a busy-but-unresponsive socket. `Embedder` serializes `model.encode` calls
+  across threads (`SentenceTransformer` inference is not thread-safe). The
+  embedder server now removes its PID file on idle-timeout/stop, not just the
+  socket.
+
 ## [0.3.0] - 2026-06-12
 
 ### Added
