@@ -19,6 +19,7 @@ from codeatrium.utils import sha256
 
 LegacyParser = Callable[..., list]
 PathResolver = Callable[[Path], Path | None]
+ParentRefResolver = Callable[[Path], str | None]
 
 
 class JsonlLogSource:
@@ -31,12 +32,14 @@ class JsonlLogSource:
         parser: LegacyParser,
         pattern: str = "*.jsonl",
         touch_adapter: Any | None = None,
+        parent_ref_resolver: ParentRefResolver | None = None,
     ) -> None:
         self.id = source_id
         self._resolve_path = resolve_path
         self._parser = parser
         self._pattern = pattern
         self._touch_adapter = touch_adapter
+        self._parent_ref_resolver = parent_ref_resolver
 
     def detect(self, project_root: Path) -> bool:
         directory = self._resolve_path(project_root)
@@ -49,7 +52,8 @@ class JsonlLogSource:
         project_key = str(project_root.resolve())
         sessions: list[CanonicalSession] = []
         for path in directory.rglob(self._pattern):
-            source_session_id = str(path.resolve())
+            resolved_path = path.resolve()
+            source_session_id = str(resolved_path)
             sessions.append(
                 CanonicalSession(
                     harness=self.id,
@@ -59,6 +63,11 @@ class JsonlLogSource:
                     started_at=datetime.fromtimestamp(
                         path.stat().st_mtime, tz=UTC
                     ).isoformat(),
+                    parent_session_ref=(
+                        self._parent_ref_resolver(resolved_path)
+                        if self._parent_ref_resolver is not None
+                        else None
+                    ),
                 )
             )
         return sessions

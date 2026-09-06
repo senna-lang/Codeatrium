@@ -10,6 +10,8 @@ user エントリの `toolUseResult` に載っている点に注意（tool_use_i
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
 
 from codeatrium.models import (
@@ -24,6 +26,30 @@ from codeatrium.models import (
 _WRITE_TOOL_NAME = "Write"
 _NOTEBOOK_TOOL_NAME = "NotebookEdit"
 _TRACKED_TOOL_NAMES = {"Edit", "MultiEdit", _WRITE_TOOL_NAME, _NOTEBOOK_TOOL_NAME}
+
+_SUBAGENT_PATH_RE = re.compile(
+    r"^(?P<parent_dir>.*)/"
+    r"(?P<parent_uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+    r"/subagents/.*\.jsonl$"
+)
+
+
+def parent_session_ref(path: Path) -> str | None:
+    """サブエージェントの transcript パスから親セッションの参照を返す（design §2.3・§4.2）。
+
+    Claude Code の規約: `<project>/<親セッションUUID>/subagents/...` の下（任意の深さの
+    サブディレクトリを許す。実測で `subagents/workflows/wf_X/agent-Y.jsonl` のような
+    ネストも観測されたため、`subagents/` 直下1階層に限定しない）に
+    サブエージェントのログが置かれ、親は `<project>/<親セッションUUID>.jsonl`。
+    実コーパス（本リポジトリの .codeatrium/memory.db、該当477件）で
+    100%一致・親セッションが実在することを検証済み。
+
+    一致しなければ None（親セッション自身、または規約外のパス）。
+    """
+    m = _SUBAGENT_PATH_RE.match(str(path))
+    if m is None:
+        return None
+    return f"{m.group('parent_dir')}/{m.group('parent_uuid')}.jsonl"
 
 
 def edit_capability() -> EditCapability:

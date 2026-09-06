@@ -469,6 +469,24 @@ def _backfill_exchange_provenance(con: sqlite3.Connection) -> None:
 
 
 
+def _migrate_v12_add_exchange_conversation_ply_index(con: sqlite3.Connection) -> None:
+    """Migration v12: exchanges(conversation_id, ply_start) に複合インデックスを追加する。
+
+    周辺コンテキスト取得（design: ply隣接レーン）が会話単位で ply 順に exchange を
+    引くため。従来の idx_exchanges_canonical_id とは別物で、これが無いと
+    conversation_id 絞り込みがフルスキャンになる。
+    """
+    exchanges_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'"
+    ).fetchone()
+    if exchanges_exists is None:
+        return
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_exchanges_conversation_ply "
+        "ON exchanges(conversation_id, ply_start)"
+    )
+
+
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_add_last_ply_end,
     _migrate_v2_add_distill_status,
@@ -481,6 +499,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v9_add_code_touches,
     _migrate_v10_add_file_renames,
     _migrate_v11_add_canonical_sessions,
+    _migrate_v12_add_exchange_conversation_ply_index,
 ]
 
 
@@ -770,6 +789,40 @@ def _backfill_canonical_exchange_ids(con: sqlite3.Connection) -> None:
             "UPDATE exchanges SET canonical_exchange_id = ? WHERE id = ?",
             (canonical_id, row["id"]),
         )
+
+
+def _backfill_parent_session_ref(con: sqlite3.Connection) -> None:
+    """既存 conversations の parent_session_ref を埋める（design §2.3・§4.2）。
+
+    サブエージェントの transcript パス規約はアダプター（claude.py）だけが知っている
+    ——core はパス形状を解釈しない、という設計方針を backfill でも守り、判定は
+    adapters.harness.claude.parent_session_ref に委譲する。冪等（NULL の行だけ処理）。
+    """
+    conversations_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'"
+    ).fetchone()
+    if conversations_exists is None:
+        return
+    columns = {row[1] for row in con.execute("PRAGMA table_info(conversations)")}
+    if "parent_session_ref" not in columns:
+        return
+
+    from codeatrium.adapters.harness.claude import (
+        parent_session_ref as derive_claude_parent_ref,
+    )
+
+    rows = con.execute(
+        "SELECT id, source_path FROM conversations WHERE parent_session_ref IS NULL"
+    ).fetchall()
+    for row in rows:
+        ref = derive_claude_parent_ref(Path(row["source_path"]))
+        if ref is not None:
+            con.execute(
+                "UPDATE conversations SET parent_session_ref = ? WHERE id = ?",
+                (ref, row["id"]),
+            )
+
+
 def init_db(db_path: Path) -> None:
     """DB を初期化してスキーマを作成する（冪等）"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -832,6 +885,7 @@ def init_db(db_path: Path) -> None:
                 agent_model       TEXT,
                 agent_provider    TEXT
             );
+            CREATE INDEX IF NOT EXISTS idx_exchanges_conversation_ply ON exchanges(conversation_id, ply_start);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS exchanges_fts USING fts5(
                 user_content,
@@ -985,6 +1039,7 @@ def init_db(db_path: Path) -> None:
         _run_migrations(con)
     _backfill_exchange_provenance(con)
     _backfill_canonical_exchange_ids(con)
+    _backfill_parent_session_ref(con)
 
     _backfill_legacy_code_edges(con, db_path.parent.parent)
     _backfill_touch_time_symbol_edges(con, db_path.parent.parent)

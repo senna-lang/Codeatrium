@@ -72,6 +72,83 @@ def test_ingest_persists_provenance_cursor_and_files(tmp_path: Path) -> None:
     assert [row[0] for row in files] == ["src/codeatrium/core/ingest.py"]
 
 
+def test_ingest_persists_parent_session_ref_on_new_conversation(tmp_path: Path) -> None:
+    """design §2.3・§4.2: CanonicalSession.parent_session_ref を conversations に書き込む"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    session = CanonicalSession(
+        harness="claude",
+        source_session_id="agent-sub-1",
+        primary_ref="/tmp/proj/uuid1/subagents/agent-sub-1.jsonl",
+        project_key=str(tmp_path),
+        parent_session_ref="/tmp/proj/uuid1.jsonl",
+    )
+    result = ParseResult(
+        exchanges=(
+            CanonicalExchange(
+                harness="claude",
+                session_ref="/tmp/proj/uuid1/subagents/agent-sub-1.jsonl#ply=0-1",
+                source_session_id="agent-sub-1",
+                source_turn_id="turn-0",
+                ply_start=0,
+                ply_end=1,
+                user_content="apply edit-3 per plan.json",
+                agent_content="done",
+            ),
+        ),
+        next_cursor="v1:ply:1",
+    )
+
+    con = get_connection(db_path)
+    assert ingest_parse_result(con, session, result) == 1
+    con.commit()
+    stored = con.execute(
+        "SELECT parent_session_ref FROM conversations WHERE source_path = ?",
+        (session.primary_ref,),
+    ).fetchone()
+    con.close()
+
+    assert stored[0] == "/tmp/proj/uuid1.jsonl"
+
+
+def test_ingest_conversation_without_parent_session_ref_stays_null(tmp_path: Path) -> None:
+    """親を持たない通常セッションは parent_session_ref が NULL のまま（既定の後方互換）"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    session = CanonicalSession(
+        harness="codex",
+        source_session_id="session-1",
+        primary_ref="/tmp/rollout.jsonl",
+        project_key=str(tmp_path),
+    )
+    result = ParseResult(
+        exchanges=(
+            CanonicalExchange(
+                harness="codex",
+                session_ref="/tmp/rollout.jsonl#ply=0-1",
+                source_session_id="session-1",
+                source_turn_id="turn-0",
+                ply_start=0,
+                ply_end=1,
+                user_content="hello",
+                agent_content="hi",
+            ),
+        ),
+        next_cursor="v1:ply:1",
+    )
+
+    con = get_connection(db_path)
+    ingest_parse_result(con, session, result)
+    con.commit()
+    stored = con.execute(
+        "SELECT parent_session_ref FROM conversations WHERE source_path = ?",
+        (session.primary_ref,),
+    ).fetchone()
+    con.close()
+
+    assert stored[0] is None
+
+
 def test_ingest_persists_exchange_scoped_code_touches(tmp_path: Path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)

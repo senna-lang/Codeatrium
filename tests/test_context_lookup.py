@@ -10,6 +10,7 @@ from codeatrium.context_lookup import (
     pick_enclosing_symbol_name,
     resolve_u1,
     resolve_u2,
+    select_ply_window,
 )
 from codeatrium.db import get_connection, init_db
 
@@ -338,3 +339,157 @@ def test_resolve_u2_alias_paths_widen_file_tier(tmp_path: Path) -> None:
     assert hits[0].match_kind == "file"
     assert hits[0].confidence == 1.0
     assert hits[0].file_path == "src/logo/db.py"
+
+
+
+# ---- select_ply_window（純関数、周辺コンテキストのply隣接窓） ----
+
+
+def test_select_ply_window_returns_before_and_after() -> None:
+    ids = ["a", "b", "c", "d", "e"]
+    assert select_ply_window(ids, "c", k_before=2, k_after=1) == ["a", "b", "d"]
+
+
+def test_select_ply_window_anchor_at_start_returns_only_after() -> None:
+    ids = ["a", "b", "c"]
+    assert select_ply_window(ids, "a", k_before=2, k_after=1) == ["b"]
+
+
+def test_select_ply_window_anchor_at_end_returns_only_before() -> None:
+    ids = ["a", "b", "c"]
+    assert select_ply_window(ids, "c", k_before=2, k_after=1) == ["a", "b"]
+
+
+def test_select_ply_window_anchor_not_found_returns_empty() -> None:
+    assert select_ply_window(["a", "b"], "z", k_before=2, k_after=1) == []
+
+
+def test_select_ply_window_single_element_list_returns_empty() -> None:
+    assert select_ply_window(["a"], "a", k_before=2, k_after=1) == []
+
+
+def test_select_ply_window_k_exceeding_length_is_clamped() -> None:
+    ids = ["a", "b", "c"]
+    assert select_ply_window(ids, "b", k_before=10, k_after=10) == ["a", "c"]
+
+
+def test_select_ply_window_empty_list_returns_empty() -> None:
+    assert select_ply_window([], "a", k_before=2, k_after=1) == []
+
+
+# ---- ContextHit.context（design: 周辺コンテキストの2レーン） ----
+
+
+def test_resolve_u1_attaches_ply_adjacent_context_for_ordinary_conversation(
+    tmp_path: Path,
+) -> None:
+    """主レーン（design: hit の81%はこちらで解決）。同一会話内の ply 隣接を additive に返す"""
+    con = _setup_db(tmp_path)
+    conv_id = "conv1"
+    _insert_conversation_and_exchange(con, conv_id, "ex0", ply_start=0)
+    _insert_conversation_and_exchange(con, conv_id, "ex1", ply_start=10)
+    _insert_conversation_and_exchange(con, conv_id, "ex2", ply_start=20)
+    _insert_symbol(con, "sym1", "src/foo.py", "greet")
+    _insert_edge(con, "edge1", "ex1", "src/foo.py", "sym1", "symbol", 1.0)
+    con.commit()
+
+    hits = resolve_u1(con, "src/foo.py", "greet", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].exchange_id == "ex1"
+    relations = {(s.relation, s.exchange_id) for s in hits[0].context}
+    assert relations == {("ply_adjacent", "ex0"), ("ply_adjacent", "ex2")}
+
+
+def test_resolve_u1_ply_adjacent_context_respects_before_after_asymmetry(
+    tmp_path: Path,
+) -> None:
+    """既定は前2件・後1件。3件先の会話は前側の窓に入らない"""
+    con = _setup_db(tmp_path)
+    conv_id = "conv1"
+    for i, ply in enumerate([0, 10, 20, 30, 40]):
+        _insert_conversation_and_exchange(con, conv_id, f"ex{i}", ply_start=ply)
+    _insert_symbol(con, "sym1", "src/foo.py", "greet")
+    _insert_edge(con, "edge1", "ex2", "src/foo.py", "sym1", "symbol", 1.0)
+    con.commit()
+
+    hits = resolve_u1(con, "src/foo.py", "greet", limit=5)
+
+    assert len(hits) == 1
+    relations = [(s.relation, s.exchange_id) for s in hits[0].context]
+    assert relations == [("ply_adjacent", "ex0"), ("ply_adjacent", "ex1"), ("ply_adjacent", "ex3")]
+
+
+def test_resolve_u1_attaches_parent_session_context_for_subagent_hit(
+    tmp_path: Path,
+) -> None:
+    """副レーン（design §2.3: hit の19%、サブエージェント発の機械的指示ヒット）。
+    サブエージェント自身の前後（機械的指示）は使わず、親会話の同一ファイル編集を返す。
+    """
+    con = _setup_db(tmp_path)
+
+    # 親会話: 同じファイルを編集した exchange を持つ
+    con.execute(
+        "INSERT OR IGNORE INTO conversations (id, source_path) VALUES (?, ?)",
+        ("parent-conv", "/fake/parent.jsonl"),
+    )
+    con.execute(
+        """INSERT OR IGNORE INTO exchanges
+           (id, conversation_id, ply_start, ply_end, user_content, agent_content)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("parent-ex", "parent-conv", 5, 6, "user " + LONG, "agent " + LONG),
+    )
+    con.execute(
+        """INSERT OR IGNORE INTO code_edges
+           (id, exchange_id, file_path, symbol_id, edge_kind, granularity, confidence, added, ts)
+           VALUES ('parent-edge', 'parent-ex', 'src/foo.py', NULL, 'edit', 'file', 1.0, 1, '2026-08-09T00:00:00Z')"""
+    )
+
+    # サブエージェント会話: parent_session_ref で親を指す。前後に別 exchange があってもノイズとして使わない
+    con.execute(
+        "INSERT INTO conversations (id, source_path, parent_session_ref) VALUES (?, ?, ?)",
+        ("sub-conv", "/fake/sub.jsonl", "/fake/parent.jsonl"),
+    )
+    _insert_conversation_and_exchange(con, "sub-conv", "sub-before", ply_start=0)
+    _insert_conversation_and_exchange(con, "sub-conv", "sub-hit", ply_start=1)
+    _insert_conversation_and_exchange(con, "sub-conv", "sub-after", ply_start=2)
+    _insert_symbol(con, "sym2", "src/foo.py", "greet")
+    _insert_edge(con, "sub-edge", "sub-hit", "src/foo.py", "sym2", "symbol", 1.0)
+    con.commit()
+
+    hits = resolve_u1(con, "src/foo.py", "greet", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].exchange_id == "sub-hit"
+    assert [s.relation for s in hits[0].context] == ["parent_session"]
+    assert hits[0].context[0].exchange_id == "parent-ex"
+
+
+def test_resolve_u1_parent_session_context_empty_when_parent_has_no_matching_edit(
+    tmp_path: Path,
+) -> None:
+    """親会話が同一ファイルを編集していなければ、適当な代替を出さず空を返す（design §6.2）"""
+    con = _setup_db(tmp_path)
+    con.execute(
+        "INSERT OR IGNORE INTO conversations (id, source_path) VALUES (?, ?)",
+        ("parent-conv", "/fake/parent.jsonl"),
+    )
+    con.execute(
+        """INSERT OR IGNORE INTO exchanges
+           (id, conversation_id, ply_start, ply_end, user_content, agent_content)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("parent-ex", "parent-conv", 5, 6, "user " + LONG, "agent " + LONG),
+    )
+    con.execute(
+        "INSERT INTO conversations (id, source_path, parent_session_ref) VALUES (?, ?, ?)",
+        ("sub-conv", "/fake/sub.jsonl", "/fake/parent.jsonl"),
+    )
+    _insert_conversation_and_exchange(con, "sub-conv", "sub-hit", ply_start=1)
+    _insert_symbol(con, "sym3", "src/foo.py", "greet")
+    _insert_edge(con, "sub-edge2", "sub-hit", "src/foo.py", "sym3", "symbol", 1.0)
+    con.commit()
+
+    hits = resolve_u1(con, "src/foo.py", "greet", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].context == []

@@ -18,6 +18,7 @@ class CanonicalSession:
     started_at: str | None = None
     title: str | None = None
     git_branch_last: str | None = None
+    parent_session_ref: str | None = None
 
 
 @dataclass(frozen=True)

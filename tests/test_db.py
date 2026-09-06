@@ -1422,6 +1422,97 @@ def test_init_db_new_db_conversations_has_parent_session_ref_column(tmp_path: Pa
     con.close()
 
 
+def test_init_db_new_db_has_exchanges_conversation_ply_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    cur = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_exchanges_conversation_ply'"
+    )
+    assert cur.fetchone() is not None
+    con.close()
+
+
+def test_migration_v12_adds_exchange_conversation_ply_index_to_existing_db(tmp_path: Path) -> None:
+    """v12 未満の既存 DB にも (conversation_id, ply_start) の複合インデックスを追加する"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = sqlite3.connect(db_path)
+    con.execute("DROP INDEX idx_exchanges_conversation_ply")
+    con.execute(f"PRAGMA user_version = {len(_MIGRATIONS) - 1}")
+    con.commit()
+    con.close()
+
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    cur = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_exchanges_conversation_ply'"
+    )
+    assert cur.fetchone() is not None
+    con.close()
+
+
+def test_backfill_parent_session_ref_populates_subagent_conversations(tmp_path: Path) -> None:
+    """design §2.3・§4.2: 既存 DB のサブエージェント会話にも parent_session_ref を後付けする"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "INSERT INTO conversations (id, source_path) VALUES (?, ?)",
+        (
+            "sub1",
+            "/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b"
+            "/subagents/agent-a1b01f089dab39cc9.jsonl",
+        ),
+    )
+    con.execute(
+        "INSERT INTO conversations (id, source_path) VALUES (?, ?)",
+        ("parent1", "/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b.jsonl"),
+    )
+    con.commit()
+    con.close()
+
+    init_db(db_path)  # backfill runs unconditionally as part of init_db
+
+    con = sqlite3.connect(db_path)
+    ref = con.execute(
+        "SELECT parent_session_ref FROM conversations WHERE id='sub1'"
+    ).fetchone()[0]
+    parent_ref = con.execute(
+        "SELECT parent_session_ref FROM conversations WHERE id='parent1'"
+    ).fetchone()[0]
+    con.close()
+
+    assert ref == "/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b.jsonl"
+    assert parent_ref is None
+
+
+def test_backfill_parent_session_ref_is_idempotent(tmp_path: Path) -> None:
+    """2回 init_db を呼んでも既に埋まった値を壊さない・エラーにならない"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "INSERT INTO conversations (id, source_path) VALUES (?, ?)",
+        ("sub1", "/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b/subagents/agent-x.jsonl"),
+    )
+    con.commit()
+    con.close()
+
+    init_db(db_path)
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    ref = con.execute(
+        "SELECT parent_session_ref FROM conversations WHERE id='sub1'"
+    ).fetchone()[0]
+    con.close()
+
+    assert ref == "/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b.jsonl"
+
+
 def test_migration_v9_adds_code_touches_tables(tmp_path: Path) -> None:
     """Test that v9 migration creates code_touches/code_symbols/code_edges on a pre-v9 DB."""
     db_path = tmp_path / "memory.db"

@@ -1,6 +1,12 @@
-"""Claude アダプターの extract_code_touches / edit_capability のテスト（design §5.2）"""
+"""Claude アダプターの extract_code_touches / edit_capability / parent_session_ref のテスト（design §5.2・§2.3）"""
 
-from codeatrium.adapters.harness.claude import edit_capability, extract_code_touches
+from pathlib import Path
+
+from codeatrium.adapters.harness.claude import (
+    edit_capability,
+    extract_code_touches,
+    parent_session_ref,
+)
 from codeatrium.models import FileOnly, LineRange, TextAnchor
 
 
@@ -239,3 +245,37 @@ def test_extract_tool_result_without_matching_tool_use_is_ignored() -> None:
     entries = [_tool_result("toolu_orphan", {"filePath": "/repo/src/foo.py"})]
     touches = extract_code_touches(entries)
     assert touches == []
+
+
+
+# ---- parent_session_ref（design §2.3・§4.2） ----
+
+
+def test_parent_session_ref_derives_parent_from_direct_subagent_path() -> None:
+    path = Path(
+        "/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b"
+        "/subagents/agent-a1b01f089dab39cc9.jsonl"
+    )
+    assert parent_session_ref(path) == (
+        "/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b.jsonl"
+    )
+
+
+def test_parent_session_ref_derives_parent_from_nested_workflow_subagent_path() -> None:
+    """実測: GSD ワークフローのサブエージェントは subagents/ の下にもう1階層ネストされる"""
+    path = Path(
+        "/Users/x/.claude/projects/proj/3c99b912-6041-4f08-8f9e-06baa8ef0840"
+        "/subagents/workflows/wf_80876f44-af0/agent-a027d1d81e5aa2c16.jsonl"
+    )
+    assert parent_session_ref(path) == (
+        "/Users/x/.claude/projects/proj/3c99b912-6041-4f08-8f9e-06baa8ef0840.jsonl"
+    )
+
+
+def test_parent_session_ref_returns_none_for_non_subagent_session() -> None:
+    path = Path("/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b.jsonl")
+    assert parent_session_ref(path) is None
+
+
+def test_parent_session_ref_returns_none_for_unrelated_path() -> None:
+    assert parent_session_ref(Path("/Users/x/.claude/projects/proj/not-a-uuid.jsonl")) is None

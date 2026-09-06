@@ -130,10 +130,10 @@ def ingest_parse_result(
         conversation_id = persisted_session_id
         con.execute(
             """
-            INSERT INTO conversations (id, source_path, started_at, last_ply_end)
-            VALUES (?, ?, ?, -1)
+            INSERT INTO conversations (id, source_path, started_at, last_ply_end, parent_session_ref)
+            VALUES (?, ?, ?, -1, ?)
             """,
-            (conversation_id, session.primary_ref, session.started_at),
+            (conversation_id, session.primary_ref, session.started_at, session.parent_session_ref),
         )
 
     inserted = 0

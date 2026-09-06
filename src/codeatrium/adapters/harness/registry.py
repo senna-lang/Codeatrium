@@ -41,6 +41,7 @@ def detected_jsonl_sources() -> tuple[JsonlLogSource, ...]:
             resolve_claude_projects_path,
             parse_exchanges,
             touch_adapter=claude_adapter,
+            parent_ref_resolver=claude_adapter.parent_session_ref,
         ),
         JsonlLogSource(
             "codex",

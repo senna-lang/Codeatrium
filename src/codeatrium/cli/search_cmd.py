@@ -334,6 +334,22 @@ def _print_context_hits(hits, json_output: bool, full: bool) -> None:
                 "specific_context": h.specific_context,
                 "verbatim_ref": h.verbatim_ref,
                 "git_branch": h.git_branch,
+                "context": [
+                    {
+                        "relation": s.relation,
+                        "exchange_id": s.exchange_id,
+                        "ply": s.ply,
+                        "exchange_core": s.exchange_core,
+                        "specific_context": s.specific_context,
+                        "verbatim_ref": s.verbatim_ref,
+                        **(
+                            {"user_content": s.user_content, "agent_content": s.agent_content}
+                            if full
+                            else {}
+                        ),
+                    }
+                    for s in h.context
+                ],
             }
             if full:
                 item["user_content"] = h.user_content
@@ -349,6 +365,10 @@ def _print_context_hits(hits, json_output: bool, full: bool) -> None:
                 typer.echo(f"    Core: {h.exchange_core}")
             if h.verbatim_ref:
                 typer.echo(f"    {h.verbatim_ref}")
+            if h.context:
+                labels = {"ply_adjacent": "同一会話の前後", "parent_session": "親会話（同一ファイル編集）"}
+                for s in h.context:
+                    typer.echo(f"    + [{labels.get(s.relation, s.relation)}] {s.exchange_core or s.user_content[:80]}")
 
 
 def _context_u1_u2(target: str, limit: int, json_output: bool, full: bool) -> None:

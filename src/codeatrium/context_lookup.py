@@ -9,6 +9,16 @@ semantic 段（0.10、design §6.2 の最終段）はここでは扱わない。
 依存であり、`search_combined` を通じて呼び出し側（CLI 層）が担当する — このモジュールは
 sqlite3.Connection だけで完結させる。
 
+各ヒットには「周辺コンテキスト」を additive に添える（`ContextHit.context`）。
+実測（本リポジトリの .codeatrium/memory.db）に基づく2レーン構成:
+  - ply_adjacent: 同一会話内で ply_start 順に前後の exchange（hit の81%はこちらで解決）。
+    ply_start には隙間があるため、値の距離ではなく列内の「順位」で前後K件を数える。
+  - parent_session: hit がサブエージェント会話（parent_session_ref を持つ）に着地した
+    場合、そのサブエージェント自身の前後は「次の機械的指示」でしかない（design §2.3）ため、
+    親会話のうち同一ファイルを編集した exchange を代わりに返す（hit の19%が該当）。
+どちらのレーンも anchor（hit 本体）を書き換えない。confidence を持たず、
+`relation` で由来を明示した別枠の参考情報として返す。
+
 DB を読むだけで書き込みはしない。接続のライフサイクルは呼び出し側が管理する。
 """
 
@@ -16,13 +26,18 @@ from __future__ import annotations
 
 import posixpath
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 _TIER_SYMBOL_CONFIDENCE = 1.00
 _TIER_FILE_CONFIDENCE_U1 = 0.45
 _TIER_DIRECTORY_CONFIDENCE_U1 = 0.25
 _TIER_FILE_CONFIDENCE_U2 = 1.00
 _TIER_DIRECTORY_CONFIDENCE_U2 = 0.30
+
+# ply_adjacent レーンの窓幅。前を厚く・後ろを薄くするのは、編集の動機になった議論は
+# 直前に集中していることが多いという実測（本リポジトリの実例で確認済み）に基づく。
+_PLY_WINDOW_BEFORE = 2
+_PLY_WINDOW_AFTER = 1
 
 
 @dataclass(frozen=True)
@@ -32,6 +47,22 @@ class ContextTarget:
     file_path: str
     symbol_name: str | None = None
     line: int | None = None
+
+
+@dataclass(frozen=True)
+class ContextSnippet:
+    """hit に添える周辺コンテキストの1件。confidence を持たない——anchor（hit 本体）とは
+    別枠の参考情報であり、段カスケード（§6.2）の確信度の意味を薄めない。
+    """
+
+    relation: str  # "ply_adjacent"（同一会話の前後） | "parent_session"（親会話の同一ファイル編集）
+    exchange_id: str
+    ply: int
+    exchange_core: str | None
+    specific_context: str | None
+    user_content: str
+    agent_content: str
+    verbatim_ref: str
 
 
 @dataclass(frozen=True)
@@ -49,6 +80,7 @@ class ContextHit:
     git_branch: str | None
     user_content: str | None = None
     agent_content: str | None = None
+    context: list[ContextSnippet] = field(default_factory=list)
 
 
 def parse_context_target(target: str) -> ContextTarget:
@@ -91,7 +123,8 @@ _HIT_QUERY = """
         ce.exchange_id, ce.file_path, cs.symbol_name,
         e.git_branch, e.user_content, e.agent_content,
         p.exchange_core, p.specific_context,
-        c.source_path, e.ply_start
+        c.source_path, e.ply_start,
+        e.conversation_id, c.parent_session_ref
     FROM code_edges ce
     LEFT JOIN code_symbols cs ON cs.id = ce.symbol_id
     JOIN exchanges e ON e.id = ce.exchange_id
@@ -120,7 +153,110 @@ def _dedup_by_exchange(rows: list[sqlite3.Row]) -> list[sqlite3.Row]:
     return out
 
 
-def _row_to_hit(row: sqlite3.Row, match_kind: str, confidence: float) -> ContextHit:
+def select_ply_window(
+    ordered_exchange_ids: list[str], anchor_exchange_id: str, k_before: int, k_after: int
+) -> list[str]:
+    """会話内で ply_start 順に並べた exchange id 列から、anchor の前後 id を返す（純関数）。
+
+    ply_start には隙間があり得る（1 exchange が複数行の生ログに対応するため）。
+    値の距離ではなく、列内の「順位」で前後 K 件を数える——これを取り違えると
+    ply の値でウィンドウを切ってしまい、実在する隣接 exchange を取りこぼす
+    （実測で確認済みのバグ）。
+
+    anchor が列に無ければ空を返す。列の端では、存在する分だけ返す。
+    """
+    try:
+        idx = ordered_exchange_ids.index(anchor_exchange_id)
+    except ValueError:
+        return []
+    before = ordered_exchange_ids[max(0, idx - k_before): idx]
+    after = ordered_exchange_ids[idx + 1: idx + 1 + k_after]
+    return before + after
+
+
+def _conversation_exchanges_ordered(
+    con: sqlite3.Connection, conversation_id: str
+) -> list[sqlite3.Row]:
+    """会話内の exchange を ply_start 順に、context 表示に要る列だけ取ってくる"""
+    return con.execute(
+        """
+        SELECT e.id, e.ply_start, e.user_content, e.agent_content,
+               p.exchange_core, p.specific_context
+        FROM exchanges e
+        LEFT JOIN palace_objects p ON p.exchange_id = e.id
+        WHERE e.conversation_id = ?
+        ORDER BY e.ply_start
+        """,
+        (conversation_id,),
+    ).fetchall()
+
+
+def _snippet_from_row(row: sqlite3.Row, relation: str, source_path: str) -> ContextSnippet:
+    return ContextSnippet(
+        relation=relation,
+        exchange_id=row["id"],
+        ply=row["ply_start"],
+        exchange_core=row["exchange_core"],
+        specific_context=row["specific_context"],
+        user_content=row["user_content"],
+        agent_content=row["agent_content"],
+        verbatim_ref=f"{source_path}:ply={row['ply_start']}",
+    )
+
+
+def _ply_adjacent_context(
+    con: sqlite3.Connection, conversation_id: str, anchor_exchange_id: str, source_path: str
+) -> list[ContextSnippet]:
+    """主レーン（design: hit の81%はここで解決）。同一会話内の ply 隣接を返す。"""
+    rows = _conversation_exchanges_ordered(con, conversation_id)
+    by_id = {r["id"]: r for r in rows}
+    neighbor_ids = select_ply_window(
+        [r["id"] for r in rows], anchor_exchange_id, _PLY_WINDOW_BEFORE, _PLY_WINDOW_AFTER
+    )
+    return [_snippet_from_row(by_id[nid], "ply_adjacent", source_path) for nid in neighbor_ids]
+
+
+def _parent_session_context(
+    con: sqlite3.Connection, parent_source_path: str, file_path: str
+) -> list[ContextSnippet]:
+    """副レーン（design: hit の19%、サブエージェント発の機械的指示ヒット）。
+
+    サブエージェント自身の前後は判断理由を持たない（design §2.3）ため、代わりに
+    親会話のうち同一ファイルを編集した exchange を返す。見つからなければ空を返す
+    ——適当な代替を出さない（design §6.2 の方針）。
+    """
+    parent = con.execute(
+        "SELECT id FROM conversations WHERE source_path = ?", (parent_source_path,)
+    ).fetchone()
+    if parent is None:
+        return []
+    rows = con.execute(
+        """
+        SELECT e.id, e.ply_start, e.user_content, e.agent_content,
+               p.exchange_core, p.specific_context
+        FROM code_edges ce
+        JOIN exchanges e ON e.id = ce.exchange_id
+        LEFT JOIN palace_objects p ON p.exchange_id = e.id
+        WHERE e.conversation_id = ? AND ce.file_path = ?
+        ORDER BY e.ply_start
+        """,
+        (parent["id"], file_path),
+    ).fetchall()
+    return [_snippet_from_row(r, "parent_session", parent_source_path) for r in rows]
+
+
+def _build_context(con: sqlite3.Connection, row: sqlite3.Row) -> list[ContextSnippet]:
+    """hit の周辺コンテキストを2レーンから組み立てる（design: advisory反映、anchor は
+    書き換えず additive に添えるだけ）。parent_session_ref があるサブエージェント会話
+    ならそちらを優先し、無ければ同一会話内の ply 隣接を返す。
+    """
+    parent_ref = row["parent_session_ref"]
+    if parent_ref:
+        return _parent_session_context(con, parent_ref, row["file_path"])
+    return _ply_adjacent_context(con, row["conversation_id"], row["exchange_id"], row["source_path"])
+
+
+def _row_to_hit(con: sqlite3.Connection, row: sqlite3.Row, match_kind: str, confidence: float) -> ContextHit:
     return ContextHit(
         match_kind=match_kind,
         confidence=confidence,
@@ -133,6 +269,7 @@ def _row_to_hit(row: sqlite3.Row, match_kind: str, confidence: float) -> Context
         git_branch=row["git_branch"],
         user_content=row["user_content"],
         agent_content=row["agent_content"],
+        context=_build_context(con, row),
     )
 
 
@@ -185,16 +322,16 @@ def resolve_u1(
         )
     )
     if rows:
-        return [_row_to_hit(r, "symbol", _TIER_SYMBOL_CONFIDENCE) for r in rows[:limit]]
+        return [_row_to_hit(con, r, "symbol", _TIER_SYMBOL_CONFIDENCE) for r in rows[:limit]]
 
     rows = _file_rows(con, file_path, alias_paths)
     if rows:
-        return [_row_to_hit(r, "file", _TIER_FILE_CONFIDENCE_U1) for r in rows[:limit]]
+        return [_row_to_hit(con, r, "file", _TIER_FILE_CONFIDENCE_U1) for r in rows[:limit]]
 
     rows = _directory_rows(con, file_path)
     if rows:
         return [
-            _row_to_hit(r, "directory", _TIER_DIRECTORY_CONFIDENCE_U1) for r in rows[:limit]
+            _row_to_hit(con, r, "directory", _TIER_DIRECTORY_CONFIDENCE_U1) for r in rows[:limit]
         ]
 
     return []
@@ -214,12 +351,12 @@ def resolve_u2(
     """
     rows = _file_rows(con, file_path, alias_paths)
     if rows:
-        return [_row_to_hit(r, "file", _TIER_FILE_CONFIDENCE_U2) for r in rows[:limit]]
+        return [_row_to_hit(con, r, "file", _TIER_FILE_CONFIDENCE_U2) for r in rows[:limit]]
 
     rows = _directory_rows(con, file_path)
     if rows:
         return [
-            _row_to_hit(r, "directory", _TIER_DIRECTORY_CONFIDENCE_U2) for r in rows[:limit]
+            _row_to_hit(con, r, "directory", _TIER_DIRECTORY_CONFIDENCE_U2) for r in rows[:limit]
         ]
 
     return []
