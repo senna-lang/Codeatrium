@@ -337,8 +337,13 @@ def _call_openai(prompt: str, backend: DistillBackend) -> dict[str, Any]:
 
         try:
             response_data = json.loads(response_text)
+        except json.JSONDecodeError as e:
+            # プロキシ経由の HTML エラーページ等、HTTP body が JSON ですらない場合。
+            raise RuntimeError(f"OpenAI API returned a non-JSON response: {e}") from e
+
+        try:
             message_content = response_data["choices"][0]["message"]["content"]
-        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        except (KeyError, IndexError, TypeError) as e:
             # Ollama 等の互換サーバは HTTP 200 でエラーボディ ({"error": ...}) を
             # 返すことがある。choices 不在/形状不正を恒久的失敗として RuntimeError に
             # 集約し、呼び出し側 (distill_all) が該当 exchange をスキップできるようにする。

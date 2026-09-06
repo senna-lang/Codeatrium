@@ -276,7 +276,9 @@ def _mock_openai_response(structured: dict[str, Any], wrap: str = "plain") -> Ma
     if wrap == "fence":
         content = f"```json\n{content}\n```"
     elif wrap == "prose":
-        content = f"以下が結果です:\n```json\n{content}\n```\nスキーマに準拠しています。"
+        content = (
+            f"以下が結果です:\n```json\n{content}\n```\nスキーマに準拠しています。"
+        )
     body = json.dumps({"choices": [{"message": {"content": content}}]})
     mock_response = MagicMock()
     mock_response.__enter__ = MagicMock(return_value=mock_response)
@@ -514,6 +516,25 @@ def test_call_openai_missing_choices_raises_runtime_error() -> None:
             _call_openai("prompt", backend)
 
 
+def test_call_openai_non_json_http_body_raises_distinct_runtime_error() -> None:
+    """
+    HTTP body 自体が JSON ですらない場合 (プロキシの HTML エラーページ等)、
+    "unexpected response shape" ではなく "non-JSON response" として区別されることを確認する
+    (choices 欠如などの「JSON として妥当だが形状不正」なケースとメッセージを分離する)
+    """
+    backend = DistillBackend(
+        provider="openai", model="m", base_url="http://localhost:11434/v1"
+    )
+    mock_response = MagicMock()
+    mock_response.__enter__ = MagicMock(return_value=mock_response)
+    mock_response.__exit__ = MagicMock(return_value=None)
+    mock_response.read.return_value = b"<html><body>502 Bad Gateway</body></html>"
+
+    with patch("urllib.request.urlopen", return_value=mock_response):
+        with pytest.raises(RuntimeError, match="non-JSON response"):
+            _call_openai("prompt", backend)
+
+
 def test_call_openai_non_json_content_raises_runtime_error() -> None:
     """
     message.content が JSON として解釈できない場合、無ガードの json.loads が
@@ -584,9 +605,7 @@ def test_call_openai_validation_retry_changes_request_body() -> None:
         return palace
 
     with patch("urllib.request.urlopen", return_value=mock_response) as mock_urlopen:
-        with patch(
-            "codeatrium.llm._validate_palace", side_effect=validate_side_effect
-        ):
+        with patch("codeatrium.llm._validate_palace", side_effect=validate_side_effect):
             _call_openai("prompt", backend)
 
     assert mock_urlopen.call_count == 2
@@ -647,9 +666,7 @@ def test_call_openai_does_not_retry_on_4xx() -> None:
         provider="openai", model="m", base_url="http://localhost:11434/v1"
     )
 
-    with patch(
-        "urllib.request.urlopen", side_effect=_http_error(400)
-    ) as mock_urlopen:
+    with patch("urllib.request.urlopen", side_effect=_http_error(400)) as mock_urlopen:
         with patch("codeatrium.llm.time.sleep") as mock_sleep:
             with pytest.raises(RuntimeError):
                 _call_openai("prompt", backend)
@@ -666,9 +683,7 @@ def test_call_openai_raises_after_network_retries_exhausted() -> None:
         provider="openai", model="m", base_url="http://localhost:11434/v1"
     )
 
-    with patch(
-        "urllib.request.urlopen", side_effect=_http_error(503)
-    ) as mock_urlopen:
+    with patch("urllib.request.urlopen", side_effect=_http_error(503)) as mock_urlopen:
         with patch("codeatrium.llm.time.sleep"):
             with pytest.raises(RuntimeError):
                 _call_openai("prompt", backend)
