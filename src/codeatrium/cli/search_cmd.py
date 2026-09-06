@@ -54,6 +54,7 @@ def search(
     if json_output:
         output = [
             {
+                "exchange_id": r.exchange_id,
                 "exchange_core": r.exchange_core,
                 "specific_context": r.specific_context,
                 "rooms": r.rooms,

@@ -12,7 +12,13 @@ def show(
     exchange_id: Annotated[str, typer.Argument(help="exchange id from search/context")],
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
-    """exchange id から保存済みの原文を取得する。"""
+    """exchange id から保存済みの原文を取得する。
+
+    前後を辿れるよう、同一会話内の ply 隣接（`context`、`loci context` と同じ additive
+    レーン）も併せて返す——新しいフラグは増やさず、既存出力に乗せるだけ。これを起点に
+    `context` 内の `exchange_id` で `loci show` を繰り返せば、任意の深さまで辿れる。
+    """
+    from codeatrium.context_lookup import ply_adjacent_context
     from codeatrium.db import get_connection
     from codeatrium.paths import db_path, find_project_root
 
@@ -25,18 +31,22 @@ def show(
     con = get_connection(db)
     row = con.execute(
         """
-        SELECT id, user_content, agent_content, ply_start, ply_end,
-               harness, session_ref
-        FROM exchanges
-        WHERE id = ?
+        SELECT e.id, e.user_content, e.agent_content, e.ply_start, e.ply_end,
+               e.harness, e.session_ref, e.conversation_id, c.source_path
+        FROM exchanges e
+        JOIN conversations c ON c.id = e.conversation_id
+        WHERE e.id = ?
         """,
         (exchange_id,),
     ).fetchone()
-    con.close()
 
     if row is None:
+        con.close()
         typer.echo(f"Exchange not found: {exchange_id}", err=True)
         raise typer.Exit(1)
+
+    context = ply_adjacent_context(con, row["conversation_id"], row["id"], row["source_path"])
+    con.close()
 
     if json_output:
         typer.echo(
@@ -49,6 +59,17 @@ def show(
                     "ply_end": row["ply_end"],
                     "harness": row["harness"],
                     "session_ref": row["session_ref"],
+                    "context": [
+                        {
+                            "relation": s.relation,
+                            "exchange_id": s.exchange_id,
+                            "ply": s.ply,
+                            "exchange_core": s.exchange_core,
+                            "specific_context": s.specific_context,
+                            "verbatim_ref": s.verbatim_ref,
+                        }
+                        for s in context
+                    ],
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -59,6 +80,9 @@ def show(
         typer.echo(row["user_content"])
         typer.echo("\n[Agent]")
         typer.echo(row["agent_content"])
+        for s in context:
+            label = "前" if s.ply < row["ply_start"] else "後"
+            typer.echo(f"\n[{label}: {s.exchange_id}] {s.exchange_core or s.user_content[:80]}")
 
 
 def dump(

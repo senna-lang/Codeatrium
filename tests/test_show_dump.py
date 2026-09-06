@@ -1,7 +1,9 @@
 """
 loci show / loci dump --distilled のテスト
 
-show: verbatim_ref (path:ply=N) から exchange 原文を取得
+show: exchange id から原文を取得。同一会話内の ply 隣接（`context`、confidence 無しの
+      additive レーン）も返し、そこに載る exchange_id で loci show を繰り返せば
+      任意の深さまで前後を辿れる（design: 案2「loci show --context N」撤回の代替）。
 dump: 蒸留済み palace objects を新しい順に出力
 """
 
@@ -105,6 +107,85 @@ def test_show_json_output(tmp_path, monkeypatch):
     assert "agent_content" in data
     assert "ply_start" in data
 
+
+
+def test_show_json_includes_ply_adjacent_context_for_traversal(tmp_path, monkeypatch):
+    """design: 前後を辿れるよう、show の出力に同一会話の ply 隣接を additive に乗せる"""
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    source = "/fake/session.jsonl"
+    _insert_exchange(con, "ex0", "conv1", source, ply_start=0)
+    _insert_exchange(con, "ex1", "conv1", source, ply_start=10)
+    _insert_exchange(con, "ex2", "conv1", source, ply_start=20)
+    con.close()
+
+    result = runner.invoke(app, ["show", "ex1", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+
+    assert data["exchange_id"] == "ex1"
+    relations = {(c["relation"], c["exchange_id"]) for c in data["context"]}
+    assert relations == {("ply_adjacent", "ex0"), ("ply_adjacent", "ex2")}
+
+
+def test_show_context_has_no_confidence_field(tmp_path, monkeypatch):
+    """context entries は additive な参考情報——confidence を持たない（advisory反映）"""
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    source = "/fake/session.jsonl"
+    _insert_exchange(con, "ex0", "conv1", source, ply_start=0)
+    _insert_exchange(con, "ex1", "conv1", source, ply_start=10)
+    con.close()
+
+    result = runner.invoke(app, ["show", "ex1", "--json"])
+    data = json.loads(result.output)
+
+    assert data["context"]
+    assert all("confidence" not in c for c in data["context"])
+
+
+def test_show_context_enables_chained_traversal(tmp_path, monkeypatch):
+    """context の exchange_id を使って show を繰り返すと、さらに先へ辿れる"""
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    source = "/fake/session.jsonl"
+    for i, ply in enumerate([0, 10, 20, 30, 40]):
+        _insert_exchange(con, f"ex{i}", "conv1", source, ply_start=ply)
+    con.close()
+
+    # 起点: ex2 (中央) -> 前方の隣接 ex1 に飛ぶ -> そこからさらに ex0 が見える
+    hop1 = json.loads(runner.invoke(app, ["show", "ex2", "--json"]).output)
+    before_ids = [c["exchange_id"] for c in hop1["context"] if c["relation"] == "ply_adjacent"]
+    assert "ex1" in before_ids
+
+    hop2 = json.loads(runner.invoke(app, ["show", "ex1", "--json"]).output)
+    hop2_ids = {c["exchange_id"] for c in hop2["context"]}
+    assert "ex0" in hop2_ids
+
+
+def test_show_single_exchange_conversation_has_empty_context(tmp_path, monkeypatch):
+    """隣接が存在しない会話では、context は空リストで正直に返す"""
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_exchange(con, "solo", "conv1", "/fake/solo.jsonl", ply_start=0)
+    con.close()
+
+    result = runner.invoke(app, ["show", "solo", "--json"])
+    data = json.loads(result.output)
+    assert data["context"] == []
+
+
+def test_show_text_output_lists_context_neighbors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    source = "/fake/session.jsonl"
+    _insert_exchange(con, "ex0", "conv1", source, ply_start=0)
+    _insert_exchange(con, "ex1", "conv1", source, ply_start=10)
+    con.close()
+
+    result = runner.invoke(app, ["show", "ex1"])
+    assert result.exit_code == 0
+    assert "ex0" in result.output
 
 # ---- loci dump --distilled ----
 

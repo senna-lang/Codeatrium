@@ -76,9 +76,11 @@ Use this when you don't know which file or symbol to look at — you're searchin
 # Find past discussions, decisions, or implementations
 loci search "BM25 RRF fusion ranking" --json --limit 5
 
-# Retrieve verbatim exchange (use verbatim_ref from search results)
-loci show "<verbatim_ref>" --json
-```\
+# Retrieve verbatim exchange (use exchange_id — from `context` in any result, not verbatim_ref)
+loci show "<exchange_id>" --json
+```
+
+`loci show` also returns the same `context` array (ply-adjacent neighbors). Chain calls on the `exchange_id` values inside it to walk further back or forward — there's no separate window-size flag, each call just re-centers on whatever exchange_id you pass.\
 """
 
 AGENTS_MD_SECTION = f"""\

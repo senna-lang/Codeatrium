@@ -203,6 +203,40 @@ def test_search_json_has_git_branch_field(tmp_path, monkeypatch):
         assert data[0]["git_branch"] == "feature-branch"
 
 
+def test_search_json_has_exchange_id_field(tmp_path, monkeypatch):
+    """design: exchange_id が無いと loci show へ繋げられず、周辺コンテキストの
+    traversal に入れない（PRIME_TEXT の show 例が指す先）"""
+    from unittest.mock import MagicMock, patch
+
+    from codeatrium.models import FusedResult
+
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_fixture(con)
+    con.close()
+
+    mock_result = FusedResult(
+        exchange_id="ex1",
+        user_content="user content",
+        agent_content="agent content",
+        score=0.95,
+        exchange_core="core summary",
+        specific_context="specific detail",
+        verbatim_ref="/fake/session.jsonl:ply=0",
+        rooms=[],
+        symbols=[],
+    )
+
+    with (
+        patch("codeatrium.embedder.Embedder", return_value=MagicMock()),
+        patch("codeatrium.search.search_combined", return_value=[mock_result]),
+    ):
+        result = runner.invoke(app, ["search", "test query", "--json"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data[0]["exchange_id"] == "ex1"
+
+
 # ---- U1/U2 位置引数（design §6.1・§6.2） ----
 
 

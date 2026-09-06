@@ -204,10 +204,14 @@ def _snippet_from_row(row: sqlite3.Row, relation: str, source_path: str) -> Cont
     )
 
 
-def _ply_adjacent_context(
+def ply_adjacent_context(
     con: sqlite3.Connection, conversation_id: str, anchor_exchange_id: str, source_path: str
 ) -> list[ContextSnippet]:
-    """主レーン（design: hit の81%はここで解決）。同一会話内の ply 隣接を返す。"""
+    """同一会話内の ply 隣接コンテキストを返す。`loci context` hit の主レーン（design:
+    hit の81%はここで解決）であると同時に、`loci show <exchange_id>` からも呼べる公開関数
+    ——任意の exchange を起点に前後へ辿る（design: 案2撤回に伴う代替、show の追加パラメータ
+    無しで既存出力に additive で乗せる）。
+    """
     rows = _conversation_exchanges_ordered(con, conversation_id)
     by_id = {r["id"]: r for r in rows}
     neighbor_ids = select_ply_window(
@@ -253,7 +257,7 @@ def _build_context(con: sqlite3.Connection, row: sqlite3.Row) -> list[ContextSni
     parent_ref = row["parent_session_ref"]
     if parent_ref:
         return _parent_session_context(con, parent_ref, row["file_path"])
-    return _ply_adjacent_context(con, row["conversation_id"], row["exchange_id"], row["source_path"])
+    return ply_adjacent_context(con, row["conversation_id"], row["exchange_id"], row["source_path"])
 
 
 def _row_to_hit(con: sqlite3.Connection, row: sqlite3.Row, match_kind: str, confidence: float) -> ContextHit:
