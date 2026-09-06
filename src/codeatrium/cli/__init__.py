@@ -53,6 +53,14 @@ def _print_banner() -> None:
     )
 
 
+def _cleanup_partial_codeatrium_dir(codeatrium_dir: Path, dir_preexisted: bool) -> None:
+    """init 実行フェーズが失敗した際、今回新規作成した .codeatrium/ のみ掃除する。
+    ユーザーが事前に作成していたディレクトリ（dir_preexisted=True）は削除しない。
+    """
+    if not dir_preexisted:
+        shutil.rmtree(codeatrium_dir, ignore_errors=True)
+
+
 @app.command()
 def init(
     skip_existing: Annotated[
@@ -179,7 +187,41 @@ def init(
                 )
 
         typer.echo(f"Initialized: {db}")
+    except KeyboardInterrupt:
+        typer.echo(
+            "\n⚠ Interrupted. Cleaning up partial state...", err=True
+        )
+        _cleanup_partial_codeatrium_dir(codeatrium_dir, dir_preexisted)
+        raise typer.Exit(code=130) from None
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"\n⚠ init failed: {exc}", err=True)
+        typer.echo("Cleaning up partial state...", err=True)
+        _cleanup_partial_codeatrium_dir(codeatrium_dir, dir_preexisted)
+        raise typer.Exit(code=1) from None
 
+    # --- AGENTS.md 注入（.codeatrium/ の作成成否とは独立した副作用なので、
+    #     失敗しても既に作成済みの DB/config を rmtree で巻き込まない。#17）---
+    from codeatrium.cli.prime_cmd import inject_agents_md
+
+    try:
+        if inject_agents_md(root):
+            typer.echo(f"Updated: {root / 'AGENTS.md'} (codeatrium section)")
+    except KeyboardInterrupt:
+        typer.echo(
+            "\n⚠ Interrupted while updating AGENTS.md. "
+            "The database was created successfully.",
+            err=True,
+        )
+        raise typer.Exit(code=130) from None
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(
+            f"\n⚠ AGENTS.md update failed: {exc}\n"
+            "The database was created successfully — fix AGENTS.md manually.",
+            err=True,
+        )
+
+    # --- 既存 exchange のインデックス化（失敗時は今回作成分の .codeatrium/ を掃除） ---
+    try:
         if total_exchanges > 0:
             actual_total = 0
             for jsonl in jsonl_files:
@@ -227,36 +269,13 @@ def init(
         typer.echo(
             "\n⚠ Interrupted. Cleaning up partial state...", err=True
         )
-        if not dir_preexisted:
-            shutil.rmtree(codeatrium_dir, ignore_errors=True)
+        _cleanup_partial_codeatrium_dir(codeatrium_dir, dir_preexisted)
         raise typer.Exit(code=130) from None
     except Exception as exc:  # noqa: BLE001
         typer.echo(f"\n⚠ init failed: {exc}", err=True)
         typer.echo("Cleaning up partial state...", err=True)
-        if not dir_preexisted:
-            shutil.rmtree(codeatrium_dir, ignore_errors=True)
+        _cleanup_partial_codeatrium_dir(codeatrium_dir, dir_preexisted)
         raise typer.Exit(code=1) from None
-
-    # --- AGENTS.md 注入（.codeatrium/ の作成成否とは独立した副作用なので、
-    #     失敗しても既に作成済みの DB/config を rmtree で巻き込まない。#17）---
-    from codeatrium.cli.prime_cmd import inject_agents_md
-
-    try:
-        if inject_agents_md(root):
-            typer.echo(f"Updated: {root / 'AGENTS.md'} (codeatrium section)")
-    except KeyboardInterrupt:
-        typer.echo(
-            "\n⚠ Interrupted while updating AGENTS.md. "
-            "The database was created successfully.",
-            err=True,
-        )
-        raise typer.Exit(code=130) from None
-    except Exception as exc:  # noqa: BLE001
-        typer.echo(
-            f"\n⚠ AGENTS.md update failed: {exc}\n"
-            "The database was created successfully — fix AGENTS.md manually.",
-            err=True,
-        )
 
     # --- Hook 自動登録（opt-out 可、失敗は警告のみで続行） ---
     if not no_hooks:

@@ -165,6 +165,24 @@ def test_init_creates_agents_md_section(tmp_path, monkeypatch):
     assert not (tmp_path / "CLAUDE.md").exists()
 
 
+def test_init_agents_md_message_prints_before_indexing_output(tmp_path, monkeypatch):
+    """出力順序は Initialized -> AGENTS.md 更新 -> Indexed の順を維持する（#17 レビュー指摘）。
+    inject_agents_md 自体は rmtree でガードされた try の外に置かれているが、
+    メッセージの表示順は元の実装と変えない。
+    """
+    _setup_project_with_sessions(tmp_path, monkeypatch, num_files=1, exchanges_per_file=3)
+
+    # min_chars [1]=50 → distill [3]=全件 → distill now [1]=no
+    result = runner.invoke(app, ["init", "--no-local-distiller"], input="1\n3\n1\n")
+    assert result.exit_code == 0
+
+    output = result.output
+    initialized_pos = output.index("Initialized:")
+    agents_md_pos = output.index("(codeatrium section)")
+    indexed_pos = output.index("Indexed ")
+    assert initialized_pos < agents_md_pos < indexed_pos
+
+
 def test_init_appends_to_existing_agents_md(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
