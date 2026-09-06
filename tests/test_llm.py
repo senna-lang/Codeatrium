@@ -45,8 +45,8 @@ MOCK_JSON_RESPONSE = {
 def test_call_claude_command_args() -> None:
     """
     subprocess.run をモックし、call_claude 実行時のコマンドリストに
-    --no-session-persistence, --setting-sources, --output-format (json),
-    --model が含まれることを assert する
+    --no-session-persistence, --session-id, --setting-sources,
+    --output-format (json), --model が含まれることを assert する
     """
     mock_result = MagicMock()
     mock_result.returncode = 0
@@ -66,6 +66,7 @@ def test_call_claude_command_args() -> None:
 
             # 必須フラグが含まれていることを確認
             assert "--no-session-persistence" in cmd_list
+            assert "--session-id" in cmd_list
             assert "--setting-sources" in cmd_list
             assert "--output-format" in cmd_list
             assert "--model" in cmd_list
@@ -104,14 +105,16 @@ def test_call_claude_returns_dict() -> None:
 
 def test_call_claude_cleanup_on_success(tmp_path: Path) -> None:
     """
-    _session_dir を tmp_path に向け、副作用 .jsonl が
-    正常終了時にクリーンアップされることを確認する
+    _session_dir を tmp_path に向け、call_claude が割り当てた --session-id の
+    JSONL が正常終了時にクリーンアップされることを確認する
     """
-    side_jsonl = tmp_path / "side.jsonl"
+    captured: dict[str, str] = {}
 
-    def fake_run(*args, **kwargs):
-        # subprocess.run 呼び出し時（before スナップショット取得後）に副作用ファイルを作成
-        side_jsonl.write_text('{"key": "value"}\n')
+    def fake_run(cmd, **kwargs):
+        # 呼び出しに割り当てられた --session-id を取得し、そのファイル名で副作用を再現
+        session_id = cmd[cmd.index("--session-id") + 1]
+        captured["session_id"] = session_id
+        (tmp_path / f"{session_id}.jsonl").write_text('{"key": "value"}\n')
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = json.dumps(MOCK_JSON_RESPONSE)
@@ -122,21 +125,22 @@ def test_call_claude_cleanup_on_success(tmp_path: Path) -> None:
             with patch("codeatrium.llm._session_dir", return_value=tmp_path):
                 call_claude("test prompt")
 
-                # 正常終了後は副作用 .jsonl がクリーンアップされたことを確認
-                assert not side_jsonl.exists()
+    # 正常終了後は自分自身の session_id の .jsonl がクリーンアップされたことを確認
+    assert not (tmp_path / f"{captured['session_id']}.jsonl").exists()
 
 
 def test_call_claude_cleanup_on_timeout(tmp_path: Path) -> None:
     """
     subprocess.run が subprocess.TimeoutExpired を投げるようモックし:
     (1) call_claude が例外を送出する (pytest.raises)
-    (2) それでも副作用 .jsonl のクリーンアップが走る (finally 経路) ことを確認する
+    (2) それでも自分自身の session_id の .jsonl クリーンアップが走る (finally 経路) ことを確認する
     """
-    side_jsonl = tmp_path / "side.jsonl"
+    captured: dict[str, str] = {}
 
-    def fake_run(*args, **kwargs):
-        # subprocess.run 呼び出し時（before スナップショット取得後）に副作用ファイルを作成
-        side_jsonl.write_text('{"key": "value"}\n')
+    def fake_run(cmd, **kwargs):
+        session_id = cmd[cmd.index("--session-id") + 1]
+        captured["session_id"] = session_id
+        (tmp_path / f"{session_id}.jsonl").write_text('{"key": "value"}\n')
         raise subprocess.TimeoutExpired("claude", 300)
 
     with patch(
@@ -149,8 +153,46 @@ def test_call_claude_cleanup_on_timeout(tmp_path: Path) -> None:
                 with pytest.raises(subprocess.TimeoutExpired):
                     call_claude("test prompt")
 
-                # タイムアウト時にも副作用 .jsonl がクリーンアップされたことを確認
-                assert not side_jsonl.exists()
+    # タイムアウト時にも自分自身の session_id の .jsonl がクリーンアップされたことを確認
+    assert not (tmp_path / f"{captured['session_id']}.jsonl").exists()
+
+
+def test_call_claude_cleanup_preserves_concurrent_session_jsonl(
+    tmp_path: Path,
+) -> None:
+    """
+    issue #14 の回帰テスト: claude -p 呼び出し中に無関係な並行セッションの JSONL が
+    新規作成されても、cleanup はそれを削除してはならない
+    （session_id が一致する自分自身のファイルのみ削除する）。
+    """
+    pre_existing_other_session = tmp_path / "pre-existing-other-session.jsonl"
+    pre_existing_other_session.write_text('{"other": "already there"}\n')
+
+    captured: dict[str, str] = {}
+
+    def fake_run(cmd, **kwargs):
+        session_id = cmd[cmd.index("--session-id") + 1]
+        captured["session_id"] = session_id
+        # 自分自身の副作用ファイル
+        (tmp_path / f"{session_id}.jsonl").write_text('{"key": "value"}\n')
+        # 呼び出しウィンドウ中に別プロセスが新規作成した「並行する無関係なセッション」
+        new_concurrent_session = tmp_path / "new-concurrent-session.jsonl"
+        new_concurrent_session.write_text('{"other": "concurrent user session"}\n')
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(MOCK_JSON_RESPONSE)
+        return mock_result
+
+    with patch("codeatrium.llm.subprocess.run", side_effect=fake_run):
+        with patch("shutil.which", return_value="/usr/bin/claude"):
+            with patch("codeatrium.llm._session_dir", return_value=tmp_path):
+                call_claude("test prompt")
+
+    # 自分自身のファイルは削除される
+    assert not (tmp_path / f"{captured['session_id']}.jsonl").exists()
+    # 並行する無関係なセッションのファイルは温存される（既存 / 新規いずれも）
+    assert pre_existing_other_session.exists()
+    assert (tmp_path / "new-concurrent-session.jsonl").exists()
 
 
 def test_call_claude_dispatches_to_openai_backend() -> None:
