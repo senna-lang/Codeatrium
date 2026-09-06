@@ -499,10 +499,12 @@ def test_init_cleanup_on_execution_failure(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
 
-    def _boom(_root):
+    def _boom(db_path):
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_bytes(b"partial")
         raise RuntimeError("simulated failure")
 
-    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_agents_md", _boom)
+    monkeypatch.setattr("codeatrium.db.init_db", _boom)
 
     result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 1
@@ -523,10 +525,10 @@ def test_init_preserves_preexisting_dir_on_failure(tmp_path, monkeypatch):
     custom_config = codeatrium_dir / "config.toml"
     custom_config.write_text("[distill]\nmodel = \"claude-opus-4-7\"\n")
 
-    def _boom(_root):
+    def _boom(db_path):
         raise RuntimeError("simulated failure")
 
-    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_agents_md", _boom)
+    monkeypatch.setattr("codeatrium.db.init_db", _boom)
 
     result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 1
@@ -536,8 +538,33 @@ def test_init_preserves_preexisting_dir_on_failure(tmp_path, monkeypatch):
     assert custom_config.read_text() == "[distill]\nmodel = \"claude-opus-4-7\"\n"
 
 
-def test_init_cleanup_on_keyboard_interrupt(tmp_path, monkeypatch):
-    """Ctrl-C で .codeatrium/ がクリーンアップされる"""
+def test_init_agents_md_failure_does_not_delete_completed_codeatrium(
+    tmp_path, monkeypatch
+):
+    """AGENTS.md 注入は .codeatrium/ 作成の成否とは独立した領域で実行される。
+    ここでの失敗は init 全体を失敗にせず、既に作成済みの DB/config を
+    rmtree で巻き込んではならない (#17)。
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    def _boom(_root):
+        raise RuntimeError("agents.md write failed")
+
+    monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_agents_md", _boom)
+
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
+    assert result.exit_code == 0
+    assert "AGENTS.md update failed" in result.output
+    assert "agents.md write failed" in result.output
+    assert (tmp_path / ".codeatrium" / "memory.db").exists()
+    assert (tmp_path / ".codeatrium" / "config.toml").exists()
+
+
+def test_init_agents_md_interrupt_does_not_delete_completed_codeatrium(
+    tmp_path, monkeypatch
+):
+    """AGENTS.md 注入中の Ctrl-C も同様に .codeatrium/ を削除してはならない (#17)。"""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".git").mkdir()
 
@@ -545,6 +572,44 @@ def test_init_cleanup_on_keyboard_interrupt(tmp_path, monkeypatch):
         raise KeyboardInterrupt
 
     monkeypatch.setattr("codeatrium.cli.prime_cmd.inject_agents_md", _interrupt)
+
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
+    assert result.exit_code == 130
+    assert "Interrupted" in result.output
+    assert (tmp_path / ".codeatrium" / "memory.db").exists()
+
+
+
+def test_init_malformed_agents_md_marker_does_not_delete_fresh_codeatrium(
+    tmp_path, monkeypatch
+):
+    """AGENTS.md に BEGIN マーカーのみ (END 欠落) がある場合、inject_agents_md の
+    ValueError で init 全体が失敗し、作成直後の .codeatrium/ (DB・config 含む) が
+    rmtree で消えてはならない (#17)。
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text(
+        "# Proj\n\n<!-- BEGIN CODEATRIUM -->\nold content\n"
+    )
+
+    result = runner.invoke(app, ["init", "--no-local-distiller"])
+    assert result.exit_code == 0
+    assert (tmp_path / ".codeatrium" / "memory.db").exists()
+    assert (tmp_path / ".codeatrium" / "config.toml").exists()
+
+
+def test_init_cleanup_on_keyboard_interrupt(tmp_path, monkeypatch):
+    """Ctrl-C で .codeatrium/ がクリーンアップされる"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").mkdir()
+
+    def _interrupt(db_path):
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db_path.write_bytes(b"partial")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("codeatrium.db.init_db", _interrupt)
 
     result = runner.invoke(app, ["init", "--no-local-distiller"])
     assert result.exit_code == 130

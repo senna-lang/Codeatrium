@@ -141,3 +141,19 @@ def test_inject_agents_md_preserves_content_on_second_call(tmp_path: Path):
     content_after_first = agents_md.read_text()
     inject_agents_md(tmp_path)
     assert agents_md.read_text() == content_after_first
+
+
+def test_inject_agents_md_missing_end_marker_leaves_file_untouched(
+    tmp_path: Path,
+):
+    """BEGIN マーカーはあるが END が欠落している場合、ValueError を起こさず
+    ファイルを変更しないまま False を返す (#17)。
+    """
+    agents_md = tmp_path / "AGENTS.md"
+    original = "# Proj\n\n" + BEGIN_MARKER + "\nold content\n"
+    agents_md.write_text(original)
+
+    result = inject_agents_md(tmp_path)
+
+    assert result is False
+    assert agents_md.read_text() == original

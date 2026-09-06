@@ -180,11 +180,6 @@ def init(
 
         typer.echo(f"Initialized: {db}")
 
-        from codeatrium.cli.prime_cmd import inject_agents_md
-
-        if inject_agents_md(root):
-            typer.echo(f"Updated: {root / 'AGENTS.md'} (codeatrium section)")
-
         if total_exchanges > 0:
             actual_total = 0
             for jsonl in jsonl_files:
@@ -241,6 +236,27 @@ def init(
         if not dir_preexisted:
             shutil.rmtree(codeatrium_dir, ignore_errors=True)
         raise typer.Exit(code=1) from None
+
+    # --- AGENTS.md 注入（.codeatrium/ の作成成否とは独立した副作用なので、
+    #     失敗しても既に作成済みの DB/config を rmtree で巻き込まない。#17）---
+    from codeatrium.cli.prime_cmd import inject_agents_md
+
+    try:
+        if inject_agents_md(root):
+            typer.echo(f"Updated: {root / 'AGENTS.md'} (codeatrium section)")
+    except KeyboardInterrupt:
+        typer.echo(
+            "\n⚠ Interrupted while updating AGENTS.md. "
+            "The database was created successfully.",
+            err=True,
+        )
+        raise typer.Exit(code=130) from None
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(
+            f"\n⚠ AGENTS.md update failed: {exc}\n"
+            "The database was created successfully — fix AGENTS.md manually.",
+            err=True,
+        )
 
     # --- Hook 自動登録（opt-out 可、失敗は警告のみで続行） ---
     if not no_hooks:
