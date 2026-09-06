@@ -130,12 +130,16 @@ def resolve_grok_sessions_path(project_root: Path) -> Path | None:
     return None
 
 
+SOCK_FILENAME = "embedder.sock"
+PID_FILENAME = "embedder.pid"
+
+
 def sock_path(project_root: Path) -> Path:
-    return db_path(project_root).parent / "embedder.sock"
+    return db_path(project_root).parent / SOCK_FILENAME
 
 
 def server_pid_path(project_root: Path) -> Path:
-    return db_path(project_root).parent / "embedder.pid"
+    return db_path(project_root).parent / PID_FILENAME
 
 
 def loci_bin() -> str:

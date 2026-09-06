@@ -9,9 +9,11 @@ embedder_server.py — multilingual-e5-small を常駐させる Unix ソケッ�
 
 ライフサイクル:
   - loci server start でバックグラウンド起動
-  - IDLE_TIMEOUT 秒間リクエストなし → 自動終了
-  - loci server stop / SIGTERM で即終了
+  - IDLE_TIMEOUT 秒間リクエストなし → 自動終了（ソケット・PID ファイルの両方を削除する）
+  - loci server stop / SIGTERM で即終了（同上）
   - ソケットファイルは .codeatrium/embedder.sock
+  - bind 前に既存ソケットへ ping し、生存中の別プロセスが応答すれば
+    そのソケットを奪わず終了する（多重起動によるオーファン化防止。issue #16）
 """
 
 from __future__ import annotations
@@ -25,6 +27,8 @@ import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from codeatrium.paths import PID_FILENAME
 
 if TYPE_CHECKING:
     from codeatrium.embedder import Embedder
@@ -43,6 +47,26 @@ def _load_embedder() -> Embedder:
     embedder = Embedder()
     del os.environ["CODEATRIUM_NO_SOCK"]
     return embedder
+
+
+def ping_server(sock_path: Path, timeout: float = 1.0) -> bool:
+    """sock_path の Unix ソケットへ ping を送り、生存応答があれば True を返す。
+
+    埋め込みサーバーの生死判定を単一箇所に集約する正規ロジック。
+    server_cmd.py の start/status（利用側）と run_server の bind 前チェックが
+    この関数を共有することで、プロトコル詳細の重複と乖離を防ぐ。
+    """
+    if not sock_path.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(str(sock_path))
+            s.sendall(json.dumps({"type": "ping"}).encode() + b"\n")
+            resp = s.recv(256)
+            return b"ok" in resp
+    except OSError:
+        return False
 
 
 def _handle_client(
@@ -112,7 +136,18 @@ def _handle_client(
 
 def run_server(sock_path: Path) -> None:
     """ソケットサーバーを起動してリクエストを処理する（ブロッキング）"""
-    # 既存ソケットファイルを削除
+    if ping_server(sock_path):
+        # 既に生存中のプロセスが応答した場合は既存ソケットを奪わない。
+        # 無条件 unlink していた旧実装は、多重起動レース時に稼働中サーバーの
+        # ソケットを横取りしてオーファン化させていた（issue #16）。
+        print(
+            f"embedder_server: {sock_path} is already served by a running "
+            "process; exiting without binding.",
+            file=sys.stderr,
+        )
+        return
+
+    # 既存ソケットファイルを削除（応答なしの stale なファイルのみ、ここに到達する）
     sock_path.unlink(missing_ok=True)
 
     embedder = _load_embedder()
@@ -158,6 +193,7 @@ def run_server(sock_path: Path) -> None:
     finally:
         server.close()
         sock_path.unlink(missing_ok=True)
+        (sock_path.parent / PID_FILENAME).unlink(missing_ok=True)
 
 
 def main() -> None:

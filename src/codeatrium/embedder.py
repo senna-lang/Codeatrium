@@ -17,6 +17,7 @@ import json
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -123,7 +124,14 @@ class Embedder:
 
     ソケットサーバーが起動済みなら高速パス（Unix ソケット）を使い、
     なければ直接モデルをロードしてバックグラウンドでサーバーを起動する。
+
+    _model.encode は同一プロセス内の複数スレッドから並行に呼ばれ得る
+    （embedder_server.py が全クライアント接続で単一の Embedder インスタンスを
+    共有するため）。SentenceTransformer の推論はスレッドセーフを保証しないので、
+    プロセス全体で単一の _encode_lock により直列化する（issue #16）。
     """
+
+    _encode_lock = threading.Lock()
 
     def __init__(self, sock_path: Path | None = None) -> None:
         self._sock_path: Path | None = (
@@ -161,10 +169,11 @@ class Embedder:
             raise RuntimeError(
                 "モデルがロードされていません: _ensure_model() の呼び出しに失敗した可能性があります"
             )
-        result = self._model.encode(
-            [f"{prefix}{text}"],
-            normalize_embeddings=True,
-        )
+        with self._encode_lock:
+            result = self._model.encode(
+                [f"{prefix}{text}"],
+                normalize_embeddings=True,
+            )
         vec = result[0].astype(np.float32)
 
         # ③ バックグラウンドでサーバーを起動（次回から高速化）
