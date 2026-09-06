@@ -12,6 +12,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -138,18 +139,15 @@ def _session_dir() -> Path:
     return Path.home() / ".claude" / "projects"
 
 
-def _snapshot_jsonl(session_dir: Path) -> set[Path]:
-    if not session_dir.exists():
-        return set()
-    return set(session_dir.rglob("*.jsonl"))
+def _cleanup_session_jsonl(session_dir: Path, session_id: str) -> None:
+    """`--session-id` で明示指定した session_id の JSONL のみを削除する。
 
-
-def _cleanup_side_effect_jsonls(session_dir: Path, before: set[Path]) -> None:
-    """claude -p 呼び出しで生成された JSONL を削除する"""
+    別プロセスが並行して書き出す無関係なセッションの JSONL には一切触れない
+    （issue #14: before/after 差分での全削除は並行セッションのログを消しうるため廃止）。
+    """
     if not session_dir.exists():
         return
-    after = set(session_dir.rglob("*.jsonl"))
-    for p in after - before:
+    for p in session_dir.rglob(f"{session_id}.jsonl"):
         try:
             p.unlink()
         except OSError:
@@ -210,7 +208,7 @@ def _call_claude_cli(prompt: str, model: str | None = None) -> dict[str, Any]:
         raise RuntimeError("claude CLI not found in PATH")
 
     session_dir = _session_dir()
-    before = _snapshot_jsonl(session_dir)
+    session_id = str(uuid.uuid4())
 
     try:
         result = subprocess.run(
@@ -224,6 +222,8 @@ def _call_claude_cli(prompt: str, model: str | None = None) -> dict[str, Any]:
                 "--json-schema",
                 JSON_SCHEMA,
                 "--no-session-persistence",
+                "--session-id",
+                session_id,
                 "--setting-sources",
                 "",
             ],
@@ -233,7 +233,7 @@ def _call_claude_cli(prompt: str, model: str | None = None) -> dict[str, Any]:
             timeout=300,
         )
     finally:
-        _cleanup_side_effect_jsonls(session_dir, before)
+        _cleanup_session_jsonl(session_dir, session_id)
 
     if result.returncode != 0:
         raise RuntimeError(f"claude -p failed: {result.stderr}")

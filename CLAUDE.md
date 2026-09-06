@@ -146,6 +146,7 @@ If not in context, run `loci prime`.
 
 - RRF (Reciprocal Rank Fusion) を採用。CombMNZ は hit_count 問題があるため不採用
 - `loci distill` の `claude --print` 呼び出しには `--no-session-persistence --setting-sources ""` を付ける（CLAUDE.md 非読込・27K token 問題を回避）
+- `claude --print` 呼び出しごとに `--session-id` で UUID を明示指定し、副作用 JSONL のクリーンアップはその session_id のファイルのみを対象にする（issue #14: before/after ディレクトリ差分による全削除は並行する無関係セッションのログを削除しうるため廃止）
 - Embedding server は Unix socket 常駐。2回目以降の `loci search` は <0.2秒
 - コンパクション要約（"This session is being continued..."）は exchange 境界として扱わない
 - `loci init` 時に既存 exchange の蒸留範囲を対話プロンプトで選択可能（トークン消費制御）
