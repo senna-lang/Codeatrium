@@ -37,8 +37,12 @@
     `limit` *before* applying the `min_exchanges`/`branch` filters, so a
     branch- or activity-filtered query could silently drop to zero results
     even when relevant matches existed just outside the initial top-K. The
-    candidate pool is now over-fetched (`limit * 5`) ahead of filtering, and
-    the final result count is enforced afterward with an outer `LIMIT`.
+    candidate pool is now widened adaptively: it starts at `limit * 5`, and
+    if filtering leaves fewer than `limit` results while unexplored candidates
+    remain in `vec_palace`, the pool doubles and the query retries (bounded by
+    a `2000`-candidate hard cap so worst-case ANN cost stays finite even under
+    a highly selective filter). The final result count is still enforced with
+    an outer `LIMIT`.
   - `search_bm25`/`search_hnsw_palace`'s `branch` filter interpolated the
     user-supplied branch string into a `LIKE '%...%'` pattern unescaped, so
     literal `%`/`_` in the query were interpreted as SQL wildcards (e.g.

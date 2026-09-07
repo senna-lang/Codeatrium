@@ -164,13 +164,21 @@ def search_bm25(
 # ---- HNSW distilled ----
 
 
-_KNN_OVERFETCH_FACTOR = 5
-"""候補生成側の k を最終 limit の何倍取るか。
+_KNN_INITIAL_CANDIDATE_FACTOR = 5
+_KNN_CANDIDATE_GROWTH_FACTOR = 2
+_KNN_MAX_CANDIDATE_K = 2000
+"""候補生成側の k を適応的に広げるためのパラメータ。
 
 vec0 の KNN は min_exchanges/branch フィルタより先に k 件で打ち切られる。
-k を最終 limit と同値にすると、上位k件がたまたま全部フィルタ対象外だった
-場合に recall が 0 になりうる（issue #18）。フィルタ後も limit 件を狙える
-よう、候補プールは limit より大きめに取り、最終件数は outer LIMIT で絞る。
+k を固定倍率（例: limit*5）に決め打ちすると、フィルタの選択率がその倍率を
+超えて厳しい場合（例: 上位 5*limit 件が軒並みフィルタ対象外）に、閾値が
+変わっただけで同じ recall 消失が再発する（issue #18 レビュー指摘）。
+そこで k は `limit * _KNN_INITIAL_CANDIDATE_FACTOR` から始め、フィルタ後の
+件数が limit に満たず、かつ vec_palace 全体をまだ使い切っていなければ
+`_KNN_CANDIDATE_GROWTH_FACTOR` 倍して再試行する。無制限に広げるとフィルタが
+極端に厳しい場合に ANN 走査コストが際限なく増えるため、
+`_KNN_MAX_CANDIDATE_K` を最終的なハードキャップとする（この上限に達しても
+limit 件に満たない場合は、その時点までに見つかった最良の候補を返す）。
 """
 
 
@@ -180,36 +188,49 @@ def search_hnsw_palace(
     """sqlite-vec HNSW で vec_palace を検索する（distilled embedding）"""
     branch_clause = "AND e.git_branch LIKE ? ESCAPE '\\'" if branch is not None else ''
     branch_params: list = [f'%{escape_like(branch)}%'] if branch is not None else []
-    candidate_k = limit * _KNN_OVERFETCH_FACTOR
 
     with closing(get_connection(db_path)) as con:
         blob = _serialize(query_vec)
+        rows: list[sqlite3.Row] = []
         try:
-            rows = con.execute(
-                f"""
-                SELECT
-                    p.exchange_id,
-                    e.user_content,
-                    e.agent_content,
-                    p.exchange_core,
-                    p.specific_context,
-                    v.distance
-                FROM (
-                    SELECT palace_id, distance
-                    FROM vec_palace
-                    WHERE embedding MATCH ?
-                    AND k = ?
-                ) v
-                JOIN palace_objects p ON p.id = v.palace_id
-                JOIN exchanges e ON e.id = p.exchange_id
-                WHERE (SELECT COUNT(*) FROM exchanges e2
-                       WHERE e2.conversation_id = e.conversation_id) >= ?
-                {branch_clause}
-                ORDER BY v.distance
-                LIMIT ?
-                """,
-                (blob, candidate_k, min_exchanges, *branch_params, limit),
-            ).fetchall()
+            total_row = con.execute("SELECT COUNT(*) AS n FROM vec_palace").fetchone()
+            total_candidates = total_row["n"] if total_row is not None else 0
+
+            candidate_k = min(limit * _KNN_INITIAL_CANDIDATE_FACTOR, _KNN_MAX_CANDIDATE_K)
+            while True:
+                rows = con.execute(
+                    f"""
+                    SELECT
+                        p.exchange_id,
+                        e.user_content,
+                        e.agent_content,
+                        p.exchange_core,
+                        p.specific_context,
+                        v.distance
+                    FROM (
+                        SELECT palace_id, distance
+                        FROM vec_palace
+                        WHERE embedding MATCH ?
+                        AND k = ?
+                    ) v
+                    JOIN palace_objects p ON p.id = v.palace_id
+                    JOIN exchanges e ON e.id = p.exchange_id
+                    WHERE (SELECT COUNT(*) FROM exchanges e2
+                           WHERE e2.conversation_id = e.conversation_id) >= ?
+                    {branch_clause}
+                    ORDER BY v.distance
+                    LIMIT ?
+                    """,
+                    (blob, candidate_k, min_exchanges, *branch_params, limit),
+                ).fetchall()
+
+                if len(rows) >= limit:
+                    break
+                exhausted_index = candidate_k >= total_candidates
+                at_hard_cap = candidate_k >= _KNN_MAX_CANDIDATE_K
+                if exhausted_index or at_hard_cap:
+                    break
+                candidate_k = min(candidate_k * _KNN_CANDIDATE_GROWTH_FACTOR, _KNN_MAX_CANDIDATE_K)
         except sqlite3.OperationalError:
             rows = []
 

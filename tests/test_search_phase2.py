@@ -368,15 +368,16 @@ def test_search_combined_enrich_connection_leak(tmp_path: Path) -> None:
     con.close()
 
     fake_enrich_con = MagicMock()
-    stored_con = None
+    real_cons: list = []
 
     def mock_get_connection(path):
-        """最初の呼び出しは real con (search_bm25/search_hnsw 用)、
-        次の呼び出しで fake con (enrich 用) を返す"""
-        nonlocal stored_con
-        if stored_con is None:
-            stored_con = get_connection(path)
-            return stored_con
+        """search_bm25 / search_hnsw_palace 用の最初の2回はそれぞれ新規の real
+        con を返す（各関数が自前の with closing() で閉じる）。enrich 用の
+        3回目の呼び出しだけ fake con を返す。"""
+        if len(real_cons) < 2:
+            c = get_connection(path)
+            real_cons.append(c)
+            return c
         return fake_enrich_con
 
     with patch(
@@ -390,8 +391,8 @@ def test_search_combined_enrich_connection_leak(tmp_path: Path) -> None:
             )
 
     assert fake_enrich_con.close.called
-    if stored_con is not None:
-        stored_con.close()
+    for real_con in real_cons:
+        real_con.close()
 
 
 def test_search_bm25_branch_filter(tmp_path: Path) -> None:
@@ -537,6 +538,37 @@ def test_search_hnsw_palace_branch_filter_after_knn_cutoff_loses_recall(tmp_path
     con.close()
 
     results = search_hnsw_palace(db_path, query_vec, limit=2, min_exchanges=2, branch="feature-target")
+
+    assert len(results) == 1
+    assert results[0].exchange_id == "target"
+
+
+def test_search_hnsw_palace_adaptive_widening_beyond_fixed_multiplier(tmp_path: Path) -> None:
+    """フィルタの選択率が固定倍率（5x limit）を超えて厳しい場合でも、k を
+    適応的に広げて最良の候補を見つける（issue #18 レビュー指摘: 固定倍率
+    だけだと閾値が変わるだけで同じ recall 消失が再発する）。
+
+    limit=2 に対しノイズを 5*limit=10 件より多い12件用意することで、初回の
+    固定候補プール(k=10)だけでは目的ブランチの候補に届かないシナリオを作る。
+    """
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+
+    query_vec = np.ones(384, dtype=np.float32)
+    target_vec = np.full(384, 0.5, dtype=np.float32)
+
+    limit = 2
+    noise_count = limit * 5 + 2  # 初期候補プール(limit*5=10)を超える件数
+    for i in range(noise_count):
+        _insert_exchange(con, f"noise-{i}", LONG_TEXT, "resp", conv_id=f"noise-conv-{i}", git_branch="other-branch")
+        _insert_palace(con, f"noise-palace-{i}", f"noise-{i}", "noise", query_vec)
+
+    _insert_exchange(con, "target", LONG_TEXT, "resp", conv_id="target-conv", git_branch="feature-target")
+    _insert_palace(con, "target-palace", "target", "target core", target_vec)
+    con.close()
+
+    results = search_hnsw_palace(db_path, query_vec, limit=limit, min_exchanges=2, branch="feature-target")
 
     assert len(results) == 1
     assert results[0].exchange_id == "target"
