@@ -714,13 +714,19 @@ def _backfill_touch_time_symbol_edges(con: sqlite3.Connection, project_root: Pat
     this backfill applies the same resolution retroactively to touches
     already persisted under the old (live-disk) behavior.
 
-    Purely additive: only inserts new `line`-granularity edges (via the
-    same deterministic id `touches_to_edges` always uses, so re-running is
-    a no-op). Never deletes the coarser `file`-granularity edges the old
-    behavior already created — those stay harmless alongside a precise
-    match (`resolve_u1`'s symbol tier only ever joins on a non-null
-    `symbol_id`, so a leftover file-level row is never consulted once a
-    line-level row for the same exchange/file exists).
+    Purely additive on `code_edges`: only inserts new `line`-granularity
+    edges (via the same deterministic id `touches_to_edges` always uses, so
+    re-running is a no-op). Never deletes the coarser `file`-granularity
+    edges the old behavior already created — those stay harmless alongside
+    a precise match (`resolve_u1`'s symbol tier only ever joins on a
+    non-null `symbol_id`, so a leftover file-level row is never consulted
+    once a line-level row for the same exchange/file exists).
+
+    `code_symbols` rows are written with `INSERT OR REPLACE`, matching
+    `core.ingest` — this table is the authoritative current resolution
+    (`resolved_at` tracks freshness), so a retroactive resolution must be
+    able to correct a stale/wrong row rather than defer to whatever was
+    written first (issue #20).
 
     project_root-dependent (like `_backfill_legacy_code_edges`), so this
     stays outside `_MIGRATIONS`/`user_version` and runs once via a `meta`
@@ -803,7 +809,7 @@ def _backfill_touch_time_symbol_edges(con: sqlite3.Connection, project_root: Pat
             symbol_id = sha256(f"{rel_path}:{symbol.symbol_name}")
             con.execute(
                 """
-                INSERT OR IGNORE INTO code_symbols
+                INSERT OR REPLACE INTO code_symbols
                     (id, file_path, symbol_name, symbol_kind, signature,
                      line, end_line, lang, resolved_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

@@ -245,10 +245,12 @@ def _persist_artifacts(
             rel_path = normalize_repo_path(touch.file_path, str(project_root))
             if rel_path is None:
                 continue
-            for touch_row in build_code_touch_rows(
+            touch_rows = build_code_touch_rows(
                 touch, exchange_id=exchange_id, rel_file_path=rel_path
-            ):
-                con.execute(
+            )
+            touch_is_new = False
+            for touch_row in touch_rows:
+                cur = con.execute(
                     """
                     INSERT OR IGNORE INTO code_touches
                         (id, exchange_id, harness, tool_call_id, file_path,
@@ -262,6 +264,17 @@ def _persist_artifacts(
                     """,
                     touch_row,
                 )
+                if cur.rowcount > 0:
+                    touch_is_new = True
+            if not touch_is_new:
+                # Every row this touch would produce already exists — a
+                # duplicate replay of an edit already recorded (e.g. an
+                # adapter re-emitting the same tool-call event within one
+                # parse). Its contribution to code_symbols/code_edges was
+                # already applied the first time it was seen; redoing it
+                # here would double-count `added` (see ON CONFLICT below,
+                # which sums across *distinct* touches on purpose).
+                continue
             cache_key = (rel_path, touch.ts)
             symbols = symbol_cache.get(cache_key)
             if symbols is None:

@@ -16,6 +16,7 @@ from codeatrium.db import (
     get_connection,
     init_db,
 )
+from codeatrium.utils import sha256
 
 
 def test_init_db_creates_conversations_table(tmp_path: Path) -> None:
@@ -2116,6 +2117,73 @@ def test_backfill_touch_time_symbol_edges_upgrades_stale_file_edge(tmp_path: Pat
     assert granularities == {"file", "line"}
     line_edge = next(e for e in edges if e["granularity"] == "line")
     assert line_edge["symbol_id"] is not None
+
+
+def test_backfill_touch_time_symbol_edges_corrects_stale_code_symbols_row(
+    tmp_path: Path,
+) -> None:
+    """Regression for #20: `code_symbols` is the authoritative current
+    resolution (`resolved_at` tracks freshness) and must accept a corrected
+    resolution from any path that computes one. Before the fix, this
+    backfill wrote `code_symbols` with `INSERT OR IGNORE` while
+    `core.ingest` used `INSERT OR REPLACE` — a stale/wrong row already
+    present (e.g. from data written before this fix, or a resolution race)
+    could never be corrected here, permanently poisoning line-based lookups
+    (`loci context <file>:<line>`)."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    db_path = project_root / ".codeatrium" / "memory.db"
+
+    _git(project_root, "init")
+    _git(project_root, "config", "user.email", "t@t.com")
+    _git(project_root, "config", "user.name", "T")
+    src = project_root / "src.py"
+    src.write_text("def foo():\n    pass\n")
+    _git(project_root, "add", ".")
+    old_env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
+    }
+    _git(project_root, "commit", "-m", "old", env=old_env)
+
+    padding = "\n".join(f"x{i} = {i}" for i in range(100))
+    src.write_text(f"{padding}\n\ndef foo():\n    pass\n")
+    _git(project_root, "add", ".")
+    new_env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-06-01T00:00:00",
+        "GIT_COMMITTER_DATE": "2026-06-01T00:00:00",
+    }
+    _git(project_root, "commit", "-m", "new", env=new_env)
+
+    init_db(db_path)
+    con = get_connection(db_path)
+    con.execute("DELETE FROM meta WHERE key = 'touch_time_symbol_edges_backfilled'")
+    _seed_drifted_touch(con)
+    symbol_id = sha256("src.py:foo")
+    con.execute(
+        """
+        INSERT INTO code_symbols
+            (id, file_path, symbol_name, symbol_kind, signature, line, end_line, lang, resolved_at)
+        VALUES (?, 'src.py', 'foo', 'function', 'def foo():', 999, 999, '.py', '2020-01-01T00:00:00')
+        """,
+        (symbol_id,),
+    )
+    con.commit()
+
+    _backfill_touch_time_symbol_edges(con, project_root)
+    con.commit()
+
+    row = con.execute(
+        "SELECT line, end_line FROM code_symbols WHERE id = ?", (symbol_id,)
+    ).fetchone()
+    con.close()
+
+    # The seeded touch (`_seed_drifted_touch`) is timestamped against the OLD
+    # commit, where `foo` starts on line 1 — the correct resolution the
+    # backfill computes must overwrite the stale 999/999 placeholder.
+    assert (row["line"], row["end_line"]) == (1, 2)
 
 
 def test_backfill_touch_time_symbol_edges_is_idempotent(tmp_path: Path) -> None:
