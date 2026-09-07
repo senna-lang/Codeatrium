@@ -147,11 +147,22 @@ def distill_exchange(
 
 
 # ECMAScript IdentifierPart は Unicode ID_Continue、`$`、ZWNJ、ZWJ から成る。
-# ID_Continue は Unicode の指定する general category 群と Other_ID_Continue の全例外を
+# ID_Continue は ID_Start（Other_ID_Start を含む）、追加 category 群、Other_ID_Continue を
 # 合わせた導出プロパティである。正規表現依存を増やさず stdlib の Unicode database から
 # category を判定し、category だけでは表せない例外を明示する。
 _UNICODE_ID_CONTINUE_CATEGORIES = frozenset(
     {"Lu", "Ll", "Lt", "Lm", "Lo", "Nl", "Mn", "Mc", "Nd", "Pc"}
+)
+
+_OTHER_ID_START = frozenset(
+    {
+        "\u1885",
+        "\u1886",
+        "\u2118",
+        "\u212e",
+        "\u309b",
+        "\u309c",
+    }
 )
 _OTHER_ID_CONTINUE = frozenset(
     {
@@ -176,6 +187,7 @@ def _is_identifier_part(character: str) -> bool:
     return (
         character in _ECMASCRIPT_IDENTIFIER_PART_EXTRAS
         or unicodedata.category(character) in _UNICODE_ID_CONTINUE_CATEGORIES
+        or character in _OTHER_ID_START
         or character in _OTHER_ID_CONTINUE
     )
 

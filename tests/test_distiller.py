@@ -622,6 +622,12 @@ def test_save_palace_object_excludes_dollar_symbol_inside_combining_identifier(
         ("a\u1370", "U+1370 ETHIOPIC DIGIT EIGHT"),
         ("a\u1371", "U+1371 ETHIOPIC DIGIT NINE"),
         ("a\u19da", "U+19DA NEW TAI LUE THAM DIGIT ONE"),
+        ("\u1885", "U+1885 MONGOLIAN LETTER ALI GALI BALUDA"),
+        ("\u1886", "U+1886 MONGOLIAN LETTER ALI GALI THREE BALUDA"),
+        ("\u2118", "U+2118 SCRIPT CAPITAL P"),
+        ("\u212e", "U+212E ESTIMATED SYMBOL"),
+        ("\u309b", "U+309B KATAKANA-HIRAGANA VOICED SOUND MARK"),
+        ("\u309c", "U+309C KATAKANA-HIRAGANA SEMI-VOICED SOUND MARK"),
     ],
 )
 def test_save_palace_object_excludes_dollar_symbol_inside_ecmascript_identifier_part(
