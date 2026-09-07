@@ -76,12 +76,15 @@ def test_load_config_invalid_model_fallback(tmp_path: Path) -> None:
 
 
 def test_load_config_broken_toml_fallback(tmp_path: Path) -> None:
-    """壊れた TOML はデフォルトにフォールバック"""
+    """壊れた TOML はデフォルト値にフォールバックしつつ、config_error に記録する
+    （#26: 解析失敗を無言の Config() フォールバックにせず可視化する）"""
     codeatrium_dir = tmp_path / ".codeatrium"
     codeatrium_dir.mkdir()
     (codeatrium_dir / "config.toml").write_text("not valid toml [[[")
     cfg = load_config(tmp_path)
-    assert cfg == Config()
+    assert cfg == Config(config_error=cfg.config_error)
+    assert cfg.config_error is not None
+    assert "config.toml" in cfg.config_error
 
 
 def test_load_config_index_min_chars(tmp_path: Path) -> None:
@@ -130,18 +133,21 @@ def test_load_config_distill_min_chars_invalid_fallback(tmp_path: Path) -> None:
 
 
 def test_load_config_toml_decode_error_fallback(tmp_path: Path, capsys) -> None:
-    """不正な TOML 内容（TOMLDecodeError）はデフォルトにフォールバック、警告出力"""
+    """不正な TOML 内容（TOMLDecodeError）はデフォルトにフォールバック、警告出力、
+    config_error にも記録される"""
     codeatrium_dir = tmp_path / ".codeatrium"
     codeatrium_dir.mkdir()
     (codeatrium_dir / "config.toml").write_text("not valid toml [")
     cfg = load_config(tmp_path)
-    assert cfg == Config()
+    assert cfg == Config(config_error=cfg.config_error)
+    assert cfg.config_error is not None
     captured = capsys.readouterr()
     assert "Warning" in captured.err
 
 
 def test_load_config_oserror_fallback(tmp_path: Path) -> None:
-    """OSError（ファイルアクセスエラー）はデフォルトにフォールバック"""
+    """OSError（ファイルアクセスエラー）はデフォルトにフォールバック、
+    config_error にも記録される"""
     codeatrium_dir = tmp_path / ".codeatrium"
     codeatrium_dir.mkdir()
     config_file = codeatrium_dir / "config.toml"
@@ -149,7 +155,9 @@ def test_load_config_oserror_fallback(tmp_path: Path) -> None:
     # exists() は True のまま、open() だけ OSError を引き起こす
     with patch("pathlib.Path.open", side_effect=OSError("disk error")):
         cfg = load_config(tmp_path)
-    assert cfg == Config()
+    assert cfg == Config(config_error=cfg.config_error)
+    assert cfg.config_error is not None
+    assert "disk error" in cfg.config_error
 
 
 def test_load_config_provider_default(tmp_path: Path) -> None:
@@ -302,3 +310,119 @@ def test_load_config_neither_client_nor_provider_is_unconfigured(tmp_path: Path)
     cfg = load_config(tmp_path)
     assert cfg.distill_client is None
     assert cfg.distill_unconfigured is True
+
+
+
+# ---- #26: base_url 非 str の無言ドロップ / model デフォルト不整合 ----
+
+
+def test_load_config_non_str_base_url_warns(tmp_path: Path, capsys) -> None:
+    """base_url が非 str の場合、他フィールドと同様に警告を出して無視する
+    （#26: 以前は無言で None にドロップしていた）"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        "[distill]\nbase_url = 123\n"
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_base_url is None
+    assert "Warning" in capsys.readouterr().err
+
+
+def test_load_config_client_ollama_ft_missing_model_defers_to_none(
+    tmp_path: Path,
+) -> None:
+    """client = "ollama-ft" で model 未設定なら claude デフォルトを使わず None のまま
+    保持する（#26: 以前は DEFAULT_DISTILL_MODEL="claude-haiku-4-5..." を誤って
+    採用し、Ollama に claude 用モデル名を送っていた）"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text('[distill]\nclient = "ollama-ft"\n')
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client == "ollama-ft"
+    assert cfg.distill_model is None
+    assert cfg.distill_model != DEFAULT_DISTILL_MODEL
+
+
+def test_load_config_client_ollama_ft_explicit_model_kept(tmp_path: Path) -> None:
+    """client = "ollama-ft" で model が明示されていればそれを使う"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        '[distill]\nclient = "ollama-ft"\nmodel = "custom-ft:latest"\n'
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_model == "custom-ft:latest"
+
+
+def test_load_config_client_claude_cli_missing_model_uses_claude_default(
+    tmp_path: Path,
+) -> None:
+    """client = "claude-cli" で model 未設定なら claude デフォルトを使う
+    （claude 向け client は claude 専用デフォルトが正しい）"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text('[distill]\nclient = "claude-cli"\n')
+    cfg = load_config(tmp_path)
+    assert cfg.distill_model == DEFAULT_DISTILL_MODEL
+
+
+def test_load_config_legacy_provider_openai_ollama_missing_model_defers_to_none(
+    tmp_path: Path,
+) -> None:
+    """旧 provider = "openai" + Ollama base_url + model 未設定でも、claude デフォルト
+    に落ちずに None のまま保持する（registry 側の ollama-ft デフォルトへ委ねる）"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        "[distill]\nprovider = 'openai'\nbase_url = 'http://localhost:11434/v1'\n"
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client == "ollama-ft"
+    assert cfg.distill_model is None
+
+
+def test_load_config_legacy_provider_openai_compat_missing_model_defers_to_none(
+    tmp_path: Path,
+) -> None:
+    """旧 provider = "openai" + 非 Ollama base_url + model 未設定でも claude デフォルト
+    に落ちない（openai-compat には登録簿デフォルトが無いため、resolve 側で
+    エラーとして表面化させる — 誤ったモデル名を無言送信しない）"""
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        "[distill]\nprovider = 'openai'\nbase_url = 'https://api.deepseek.com'\n"
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.distill_client == "openai-compat"
+    assert cfg.distill_model is None
+
+
+def test_load_config_end_to_end_ollama_ft_resolves_to_local_distill_model(
+    tmp_path: Path,
+) -> None:
+    """end-to-end: client="ollama-ft" + model 未設定 → resolve_client が
+    LOCAL_DISTILL_MODEL を使う（claude-haiku-4-5 のような claude 専用モデル名を
+    Ollama に送らない）"""
+    from codeatrium.adapters.model.registry import resolve_client
+
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text('[distill]\nclient = "ollama-ft"\n')
+    cfg = load_config(tmp_path)
+    client = resolve_client("ollama-ft", cfg)
+    assert client.model == LOCAL_DISTILL_MODEL
+    assert client.model != DEFAULT_DISTILL_MODEL
+
+
+def test_load_config_end_to_end_openai_compat_missing_model_raises(
+    tmp_path: Path,
+) -> None:
+    """end-to-end: provider="openai" (非 Ollama) + model 未設定 → resolve_client が
+    claude デフォルトへ無言フォールバックせず ValueError で明示的に失敗する"""
+    from codeatrium.adapters.model.registry import resolve_client
+
+    (tmp_path / ".codeatrium").mkdir()
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        "[distill]\nprovider = 'openai'\nbase_url = 'https://api.deepseek.com'\n"
+    )
+    cfg = load_config(tmp_path)
+    try:
+        resolve_client("openai-compat", cfg)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised

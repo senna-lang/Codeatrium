@@ -20,7 +20,11 @@ DISCOVERABLE_CLIENT_IDS = ("ollama-ft", "claude-cli")
 
 
 def _ollama_model_pulled(model: str) -> bool:
-    """`ollama list` の出力に model 名（タグ部分を除いた repo 名）が含まれるか確認する。"""
+    """`ollama list` の NAME 列が model と完全一致する行があるか確認する。
+
+    部分一致だと `qwen2.5-7b` が `qwen2.5-7b-instruct` に誤ヒットするため、
+    各行の先頭列（NAME、空白区切り）のみを比較する。1行目はヘッダなのでスキップ。
+    """
     try:
         result = subprocess.run(
             ["ollama", "list"], capture_output=True, text=True, timeout=10
@@ -29,9 +33,9 @@ def _ollama_model_pulled(model: str) -> bool:
         return False
     if result.returncode != 0:
         return False
-    # `ollama list` は "NAME" 列にタグ付きモデル名を表示する。完全一致 or 前方一致で判定。
-    lines = result.stdout.splitlines()
-    return any(model in line for line in lines)
+    lines = result.stdout.splitlines()[1:]  # ヘッダ行 "NAME ..." を除く
+    names = {line.split()[0] for line in lines if line.split()}
+    return model in names
 
 
 def detect_ollama_ft() -> ClientStatus:
@@ -167,6 +171,8 @@ def resolve_client(client_id: str, cfg) -> ModelClient:
     if client_id == "openai-compat":
         if not cfg.distill_base_url:
             raise ValueError("openai-compat client requires distill.base_url")
+        if not cfg.distill_model:
+            raise ValueError("openai-compat client requires distill.model")
         return ModelClient(
             id="openai-compat",
             provider="openai",
@@ -195,8 +201,13 @@ def check_ready(client_id: str) -> ClientStatus:
 def write_client_config(config_path, client: ModelClient) -> None:
     """config.toml の [distill] を client/model/base_url で上書きする（他セクションは保持、
     legacy `provider` キーは書かない）。init と `loci distill --setup` の共通実装。
+
+    値は tomli_w でシリアライズする（手書き f-string 組み立てだと base_url/model に
+    `"` や `\\` が含まれた際に config.toml が壊れ、次回起動のパースが失敗するため）。
     """
     import tomllib
+
+    import tomli_w
 
     existing: dict = {}
     if config_path.exists():
@@ -212,13 +223,14 @@ def write_client_config(config_path, client: ModelClient) -> None:
     else:
         distill.pop("base_url", None)
 
+    distill_out = {
+        key: distill[key]
+        for key in ("client", "model", "base_url", "batch_limit", "min_chars")
+        if key in distill
+    }
+
     lines = ["# Codeatrium configuration", "", "[distill]"]
-    for key in ("client", "model", "base_url", "batch_limit", "min_chars"):
-        if key not in distill:
-            continue
-        val = distill[key]
-        line = f'{key} = "{val}"' if isinstance(val, str) else f"{key} = {val}"
-        lines.append(line)
+    lines.append(tomli_w.dumps(distill_out).rstrip("\n"))
     lines.append("")
     lines.append("[index]")
     index_min_chars = existing.get("index", {}).get("min_chars")

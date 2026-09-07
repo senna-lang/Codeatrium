@@ -32,7 +32,7 @@ LOCAL_DISTILL_BASE_URL = "http://localhost:11434/v1"
 class Config:
     """ユーザー設定"""
 
-    distill_model: str = DEFAULT_DISTILL_MODEL
+    distill_model: str | None = DEFAULT_DISTILL_MODEL
     distill_batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT
     index_min_chars: int = DEFAULT_INDEX_MIN_CHARS
     distill_min_chars: int = DEFAULT_DISTILL_MIN_CHARS
@@ -40,6 +40,12 @@ class Config:
     distill_base_url: str | None = None
     distill_client: str | None = None
     distill_unconfigured: bool = True
+    config_error: str | None = None
+    """config.toml の読み込み自体（TOML構文エラー/OSError）が失敗した場合のエラー
+    メッセージ。未設定（ファイルなし）と区別するためのフィールド — Stop/SessionStart
+    hook は stderr を `> /dev/null 2>&1` に捨てるため、警告の print だけでは背景
+    実行時に気づけない。`loci status` がこのフィールドを見て明示的に警告する。
+    """
 
 
 def load_config(project_root: Path) -> Config:
@@ -54,18 +60,29 @@ def load_config(project_root: Path) -> Config:
         with config_path.open("rb") as f:
             data = tomllib.load(f)
     except (FileNotFoundError, tomllib.TOMLDecodeError, OSError) as e:
-        print(f"Warning: failed to parse {config_path}: {e}", file=sys.stderr)
-        return Config()
+        error_message = f"failed to parse {config_path}: {e}"
+        print(f"Warning: {error_message}", file=sys.stderr)
+        return Config(config_error=error_message)
 
     distill: dict[str, Any] = data.get("distill", {})
 
-    model = distill.get("model", DEFAULT_DISTILL_MODEL)
-    if not isinstance(model, str) or not model.strip():
-        print(
-            "Warning: distill.model must be a non-empty string, using default.",
-            file=sys.stderr,
-        )
-        model = DEFAULT_DISTILL_MODEL
+    # model は TOML 未設定なら None のまま保持し、client 解決後（下部）に client
+    # 種別に応じたデフォルトへ委ねる。ここで claude 専用の DEFAULT_DISTILL_MODEL
+    # を先に埋めると、client="ollama-ft" や legacy provider="openai" でも
+    # claude のモデル名を Ollama/OpenAI 互換バックエンドへ送ってしまう。
+    model: str | None
+    if "model" in distill:
+        raw_model = distill["model"]
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            print(
+                "Warning: distill.model must be a non-empty string, using default.",
+                file=sys.stderr,
+            )
+            model = None
+        else:
+            model = raw_model
+    else:
+        model = None
 
     batch_limit = distill.get("batch_limit", DEFAULT_DISTILL_BATCH_LIMIT)
     if not isinstance(batch_limit, int) or batch_limit < 1:
@@ -103,6 +120,10 @@ def load_config(project_root: Path) -> Config:
 
     base_url = distill.get("base_url")
     if base_url is not None and not isinstance(base_url, str):
+        print(
+            "Warning: distill.base_url must be a string, ignoring.",
+            file=sys.stderr,
+        )
         base_url = None
 
     if provider == "openai" and (base_url is None or not base_url.strip()):
@@ -143,6 +164,13 @@ def load_config(project_root: Path) -> Config:
     else:
         distill_client = None
         distill_unconfigured = True
+
+    # model がまだ None（TOML 未設定/不正）で、claude 系 client に着地する場合
+    # のみ claude デフォルトを補う。ollama-ft/openai-compat は各自のデフォルト
+    # 解決に委ねる（registry.resolve_client 側で LOCAL_DISTILL_MODEL を適用、
+    # あるいは openai-compat のように明示指定必須ならそこでエラーにする）。
+    if model is None and distill_client in (None, "claude-cli"):
+        model = DEFAULT_DISTILL_MODEL
 
     return Config(
         distill_model=model,

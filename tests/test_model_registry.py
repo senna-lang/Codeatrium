@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from codeatrium.adapters.model.registry import (
+    _ollama_model_pulled,
     check_ready,
     detect_claude_cli,
     detect_ollama_ft,
@@ -267,3 +268,83 @@ def test_write_client_config_preserves_index_min_chars(tmp_path) -> None:
     write_client_config(config_path, client)
     content = config_path.read_text()
     assert "min_chars = 200" in content
+
+
+
+# ---- _ollama_model_pulled: NAME 列の完全一致 (#26) ----
+
+
+def test_ollama_model_pulled_exact_match(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: MagicMock(
+            returncode=0, stdout="NAME              ID       SIZE   MODIFIED\nqwen2.5-7b:latest abc123   4.7 GB 2 days ago\n"
+        ),
+    )
+    assert _ollama_model_pulled("qwen2.5-7b:latest") is True
+
+
+def test_ollama_model_pulled_rejects_substring_false_match(monkeypatch) -> None:
+    """'qwen2.5-7b' が pull 済みの 'qwen2.5-7b-instruct' に部分一致で誤ヒットしない
+    （#26: 以前は `model in line` の部分一致判定だった）"""
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: MagicMock(
+            returncode=0,
+            stdout="NAME                        ID       SIZE   MODIFIED\n"
+            "qwen2.5-7b-instruct:latest  abc123   4.7 GB 2 days ago\n",
+        ),
+    )
+    assert _ollama_model_pulled("qwen2.5-7b") is False
+
+
+def test_ollama_model_pulled_no_match_when_not_pulled(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: MagicMock(returncode=0, stdout="NAME\nother-model:latest\n"),
+    )
+    assert _ollama_model_pulled("qwen2.5-7b") is False
+
+
+def test_detect_ollama_ft_superstring_pull_is_not_ready(monkeypatch) -> None:
+    """LOCAL_DISTILL_MODEL の superstring がリストに存在しても ready にしない
+    （完全一致のみ ready 扱い）"""
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/local/bin/ollama")
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: MagicMock(
+            returncode=0, stdout=f"NAME\n{LOCAL_DISTILL_MODEL}-variant\n"
+        ),
+    )
+    status = detect_ollama_ft()
+    assert status.state == "setupable"
+    assert status.client is None
+
+
+# ---- write_client_config: TOML エスケープ (#26) ----
+
+
+def test_write_client_config_escapes_quotes_and_backslashes(tmp_path) -> None:
+    """model/base_url に `"` や `\\` を含んでいても壊れない TOML を書き、
+    再パースすると元の値が復元される（#26: 以前は f'{key} = "{val}"' で手書き
+    しており、次回起動時のパースが壊れていた）"""
+    import tomllib
+
+    from codeatrium.adapters.model.types import ModelClient
+
+    config_path = tmp_path / "config.toml"
+    tricky_model = 'weird"model\\name'
+    tricky_base_url = 'http://example.com/v1?q="x"\\y'
+    client = ModelClient(
+        id="openai-compat",
+        provider="openai",
+        model=tricky_model,
+        base_url=tricky_base_url,
+        label="OpenAI-compatible endpoint",
+    )
+    write_client_config(config_path, client)
+
+    with config_path.open("rb") as f:
+        parsed = tomllib.load(f)
+    assert parsed["distill"]["model"] == tricky_model
+    assert parsed["distill"]["base_url"] == tricky_base_url

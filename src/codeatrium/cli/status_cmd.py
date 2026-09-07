@@ -47,6 +47,16 @@ def status(
         distill_client_label = cfg.distill_client
         distill_available = check_ready(cfg.distill_client).state == "ready"
 
+    # config.toml の構文エラーは background hook からは stderr が
+    # `> /dev/null 2>&1` に捨てられ気づけないため、`loci status` で明示的に
+    # 警告する（load_config は既定へフォールバックしただけで、それ自体は
+    # distill_unconfigured と区別が付かない）。
+    if cfg.config_error:
+        typer.echo(
+            f"⚠ config.toml failed to parse, running unconfigured: {cfg.config_error}",
+            err=True,
+        )
+
     drifts = check_drift(db)
     for key, recorded, current in drifts:
         typer.echo(
@@ -62,6 +72,7 @@ def status(
             json.dumps(
                 {
                     "db_path": str(db),
+                    "config_error": cfg.config_error,
                     "exchanges": total,
                     "distilled": distilled,
                     "skipped": skipped,
@@ -85,3 +96,5 @@ def status(
         typer.echo(f"Symbols   : {symbol_count}")
         avail = "ready" if distill_available else "not ready"
         typer.echo(f"Distill   : {distill_client_label} ({avail})")
+        if cfg.config_error:
+            typer.echo(f"Config    : ⚠ parse error — {cfg.config_error}")
