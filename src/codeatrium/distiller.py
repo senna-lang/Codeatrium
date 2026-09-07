@@ -147,17 +147,16 @@ def distill_exchange(
 
 # シンボル本文言及チェックの境界判定に使う識別子文字。Python の \b は \w（Unicode
 # 文字・数字・アンダースコア）基準のため、JS/TS の `$trace` のように非 \w 文字で
-# 始まる識別子は空白の後に \b の境界が立たず誤って不一致になる。識別子として
-# 実際に使われる文字（英数字・アンダースコア・$）を明示し、独自に境界を判定する。
-_IDENTIFIER_CHAR = r"[A-Za-z0-9_$]"
+# 始まる識別子は空白の後に \b の境界が立たず誤って不一致になる。Unicode の文字も
+# 識別子の一部として扱うため、\w に $ を加えて独自に境界を判定する。
+_IDENTIFIER_CHAR = r"[\w$]"
 
 
 def _symbol_mentioned_in_body(symbol_name: str, body_text: str) -> bool:
     """symbol_name が body_text 中に識別子境界つきで出現するか判定する。
 
-    単純な部分一致（in 演算子）では、1文字シンボル名（例: "a"）が任意の単語に
-    混入して全マッチしてしまうため、識別子文字（英数字・_・$）の直前直後に
-    別の識別子文字が続かないことを条件に判定する。
+    混入して全マッチしてしまうため、Unicode の文字を含む識別子文字（\\w と $）の
+    直前直後に別の識別子文字が続かないことを条件に判定する。
     """
     pattern = (
         rf"(?<!{_IDENTIFIER_CHAR}){re.escape(symbol_name)}(?!{_IDENTIFIER_CHAR})"

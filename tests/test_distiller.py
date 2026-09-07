@@ -531,6 +531,41 @@ def test_save_palace_object_includes_dollar_prefixed_symbol_in_body(
 
     assert count == 1
 
+def test_save_palace_object_excludes_dollar_symbol_inside_unicode_identifier(
+    tmp_path,
+) -> None:
+    """$trace は TypeScript の別の Unicode 識別子 λ$trace 内では言及扱いしない。"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path, "ex1", user_text="updated λ$trace " * 5, agent_text="more text " * 5
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "$trace"
+    sym.symbol_kind = "variable"
+    sym.signature = "const $trace"
+    sym.line = 1
+    sym.file_path = "src/foo.ts"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.ts"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == 0
+
 
 def test_save_palace_object_sets_distilled_at(tmp_path) -> None:
     db_path = tmp_path / "memory.db"
