@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from codeatrium.adapters.harness import claude as claude_adapter
 from codeatrium.adapters.harness import codex as codex_adapter
@@ -736,6 +737,33 @@ def _epoch_ms_to_iso(epoch_ms: int) -> str:
     return datetime.fromtimestamp(epoch_ms / 1000, tz=UTC).isoformat()
 
 
+def _parse_opencode_row(
+    kind: str, row: sqlite3.Row, session_id: str
+) -> tuple[int, str, dict] | None:
+    """message/part の1行を envelope に変換する。
+
+    不正 JSON・NULL の time_created/data、および dict でない JSON 値
+    （null・配列・文字列など）を持つ破損行は None を返す
+    （1行の破損が DB 全体の取り込みを中断させないよう、呼び出し側でスキップする）。
+    """
+    try:
+        data = json.loads(row["data"])
+        if not isinstance(data, dict):
+            return None
+        envelope: dict = {
+            "kind": kind,
+            "id": row["id"],
+            "session_id": session_id,
+            "timestamp": _epoch_ms_to_iso(row["time_created"]),
+            "data": data,
+        }
+        if kind == "part":
+            envelope["message_id"] = row["message_id"]
+        return row["time_created"], row["id"], envelope
+    except (TypeError, ValueError, OverflowError, json.JSONDecodeError):
+        return None
+
+
 def _load_opencode_raw_entries(
     src: sqlite3.Connection, session_id: str
 ) -> tuple[list[dict | None], str]:
@@ -756,34 +784,13 @@ def _load_opencode_raw_entries(
 
     ordered: list[tuple[int, str, dict]] = []
     for row in messages:
-        ordered.append(
-            (
-                row["time_created"],
-                row["id"],
-                {
-                    "kind": "message",
-                    "id": row["id"],
-                    "session_id": session_id,
-                    "timestamp": _epoch_ms_to_iso(row["time_created"]),
-                    "data": json.loads(row["data"]),
-                },
-            )
-        )
+        parsed = _parse_opencode_row("message", row, session_id)
+        if parsed is not None:
+            ordered.append(parsed)
     for row in parts:
-        ordered.append(
-            (
-                row["time_created"],
-                row["id"],
-                {
-                    "kind": "part",
-                    "id": row["id"],
-                    "message_id": row["message_id"],
-                    "session_id": session_id,
-                    "timestamp": _epoch_ms_to_iso(row["time_created"]),
-                    "data": json.loads(row["data"]),
-                },
-            )
-        )
+        parsed = _parse_opencode_row("part", row, session_id)
+        if parsed is not None:
+            ordered.append(parsed)
     ordered.sort(key=lambda item: (item[0], item[1]))
 
     raw_entries: list[dict | None] = [entry for _, _, entry in ordered]
@@ -791,6 +798,17 @@ def _load_opencode_raw_entries(
         _epoch_ms_to_iso(ordered[0][0]) if ordered else datetime.now(UTC).isoformat()
     )
     return raw_entries, started_at
+
+
+def _is_legacy_opencode_turn_id(source_turn_id: str) -> bool:
+    """このパッチより前の index_opencode_db が書き込んだ position ベースの
+    source_turn_id（str(ply_start)、短い数値文字列）かどうかを判定する。
+
+    新スキームの source_turn_id は常に sha256 hexdigest（64桁の16進文字列）で、
+    数字だけになる確率は無視できるほど低いため、「全桁が数字」かつ「64桁未満」を
+    旧スキームの判定に使う。
+    """
+    return source_turn_id.isdigit() and len(source_turn_id) < 64
 
 
 def index_opencode_db(
@@ -812,14 +830,16 @@ def index_opencode_db(
     if project_root is None:
         return 0
 
-    src = sqlite3.connect(f"file:{opencode_db_path}?mode=ro", uri=True)
+    db_uri = f"file:{quote(str(opencode_db_path), safe='/')}?mode=ro"
+    src = sqlite3.connect(db_uri, uri=True)
     src.row_factory = sqlite3.Row
     try:
         project_root_real = os.path.realpath(str(project_root))
         project_ids = [
             row["id"]
             for row in src.execute("SELECT id, worktree FROM project")
-            if os.path.realpath(row["worktree"]) == project_root_real
+            if row["worktree"] is not None
+            and os.path.realpath(row["worktree"]) == project_root_real
         ]
         if not project_ids:
             return 0
@@ -836,21 +856,79 @@ def index_opencode_db(
             for session_row in session_rows:
                 session_id = session_row["id"]
                 source_path = f"{opencode_db_path}#{session_id}"
-                conversation_id = sha256(source_path)
 
-                row = con.execute(
-                    "SELECT last_ply_end FROM conversations WHERE id = ?",
-                    (conversation_id,),
-                ).fetchone()
-                last_ply_end = row["last_ply_end"] if row is not None else -1
+                # ply_start はセッション内での位置添字で、新規メッセージが既存より
+                # 古い time_created で到着すると添字が全体シフトする。位置ではなく
+                # exchange.id（user message id 由来で位置非依存）で既取り込み分を
+                # 判定し、旧ターンの再emit/新規ターンの取りこぼしを防ぐ。
+                #
+                # 後方互換: このパッチより前に取り込んだ行は source_turn_id に
+                # str(ply_start)（位置そのもの）を格納しており、位置は安定した
+                # identity ではない。アップグレード後に新規メッセージが
+                # out-of-order で到着すると位置が全体シフトするため、position での
+                # 突き合わせでは新規メッセージを誤って「既知」扱いし、旧 exchange を
+                # 新ハッシュ id で二重登録してしまう（#48 レビュー指摘）。
+                # 位置ではなく実際の内容（user_content・agent_content の組）で
+                # 旧行と現在のパース結果を突き合わせ、一致した旧行の
+                # source_turn_id / ply_start / ply_end / session_ref を新しい
+                # 位置・スキームへその場で書き換える。id/canonical_exchange_id は
+                # 変更しない — code_touches / exchange_files / palace_objects /
+                # vec_exchanges からの exchange_id 参照はそのまま有効であり、以後の
+                # 重複判定は本関数の事前フィルタのみで行われるため書き換え不要。
+                #
+                # 同一セッション内で (user_content, agent_content) が完全一致する
+                # legacy exchange が複数存在し得る（同じ発話の繰り返し等）ため、
+                # content キーごとに候補を list で保持し、元の ply_start 昇順で
+                # FIFO 消費する。old メッセージ同士の相対順序は新規メッセージの
+                # 挿入位置に関わらず保存される（time_created が不変なため）ので、
+                # 現在のパース結果を ply_start 昇順で辿る順序と一致し、1対1で
+                # 正しく対応付けられる。単一 dict スロットだと2件目が1件目を
+                # 上書きし、シフト後に片方が永久に重複したまま残ってしまう。
+                existing_rows = con.execute(
+                    "SELECT source_turn_id, ply_start, user_content, agent_content "
+                    "FROM exchanges WHERE harness = 'opencode' "
+                    "AND source_session_id = ?",
+                    (session_id,),
+                ).fetchall()
+                known_exchange_ids = {row["source_turn_id"] for row in existing_rows}
+                legacy_by_content: dict[tuple[str, str], list[sqlite3.Row]] = {}
+                for row in existing_rows:
+                    if _is_legacy_opencode_turn_id(row["source_turn_id"]):
+                        key = (row["user_content"], row["agent_content"])
+                        legacy_by_content.setdefault(key, []).append(row)
+                for candidates in legacy_by_content.values():
+                    candidates.sort(key=lambda row: row["ply_start"])
 
                 raw_entries, started_at = _load_opencode_raw_entries(src, session_id)
                 exchanges = parse_opencode_exchanges(
                     source_path, raw_entries, min_chars=min_chars
                 )
-                new_exchanges = [
-                    ex for ex in exchanges if ex.ply_start > last_ply_end
-                ]
+                new_exchanges = []
+                for exchange in exchanges:
+                    if exchange.id in known_exchange_ids:
+                        continue
+                    candidates = legacy_by_content.get(
+                        (exchange.user_content, exchange.agent_content)
+                    )
+                    if candidates:
+                        legacy_row = candidates.pop(0)
+                        con.execute(
+                            "UPDATE exchanges SET source_turn_id = ?, "
+                            "ply_start = ?, ply_end = ?, session_ref = ? "
+                            "WHERE harness = 'opencode' AND source_session_id = ? "
+                            "AND source_turn_id = ?",
+                            (
+                                exchange.id,
+                                exchange.ply_start,
+                                exchange.ply_end,
+                                f"{source_path}#ply="
+                                f"{exchange.ply_start}-{exchange.ply_end}",
+                                session_id,
+                                legacy_row["source_turn_id"],
+                            ),
+                        )
+                        continue
+                    new_exchanges.append(exchange)
                 if not new_exchanges:
                     continue
 
@@ -887,7 +965,7 @@ def index_opencode_db(
                     if touches or renames:
                         artifacts.append(
                             ExchangeArtifacts(
-                                source_turn_id=str(exchange.ply_start),
+                                source_turn_id=exchange.id,
                                 code_touches=touches,
                                 file_renames=renames,
                             )
@@ -901,7 +979,7 @@ def index_opencode_db(
                                 f"{exchange.ply_start}-{exchange.ply_end}"
                             ),
                             source_session_id=session_id,
-                            source_turn_id=str(exchange.ply_start),
+                            source_turn_id=exchange.id,
                             ply_start=exchange.ply_start,
                             ply_end=exchange.ply_end,
                             user_content=exchange.user_content,
