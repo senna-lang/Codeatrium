@@ -2131,29 +2131,29 @@ def test_backfill_touch_time_symbol_edges_never_clobbers_current_symbol_row(
     project_root.mkdir()
     db_path = project_root / ".codeatrium" / "memory.db"
 
-    _git(project_root, "init")
-    _git(project_root, "config", "user.email", "t@t.com")
-    _git(project_root, "config", "user.name", "T")
+    run_git(project_root, "init")
+    run_git(project_root, "config", "user.email", "t@t.com")
+    run_git(project_root, "config", "user.name", "T")
     src = project_root / "src.py"
     src.write_text("def foo():\n    pass\n")
-    _git(project_root, "add", ".")
+    run_git(project_root, "add", ".")
     old_env = {
         **os.environ,
         "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
         "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
     }
-    _git(project_root, "commit", "-m", "old", env=old_env)
+    run_git(project_root, "commit", "-m", "old", env=old_env)
 
     # foo() moves far down the file — its up-to-date location.
     padding = "\n".join(f"x{i} = {i}" for i in range(100))
     src.write_text(f"{padding}\n\ndef foo():\n    pass\n")
-    _git(project_root, "add", ".")
+    run_git(project_root, "add", ".")
     new_env = {
         **os.environ,
         "GIT_AUTHOR_DATE": "2026-06-01T00:00:00",
         "GIT_COMMITTER_DATE": "2026-06-01T00:00:00",
     }
-    _git(project_root, "commit", "-m", "new", env=new_env)
+    run_git(project_root, "commit", "-m", "new", env=new_env)
 
     current_symbol = next(
         s for s in SymbolResolver().extract(src) if s.symbol_name == "foo"
