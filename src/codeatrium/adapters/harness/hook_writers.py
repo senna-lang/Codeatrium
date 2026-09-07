@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,12 +58,11 @@ class MergedJsonHookWriter:
         self._events = tuple(events)
 
     def install(self, settings_path: Path) -> tuple[bool, str]:
-        from codeatrium.hooks import _write_settings
+        from codeatrium.hooks import _load_settings, _write_settings
 
         settings: dict[str, Any] = {}
         if settings_path.exists():
-            with settings_path.open(encoding="utf-8") as stream:
-                settings = json.load(stream)
+            settings = _load_settings(settings_path)
         hooks = settings.setdefault("hooks", {})
         changed = False
         for spec in self._events:
@@ -91,12 +89,11 @@ class MergedJsonHookWriter:
         return True, f"Hooks installed: {settings_path}"
 
     def uninstall(self, settings_path: Path) -> tuple[bool, str]:
-        from codeatrium.hooks import _write_settings
+        from codeatrium.hooks import _load_settings, _write_settings
 
         if not settings_path.exists():
             return False, f"No {self._harness} hooks file found. Nothing to uninstall."
-        with settings_path.open(encoding="utf-8") as stream:
-            settings: dict[str, Any] = json.load(stream)
+        settings: dict[str, Any] = _load_settings(settings_path)
         hooks = settings.get("hooks", {})
         changed = False
         for spec in self._events:

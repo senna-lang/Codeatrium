@@ -540,3 +540,220 @@ def test_hook_uninstall_empty_matcher_removed(tmp_path, monkeypatch):
             # 各エントリは空でない hooks を持つこと
             hooks = entry.get("hooks", [])
             assert len(hooks) > 0
+
+
+# ---- issue #28: matcher差分検知・loci_bin prefix一致・不正JSON・backup rotation ----
+
+
+def test_hook_install_detects_loci_hooks_under_non_canonical_matcher(
+    tmp_path, monkeypatch
+):
+    """SessionStart の matcher がカノニカル文字列と異なっていても既存の loci
+    フックを検知し、重複登録しない（issue #28: matcher差分での重複登録）。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "codeatrium.adapters.harness.lifecycle.loci_bin",
+        lambda: "/fake/venv/bin/loci",
+    )
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "/fake/venv/bin/loci index --harness claude",
+                                    "async": True,
+                                }
+                            ]
+                        }
+                    ],
+                    "SessionStart": [
+                        {
+                            # ユーザーがカスタマイズした matcher（正準文字列と異なる）
+                            "matcher": "startup|resume",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "nohup /fake/venv/bin/loci server start > /dev/null 2>&1 &",
+                                },
+                                {
+                                    "type": "command",
+                                    "command": "nohup /fake/venv/bin/loci distill --limit 20 > /dev/null 2>&1 &",
+                                },
+                                {
+                                    "type": "command",
+                                    "command": "/fake/venv/bin/loci prime",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+
+    from codeatrium.hooks import install_hooks
+
+    changed, _message = install_hooks(batch_limit=20)
+
+    assert changed is False  # 既に登録済みとして検知され、重複追加されない
+    data = json.loads(settings_path.read_text())
+    session_start_entries = data["hooks"]["SessionStart"]
+    # カスタム matcher のエントリがそのまま残り、正準 matcher の新規エントリは
+    # 作られない（= 重複登録されていない）
+    assert len(session_start_entries) == 1
+    assert session_start_entries[0]["matcher"] == "startup|resume"
+    assert len(session_start_entries[0]["hooks"]) == 3
+
+
+def test_hook_uninstall_does_not_delete_unrelated_command_with_loci_substring(
+    tmp_path, monkeypatch
+):
+    """コマンドパスにたまたま "loci" を含むだけの無関係なユーザーコマンドを
+    誤って削除しない（issue #28: _is_loci 部分一致の脆弱性、loci_bin prefix一致に）。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    # "loci" と "index" の両方を含むが、実体は無関係な
+                                    # ユーザースクリプト
+                                    "command": "/home/user/tools/my-loci-backup.sh --index",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    from codeatrium.hooks import uninstall_hooks
+
+    changed, message = uninstall_hooks()
+
+    assert changed is False
+    assert "Nothing to uninstall" in message or "No codeatrium" in message
+    data = json.loads(settings_path.read_text())
+    stop_commands = [
+        h["command"] for entry in data["hooks"]["Stop"] for h in entry["hooks"]
+    ]
+    assert "/home/user/tools/my-loci-backup.sh --index" in stop_commands
+
+
+def test_install_hooks_malformed_json_raises_actionable_error(tmp_path, monkeypatch):
+    """settings.json が壊れている場合、生のトレースバックではなく actionable な
+    エラーを送出し、書き込みを拒否する（issue #28: 不正 settings.json 未処理）。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text("{not valid json")
+
+    from codeatrium.hooks import SettingsLoadError, install_hooks
+
+    with pytest.raises(SettingsLoadError, match="invalid JSON"):
+        install_hooks()
+
+    # 壊れた元ファイルは無傷（書き込みを拒否した）
+    assert settings_path.read_text() == "{not valid json"
+
+
+def test_uninstall_hooks_malformed_json_raises_actionable_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text("{not valid json")
+
+    from codeatrium.hooks import SettingsLoadError, uninstall_hooks
+
+    with pytest.raises(SettingsLoadError, match="invalid JSON"):
+        uninstall_hooks()
+
+    assert settings_path.read_text() == "{not valid json"
+
+
+def test_hook_install_cli_malformed_json_gives_actionable_message_not_traceback(
+    tmp_path, monkeypatch
+):
+    """CLI 経由でも生トレースバックではなく actionable なメッセージで exit する。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text("{not valid json")
+
+    result = runner.invoke(app, ["hook", "install"])
+
+    assert result.exit_code == 1
+    assert "invalid JSON" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_write_settings_rotates_backup_before_overwriting(tmp_path, monkeypatch):
+    """2回連続の書き込みでも、直前の内容は世代アーカイブとして残る
+    （issue #28: .bak 単一世代の頑健性問題）。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+
+    from codeatrium.hooks import _write_settings
+
+    _write_settings(settings_path, {"gen": 0})
+    _write_settings(settings_path, {"gen": 1})
+    _write_settings(settings_path, {"gen": 2})
+
+    bak_path = settings_path.with_suffix(".json.bak")
+    assert json.loads(bak_path.read_text())["gen"] == 1
+
+    archives = sorted(settings_path.parent.glob("settings.json.bak.*"))
+    assert len(archives) == 1
+    assert json.loads(archives[0].read_text())["gen"] == 0
+
+
+def test_write_settings_two_consecutive_writes_preserve_last_known_good_backup(
+    tmp_path, monkeypatch
+):
+    """2回連続の(仮に)不正な書き込みでも、最後の正常な内容の backup が
+    失われない（issue #28 のコアシナリオ: 旧実装は2回目の書き込みで .bak が
+    上書きされ、最後の正常な状態への復旧手段が消えていた）。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(json.dumps({"good": True}))
+
+    from codeatrium.hooks import _write_settings
+
+    _write_settings(settings_path, {"bad": 1})
+    _write_settings(settings_path, {"bad": 2})
+
+    archived_contents = [
+        json.loads(p.read_text())
+        for p in settings_path.parent.glob("settings.json.bak.*")
+    ]
+    assert {"good": True} in archived_contents
+
+
+def test_write_settings_backup_rotation_caps_generations(tmp_path, monkeypatch):
+    """世代アーカイブは直近 N 世代のみ保持し、無限に増え続けない。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+
+    from codeatrium.hooks import _MAX_BACKUP_GENERATIONS, _write_settings
+
+    for gen in range(_MAX_BACKUP_GENERATIONS + 5):
+        _write_settings(settings_path, {"gen": gen})
+
+    archives = list(settings_path.parent.glob("settings.json.bak.*"))
+    assert len(archives) <= _MAX_BACKUP_GENERATIONS

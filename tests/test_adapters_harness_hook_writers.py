@@ -165,6 +165,36 @@ def test_merged_json_uninstall_no_managed_hooks_is_noop(tmp_path: Path) -> None:
     assert "nothing to uninstall" in message.lower()
 
 
+def test_merged_json_install_malformed_json_raises_actionable_error(
+    tmp_path: Path,
+) -> None:
+    """settings.json が壊れている場合、生の JSONDecodeError トレースバックでは
+    なく actionable なエラーを送出し書き込みを拒否する（issue #28）。"""
+    target = tmp_path / "hooks.json"
+    target.write_text("{not valid json")
+
+    from codeatrium.hooks import SettingsLoadError
+
+    with pytest.raises(SettingsLoadError, match="invalid JSON"):
+        _writer().install(target)
+
+    assert target.read_text() == "{not valid json"
+
+
+def test_merged_json_uninstall_malformed_json_raises_actionable_error(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "hooks.json"
+    target.write_text("{not valid json")
+
+    from codeatrium.hooks import SettingsLoadError
+
+    with pytest.raises(SettingsLoadError, match="invalid JSON"):
+        _writer().uninstall(target)
+
+    assert target.read_text() == "{not valid json"
+
+
 # ---- DedicatedFileWriter ----
 
 
