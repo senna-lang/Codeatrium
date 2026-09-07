@@ -5,6 +5,7 @@ call_claude・Embedder はモックしてモデルロードを避ける
 """
 
 import hashlib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -159,6 +160,46 @@ def test_extract_files_relative_paths_unaffected_by_root() -> None:
         project_root="/home/user/myproject",
     )
     assert result == ["src/app.py"]
+
+
+def test_extract_files_project_root_rejects_adjacent_repo_name_prefix() -> None:
+    """project_root と文字列前方一致するだけの別リポジトリは外部として除外する
+    (/home/u/repo と /home/u/repo-other を前方一致で誤って同一と判定しないこと)
+    """
+    result = extract_files_touched(
+        "/home/u/repo-other/src/app.py",
+        "",
+        project_root="/home/u/repo",
+    )
+    assert result == []
+
+
+def test_extract_files_project_root_resolves_symlinks(tmp_path) -> None:
+    """project_root とファイルパスが別の symlink 経路で報告されても
+    実体パスが一致すれば内部ファイルとして残る
+    """
+    real_root = tmp_path / "actual"
+    (real_root / "src").mkdir(parents=True)
+    (real_root / "src" / "app.py").write_text("x = 1")
+    link_root = tmp_path / "link"
+    link_root.symlink_to(real_root)
+
+    result = extract_files_touched(
+        f"{link_root}/src/app.py を修正した", "", project_root=str(real_root)
+    )
+    assert result == [f"{link_root}/src/app.py"]
+
+
+def test_extract_files_rejects_version_like_path() -> None:
+    """foo/v1.2 のようなバージョン文字列を touched file として誤検出しない"""
+    result = extract_files_touched("foo/v1.2 を試した", "")
+    assert result == []
+
+
+def test_extract_files_rejects_domain_like_path() -> None:
+    """example.com/page.html のような URL パスを touched file として誤検出しない"""
+    result = extract_files_touched("example.com/page.html を見た", "")
+    assert result == []
 
 
 # --- distill_exchange ---
@@ -344,6 +385,105 @@ def test_save_palace_object_includes_symbol_in_body(tmp_path) -> None:
     con.close()
 
     assert count == 1
+
+
+def test_save_palace_object_resolves_relative_path_against_project_root(
+    tmp_path,
+) -> None:
+    """相対パスの files_touched は蒸留プロセスの CWD ではなく project_root を
+    基準に解決してからシンボル抽出する
+    """
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+
+    resolver = MagicMock()
+    resolver.extract.return_value = []
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.py"],
+    )
+    save_palace_object(
+        db_path,
+        "ex1",
+        palace,
+        np.zeros(384, dtype=np.float32),
+        resolver=resolver,
+        project_root="/home/user/myproject",
+    )
+
+    resolver.extract.assert_called_once_with(Path("/home/user/myproject/src/foo.py"))
+
+
+def test_save_palace_object_keeps_absolute_path_with_project_root(tmp_path) -> None:
+    """files_touched が既に絶対パスの場合は project_root を連結しない"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+
+    resolver = MagicMock()
+    resolver.extract.return_value = []
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["/other/abs/foo.py"],
+    )
+    save_palace_object(
+        db_path,
+        "ex1",
+        palace,
+        np.zeros(384, dtype=np.float32),
+        resolver=resolver,
+        project_root="/home/user/myproject",
+    )
+
+    resolver.extract.assert_called_once_with(Path("/other/abs/foo.py"))
+
+
+def test_save_palace_object_single_char_symbol_requires_word_boundary(
+    tmp_path,
+) -> None:
+    """1文字シンボル名は単語境界つきで判定され、無関係な単語には誤マッチしない
+    (部分一致だと banana や apple の中の "a" にも全マッチしてしまう)
+    """
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path,
+        "ex1",
+        user_text="banana and apple " * 5,
+        agent_text="more text " * 5,
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "a"
+    sym.symbol_kind = "variable"
+    sym.signature = "a = 1"
+    sym.line = 1
+    sym.file_path = "src/foo.py"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.py"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == 0
 
 
 def test_save_palace_object_sets_distilled_at(tmp_path) -> None:
