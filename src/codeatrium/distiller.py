@@ -14,12 +14,14 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+from codeatrium.code_touches import is_external_path, normalize_repo_path
 from codeatrium.embedder import Embedder, EmbedderSetupError
 from codeatrium.llm import DISTILL_PROMPT_TEMPLATE, DistillBackend, call_claude
 from codeatrium.models import PalaceObject
@@ -31,39 +33,31 @@ if TYPE_CHECKING:
 # ---- ファイルパス抽出 ----
 
 _FILES_PATTERN = re.compile(
-    r"(/(?:[a-zA-Z0-9._\-]+/)*[a-zA-Z0-9._\-]+\.[a-zA-Z0-9]+)"  # 絶対パス
-    r"|([a-zA-Z0-9._\-]+(?:/[a-zA-Z0-9._\-]+)+\.[a-zA-Z0-9]+)"  # 相対パス（1段以上のディレクトリ）
+    r"(?<![A-Za-z0-9_.])"
+    r"(?:"
+    r"(/(?:[a-zA-Z0-9._\-]+/)*[a-zA-Z0-9._\-]+\.[a-zA-Z][a-zA-Z0-9]*)"  # 絶対パス
+    r"|"
+    r"((?:\.?[a-zA-Z0-9_\-]+)(?:/(?:\.?[a-zA-Z0-9_\-]+))*/[a-zA-Z0-9._\-]+\.[a-zA-Z][a-zA-Z0-9]*)"  # 相対パス（隠しディレクトリの先頭ドットのみ許容・1段以上、拡張子は英字始まり）
+    r")"
 )
 
 
 # ---- 公開 API ----
 
 
-_EXTERNAL_PATH_MARKERS = (
-    "site-packages/",
-    "dist-packages/",
-    "/lib/python",
-    "/opt/",
-    "/usr/lib/",
-    "/usr/local/lib/",
-    ".venv/",
-    "/venv/",
-    "node_modules/",
-)
-
-
 def _is_external_path(path: str, project_root: str | None = None) -> bool:
     """プロジェクト外のパスか判定する。
 
-    絶対パス: project_root が指定されていればその配下かチェック。
-    相対パス: ハードコードマーカーでフィルタ。
+    絶対パス: project_root が指定されていれば code_touches.normalize_repo_path の
+    パス部品比較で判定する（文字列前方一致では隣接リポジトリ、例えば /home/u/repo と
+    /home/u/repo-other を誤って同一プロジェクトと判定してしまうため、これを避ける）。
+    相対パス、または project_root 不明時はハードコードマーカーでフォールバックする。
     """
     if path.startswith("/"):
-        # 絶対パス: project_root 配下でなければ外部
         if project_root:
-            return not path.startswith(project_root)
+            return normalize_repo_path(path, project_root) is None
         # project_root 不明時はマーカーでフォールバック
-    return any(marker in path for marker in _EXTERNAL_PATH_MARKERS)
+    return is_external_path(path)
 
 
 def extract_files_touched(
@@ -75,13 +69,11 @@ def extract_files_touched(
     相対パスはハードコードマーカー（node_modules 等）でフィルタする。
     """
     text = user_content + "\n" + agent_content
-    # project_root を末尾スラッシュ付きに正規化
-    root_prefix = (project_root.rstrip("/") + "/") if project_root else None
     seen: set[str] = set()
     result: list[str] = []
     for m in _FILES_PATTERN.findall(text):
         path = m[0] or m[1]
-        if path and path not in seen and not _is_external_path(path, root_prefix):
+        if path and path not in seen and not _is_external_path(path, project_root):
             seen.add(path)
             result.append(path)
     return result
@@ -133,12 +125,11 @@ def distill_exchange(
     )
 
     # Merge: primary パスをフィルタして、fallback との重複排除
-    root_prefix = (project_root.rstrip("/") + "/") if project_root else None
     seen: set[str] = set()
     files_touched: list[str] = []
 
     for path in primary_paths:
-        if path not in seen and not _is_external_path(path, root_prefix):
+        if path not in seen and not _is_external_path(path, project_root):
             seen.add(path)
             files_touched.append(path)
 
@@ -155,6 +146,99 @@ def distill_exchange(
     )
 
 
+# ECMAScript IdentifierPart は Unicode ID_Continue、`$`、ZWNJ、ZWJ から成る。
+# ID_Continue は ID_Start（Other_ID_Start を含む）、追加 category 群、Other_ID_Continue を
+# 合わせた導出プロパティである。正規表現依存を増やさず stdlib の Unicode database から
+# category を判定し、category だけでは表せない例外を明示する。
+_UNICODE_ID_CONTINUE_CATEGORIES = frozenset(
+    {"Lu", "Ll", "Lt", "Lm", "Lo", "Nl", "Mn", "Mc", "Nd", "Pc"}
+)
+
+_OTHER_ID_START = frozenset(
+    {
+        "\u1885",
+        "\u1886",
+        "\u2118",
+        "\u212e",
+        "\u309b",
+        "\u309c",
+    }
+)
+_OTHER_ID_CONTINUE = frozenset(
+    {
+        "\u00b7",
+        "\u0387",
+        "\u1369",
+        "\u136a",
+        "\u136b",
+        "\u136c",
+        "\u136d",
+        "\u136e",
+        "\u136f",
+        "\u1370",
+        "\u1371",
+        "\u19da",
+    }
+)
+_ECMASCRIPT_IDENTIFIER_PART_EXTRAS = frozenset({"$", "\u200c", "\u200d"})
+
+
+def _is_identifier_part(character: str) -> bool:
+    return (
+        character in _ECMASCRIPT_IDENTIFIER_PART_EXTRAS
+        or unicodedata.category(character) in _UNICODE_ID_CONTINUE_CATEGORIES
+        or character in _OTHER_ID_START
+        or character in _OTHER_ID_CONTINUE
+    )
+
+
+def _decode_unicode_escape_before(text: str, index: int) -> str | None:
+    """index の直前で終わる ECMAScript Unicode escape を1文字だけ復元する。"""
+    fixed_width_start = index - 6
+    if fixed_width_start >= 0 and text.startswith(r"\u", fixed_width_start):
+        digits = text[fixed_width_start + 2 : index]
+        if all(character in "0123456789abcdefABCDEF" for character in digits):
+            return chr(int(digits, 16))
+
+    if index >= 5 and text[index - 1] == "}":
+        for digit_count in range(1, 7):
+            escape_start = index - digit_count - 4
+            if escape_start < 0 or not text.startswith(r"\u{", escape_start):
+                continue
+            digits = text[escape_start + 3 : index - 1]
+            if all(character in "0123456789abcdefABCDEF" for character in digits):
+                code_point = int(digits, 16)
+                if code_point <= 0x10FFFF:
+                    return chr(code_point)
+
+    return None
+
+
+def _is_identifier_part_before(text: str, index: int) -> bool:
+    """text の index 直前が ECMAScript IdentifierPart か判定する。"""
+    if index == 0:
+        return False
+    escaped_character = _decode_unicode_escape_before(text, index)
+    if escaped_character is not None:
+        return _is_identifier_part(escaped_character)
+    return _is_identifier_part(text[index - 1])
+
+
+def _symbol_mentioned_in_body(symbol_name: str, body_text: str) -> bool:
+    """symbol_name が body_text 中に識別子境界つきで出現するか判定する。"""
+    start = body_text.find(symbol_name)
+    while start != -1:
+        end = start + len(symbol_name)
+        previous_is_identifier_part = _is_identifier_part_before(body_text, start)
+        next_is_identifier_part = (
+            end < len(body_text) and _is_identifier_part(body_text[end])
+        )
+        if not previous_is_identifier_part and not next_is_identifier_part:
+            return True
+        start = body_text.find(symbol_name, start + 1)
+    return False
+
+
 def save_palace_object(
     db_path: Path,
     exchange_id: str,
@@ -162,8 +246,13 @@ def save_palace_object(
     embedding: Any,  # np.ndarray
     resolver: SymbolResolver | None = None,
     symbol_cache: dict[str, list[Any]] | None = None,
+    project_root: str | None = None,
 ) -> None:
-    """PalaceObject を DB に保存し exchange の distilled_at を更新する"""
+    """PalaceObject を DB に保存し exchange の distilled_at を更新する
+
+    project_root が指定された場合、files_touched の相対パスはプロセスの CWD ではなく
+    project_root を基準に解決してから tree-sitter でシンボル抽出する。
+    """
     import numpy as np
 
     from codeatrium.db import get_connection
@@ -253,12 +342,16 @@ def save_palace_object(
             if symbol_cache is not None and file_str in symbol_cache:
                 syms = symbol_cache[file_str]
             else:
-                syms = resolver.extract(Path(file_str))
+                resolved_path = Path(file_str)
+                if project_root and not resolved_path.is_absolute():
+                    resolved_path = Path(project_root) / resolved_path
+                syms = resolver.extract(resolved_path)
                 if symbol_cache is not None:
                     symbol_cache[file_str] = syms
             for sym in syms:
                 # Body-mention filter: skip symbol if not mentioned in exchange
-                if sym.symbol_name not in body_text:
+                # （単語境界つき。部分一致だと1文字シンボル名が全マッチしてしまう）
+                if not _symbol_mentioned_in_body(sym.symbol_name, body_text):
                     continue
 
                 # Compute sym_id with palace_id, dedup_hash separate
@@ -368,7 +461,15 @@ def distill_all(
             )
             distill_text = palace.exchange_core + "\n" + palace.specific_context
             vec = embedder.embed_passage(distill_text)
-            save_palace_object(db_path, row["id"], palace, vec, resolver=resolver, symbol_cache=symbol_cache)
+            save_palace_object(
+                db_path,
+                row["id"],
+                palace,
+                vec,
+                resolver=resolver,
+                symbol_cache=symbol_cache,
+                project_root=project_root,
+            )
             count += 1
         except EmbedderSetupError:
             # 環境レベルの失敗: per-row でなくループ全体を中断する

@@ -5,6 +5,7 @@ call_claude・Embedder はモックしてモデルロードを避ける
 """
 
 import hashlib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -159,6 +160,54 @@ def test_extract_files_relative_paths_unaffected_by_root() -> None:
         project_root="/home/user/myproject",
     )
     assert result == ["src/app.py"]
+
+
+def test_extract_files_project_root_rejects_adjacent_repo_name_prefix() -> None:
+    """project_root と文字列前方一致するだけの別リポジトリは外部として除外する
+    (/home/u/repo と /home/u/repo-other を前方一致で誤って同一と判定しないこと)
+    """
+    result = extract_files_touched(
+        "/home/u/repo-other/src/app.py",
+        "",
+        project_root="/home/u/repo",
+    )
+    assert result == []
+
+
+def test_extract_files_project_root_resolves_symlinks(tmp_path) -> None:
+    """project_root とファイルパスが別の symlink 経路で報告されても
+    実体パスが一致すれば内部ファイルとして残る
+    """
+    real_root = tmp_path / "actual"
+    (real_root / "src").mkdir(parents=True)
+    (real_root / "src" / "app.py").write_text("x = 1")
+    link_root = tmp_path / "link"
+    link_root.symlink_to(real_root)
+
+    result = extract_files_touched(
+        f"{link_root}/src/app.py を修正した", "", project_root=str(real_root)
+    )
+    assert result == [f"{link_root}/src/app.py"]
+
+
+def test_extract_files_rejects_version_like_path() -> None:
+    """foo/v1.2 のようなバージョン文字列を touched file として誤検出しない"""
+    result = extract_files_touched("foo/v1.2 を試した", "")
+    assert result == []
+
+
+def test_extract_files_rejects_domain_like_path() -> None:
+    """example.com/page.html のような URL パスを touched file として誤検出しない"""
+    result = extract_files_touched("example.com/page.html を見た", "")
+    assert result == []
+
+
+def test_extract_files_keeps_hidden_dot_directory() -> None:
+    """.github/workflows/ci.yml のような先頭ドットの隠しディレクトリは
+    touched file として抽出される（ドメイン・版数の誤検知防止と両立させる）
+    """
+    result = extract_files_touched(".github/workflows/ci.yml を変更", "")
+    assert result == [".github/workflows/ci.yml"]
 
 
 # --- distill_exchange ---
@@ -344,6 +393,332 @@ def test_save_palace_object_includes_symbol_in_body(tmp_path) -> None:
     con.close()
 
     assert count == 1
+
+
+def test_save_palace_object_resolves_relative_path_against_project_root(
+    tmp_path,
+) -> None:
+    """相対パスの files_touched は蒸留プロセスの CWD ではなく project_root を
+    基準に解決してからシンボル抽出する
+    """
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+
+    resolver = MagicMock()
+    resolver.extract.return_value = []
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.py"],
+    )
+    save_palace_object(
+        db_path,
+        "ex1",
+        palace,
+        np.zeros(384, dtype=np.float32),
+        resolver=resolver,
+        project_root="/home/user/myproject",
+    )
+
+    resolver.extract.assert_called_once_with(Path("/home/user/myproject/src/foo.py"))
+
+
+def test_save_palace_object_keeps_absolute_path_with_project_root(tmp_path) -> None:
+    """files_touched が既に絶対パスの場合は project_root を連結しない"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+
+    resolver = MagicMock()
+    resolver.extract.return_value = []
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["/other/abs/foo.py"],
+    )
+    save_palace_object(
+        db_path,
+        "ex1",
+        palace,
+        np.zeros(384, dtype=np.float32),
+        resolver=resolver,
+        project_root="/home/user/myproject",
+    )
+
+    resolver.extract.assert_called_once_with(Path("/other/abs/foo.py"))
+
+
+def test_save_palace_object_single_char_symbol_requires_word_boundary(
+    tmp_path,
+) -> None:
+    """1文字シンボル名は単語境界つきで判定され、無関係な単語には誤マッチしない
+    (部分一致だと banana や apple の中の "a" にも全マッチしてしまう)
+    """
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path,
+        "ex1",
+        user_text="banana and apple " * 5,
+        agent_text="more text " * 5,
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "a"
+    sym.symbol_kind = "variable"
+    sym.signature = "a = 1"
+    sym.line = 1
+    sym.file_path = "src/foo.py"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.py"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == 0
+
+
+def test_save_palace_object_includes_dollar_prefixed_symbol_in_body(
+    tmp_path,
+) -> None:
+    """$trace のような記号始まりの識別子は、空白の後に本文で正確に言及されて
+    いれば検出される（\\b は非単語文字の直前に境界を作らないため見落とされていた）
+    """
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path, "ex1", user_text="updated $trace " * 5, agent_text="more text " * 5
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "$trace"
+    sym.symbol_kind = "variable"
+    sym.signature = "const $trace"
+    sym.line = 1
+    sym.file_path = "src/foo.ts"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.ts"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == 1
+
+def test_save_palace_object_excludes_dollar_symbol_inside_unicode_identifier(
+    tmp_path,
+) -> None:
+    """$trace は TypeScript の別の Unicode 識別子 λ$trace 内では言及扱いしない。"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path, "ex1", user_text="updated λ$trace " * 5, agent_text="more text " * 5
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "$trace"
+    sym.symbol_kind = "variable"
+    sym.signature = "const $trace"
+    sym.line = 1
+    sym.file_path = "src/foo.ts"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.ts"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == 0
+
+def test_save_palace_object_excludes_dollar_symbol_inside_combining_identifier(
+    tmp_path,
+) -> None:
+    """$trace は分解済み a + U+0301 を含む別の TypeScript 識別子では言及扱いしない。"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path,
+        "ex1",
+        user_text="updated a\u0301$trace " * 5,
+        agent_text="more text " * 5,
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "$trace"
+    sym.symbol_kind = "variable"
+    sym.signature = "const $trace"
+    sym.line = 1
+    sym.file_path = "src/foo.ts"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.ts"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == 0
+
+@pytest.mark.parametrize(
+    ("prefix", "expected_count", "description"),
+    [
+        (r"a\u309B", 0, "fixed-width U+309B escape"),
+        (r"a\u{309B}", 0, "braced U+309B escape"),
+        (r"a\u{002D}", 1, "valid escape for non-IdentifierPart U+002D"),
+        (r"a\u{not-a-code-point}", 1, "malformed braced escape"),
+    ],
+)
+def test_save_palace_object_handles_dollar_symbol_after_unicode_escape(
+    tmp_path,
+    prefix: str,
+    expected_count: int,
+    description: str,
+) -> None:
+    """直前の Unicode escape が IdentifierPart の場合だけ $trace を除外する。"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path,
+        "ex1",
+        user_text=f"updated {prefix}$trace " * 5,
+        agent_text="more text " * 5,
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "$trace"
+    sym.symbol_kind = "variable"
+    sym.signature = "const $trace"
+    sym.line = 1
+    sym.file_path = "src/foo.ts"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.ts"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == expected_count, description
+
+@pytest.mark.parametrize(
+    ("prefix", "description"),
+    [
+        ("a\u203f", "U+203F UNDERTIE"),
+        ("a\u200c", "U+200C ZERO WIDTH NON-JOINER"),
+        ("a\u200d", "U+200D ZERO WIDTH JOINER"),
+        ("a\u00b7", "U+00B7 MIDDLE DOT"),
+        ("a\u0387", "U+0387 GREEK ANO TELEIA"),
+        ("a\u1369", "U+1369 ETHIOPIC DIGIT ONE"),
+        ("a\u136a", "U+136A ETHIOPIC DIGIT TWO"),
+        ("a\u136b", "U+136B ETHIOPIC DIGIT THREE"),
+        ("a\u136c", "U+136C ETHIOPIC DIGIT FOUR"),
+        ("a\u136d", "U+136D ETHIOPIC DIGIT FIVE"),
+        ("a\u136e", "U+136E ETHIOPIC DIGIT SIX"),
+        ("a\u136f", "U+136F ETHIOPIC DIGIT SEVEN"),
+        ("a\u1370", "U+1370 ETHIOPIC DIGIT EIGHT"),
+        ("a\u1371", "U+1371 ETHIOPIC DIGIT NINE"),
+        ("a\u19da", "U+19DA NEW TAI LUE THAM DIGIT ONE"),
+        ("\u1885", "U+1885 MONGOLIAN LETTER ALI GALI BALUDA"),
+        ("\u1886", "U+1886 MONGOLIAN LETTER ALI GALI THREE BALUDA"),
+        ("\u2118", "U+2118 SCRIPT CAPITAL P"),
+        ("\u212e", "U+212E ESTIMATED SYMBOL"),
+        ("\u309b", "U+309B KATAKANA-HIRAGANA VOICED SOUND MARK"),
+        ("\u309c", "U+309C KATAKANA-HIRAGANA SEMI-VOICED SOUND MARK"),
+    ],
+)
+def test_save_palace_object_excludes_dollar_symbol_inside_ecmascript_identifier_part(
+    tmp_path,
+    prefix: str,
+    description: str,
+) -> None:
+    """$trace は全 ECMAScript IdentifierPart の接頭辞内では言及扱いしない。"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path,
+        "ex1",
+        user_text=f"updated {prefix}$trace " * 5,
+        agent_text="more text " * 5,
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "$trace"
+    sym.symbol_kind = "variable"
+    sym.signature = "const $trace"
+    sym.line = 1
+    sym.file_path = "src/foo.ts"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.ts"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == 0, description
 
 
 def test_save_palace_object_sets_distilled_at(tmp_path) -> None:
