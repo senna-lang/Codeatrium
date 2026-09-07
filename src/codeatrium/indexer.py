@@ -724,16 +724,20 @@ def _parse_opencode_row(
 ) -> tuple[int, str, dict] | None:
     """message/part の1行を envelope に変換する。
 
-    不正 JSON・NULL の time_created/data など破損行は None を返す
+    不正 JSON・NULL の time_created/data、および dict でない JSON 値
+    （null・配列・文字列など）を持つ破損行は None を返す
     （1行の破損が DB 全体の取り込みを中断させないよう、呼び出し側でスキップする）。
     """
     try:
+        data = json.loads(row["data"])
+        if not isinstance(data, dict):
+            return None
         envelope: dict = {
             "kind": kind,
             "id": row["id"],
             "session_id": session_id,
             "timestamp": _epoch_ms_to_iso(row["time_created"]),
-            "data": json.loads(row["data"]),
+            "data": data,
         }
         if kind == "part":
             envelope["message_id"] = row["message_id"]
@@ -828,6 +832,12 @@ def index_opencode_db(
                 # 古い time_created で到着すると添字が全体シフトする。位置ではなく
                 # exchange.id（user message id 由来で位置非依存）で既取り込み分を
                 # 判定し、旧ターンの再emit/新規ターンの取りこぼしを防ぐ。
+                #
+                # 後方互換: この修正より前に取り込んだ行は source_turn_id に
+                # str(ply_start)（数値文字列）を格納している。新スキームの
+                # exchange.id（sha256 ハッシュ）とは一致しないため、旧スキームの
+                # 数値 id も known set に含め、二重登録を防ぐ（新スキームの id は
+                # 常にハッシュ文字列なので、数値文字列との衝突は起きない）。
                 known_exchange_ids = {
                     row["source_turn_id"]
                     for row in con.execute(
@@ -842,7 +852,10 @@ def index_opencode_db(
                     source_path, raw_entries, min_chars=min_chars
                 )
                 new_exchanges = [
-                    ex for ex in exchanges if ex.id not in known_exchange_ids
+                    ex
+                    for ex in exchanges
+                    if ex.id not in known_exchange_ids
+                    and str(ex.ply_start) not in known_exchange_ids
                 ]
                 if not new_exchanges:
                     continue
