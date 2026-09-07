@@ -32,6 +32,20 @@
 
 ### Fixed
 
+- `loci search`'s KNN→filter ordering and branch matching (issue #18):
+  - `search_hnsw_palace` cut the sqlite-vec KNN candidate pool to exactly
+    `limit` *before* applying the `min_exchanges`/`branch` filters, so a
+    branch- or activity-filtered query could silently drop to zero results
+    even when relevant matches existed just outside the initial top-K. The
+    candidate pool is now over-fetched (`limit * 5`) ahead of filtering, and
+    the final result count is enforced afterward with an outer `LIMIT`.
+  - `search_bm25`/`search_hnsw_palace`'s `branch` filter interpolated the
+    user-supplied branch string into a `LIKE '%...%'` pattern unescaped, so
+    literal `%`/`_` in the query were interpreted as SQL wildcards (e.g.
+    `main` incorrectly matching `maintenance`/`feat/main-x`). Wildcard
+    characters are now escaped (new `codeatrium.utils.escape_like`) and the
+    clause carries an explicit `ESCAPE '\\'`; substring matching on
+    non-wildcard input is unchanged.
 - Embedding server lifecycle races (issue #16): `loci server start` now serializes
   the check→spawn→ready-wait sequence behind a process-wide `server.lock`
   (`fcntl.flock`), eliminating double-spawn/orphaning under concurrent sessions.

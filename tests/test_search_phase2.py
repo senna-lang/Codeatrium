@@ -448,3 +448,95 @@ def test_enrich_results_populates_git_branch(tmp_path: Path) -> None:
     results = search_combined(db_path, "connection pool", vec, limit=5)
     assert len(results) >= 1
     assert results[0].git_branch == "feature-x"
+
+
+# ---- issue #18: branch LIKE の未エスケープ + KNN→フィルタ順 recall 低下 ----
+
+
+def test_search_bm25_branch_underscore_is_not_a_wildcard(tmp_path: Path) -> None:
+    """`_` は LIKE の1文字ワイルドカードなので、未エスケープだと無関係な
+    ブランチにも部分一致してしまう（issue #18）"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "exact", LONG_TEXT, "pool response", conv_id="c1", git_branch="release_1.0")
+    _insert_exchange(con, "wrong", LONG_TEXT, "pool response", conv_id="c2", git_branch="releaseX1.0")
+    con.close()
+
+    results = search_bm25(db_path, "connection pool", branch="release_1.0")
+
+    assert {r.exchange_id for r in results} == {"exact"}
+
+
+def test_search_bm25_branch_percent_is_not_a_wildcard(tmp_path: Path) -> None:
+    """`%` は LIKE の任意長ワイルドカードなので、未エスケープだと無関係な
+    ブランチにも一致してしまう（issue #18）"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "exact", LONG_TEXT, "pool response", conv_id="c1", git_branch="rel%main")
+    _insert_exchange(con, "wrong", LONG_TEXT, "pool response", conv_id="c2", git_branch="relXXXXmain")
+    con.close()
+
+    results = search_bm25(db_path, "connection pool", branch="rel%main")
+
+    assert {r.exchange_id for r in results} == {"exact"}
+
+
+def test_search_bm25_branch_still_matches_as_substring(tmp_path: Path) -> None:
+    """ワイルドカード非対象の入力では、従来通り部分一致で動作し続ける（回帰防止）"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "ex1", LONG_TEXT, "pool response", git_branch="release/1.0-hardening")
+    con.close()
+
+    results = search_bm25(db_path, "connection pool", branch="1.0-hardening")
+    assert len(results) == 1
+    assert results[0].exchange_id == "ex1"
+
+
+def test_search_hnsw_branch_underscore_is_not_a_wildcard(tmp_path: Path) -> None:
+    """search_hnsw_palace の branch フィルタでも `_` を literal として扱う（issue #18）"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    query_vec = np.ones(384, dtype=np.float32)
+    _insert_exchange(con, "exact", LONG_TEXT, "resp", conv_id="c1", git_branch="release_1.0")
+    _insert_palace(con, "p-exact", "exact", "core", query_vec)
+    _insert_exchange(con, "wrong", LONG_TEXT, "resp", conv_id="c2", git_branch="releaseX1.0")
+    _insert_palace(con, "p-wrong", "wrong", "core", query_vec)
+    con.close()
+
+    results = search_hnsw_palace(db_path, query_vec, limit=10, min_exchanges=2, branch="release_1.0")
+
+    assert {r.exchange_id for r in results} == {"exact"}
+
+
+def test_search_hnsw_palace_branch_filter_after_knn_cutoff_loses_recall(tmp_path: Path) -> None:
+    """KNN の候補が limit 件で打ち切られてから branch/min_exchanges で絞ると、
+    目的の結果が近傍圏外に押し出されて recall が失われる（issue #18）。
+    候補生成側の k は最終 limit より大きく取り、フィルタ後に outer LIMIT で
+    絞らなければならない。"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+
+    query_vec = np.ones(384, dtype=np.float32)
+    target_vec = np.full(384, 0.5, dtype=np.float32)
+
+    # クエリベクトルに極めて近いが、目的ブランチではないノイズを複数件用意する。
+    # limit=2 のとき、これらだけで KNN の上位2枠が埋まってしまう。
+    for i in range(3):
+        _insert_exchange(con, f"noise-{i}", LONG_TEXT, "resp", conv_id=f"noise-conv-{i}", git_branch="other-branch")
+        _insert_palace(con, f"noise-palace-{i}", f"noise-{i}", "noise", query_vec)
+
+    # 目的ブランチの唯一の候補は、クエリベクトルからやや離れている
+    _insert_exchange(con, "target", LONG_TEXT, "resp", conv_id="target-conv", git_branch="feature-target")
+    _insert_palace(con, "target-palace", "target", "target core", target_vec)
+    con.close()
+
+    results = search_hnsw_palace(db_path, query_vec, limit=2, min_exchanges=2, branch="feature-target")
+
+    assert len(results) == 1
+    assert results[0].exchange_id == "target"

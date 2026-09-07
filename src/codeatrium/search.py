@@ -28,6 +28,7 @@ from codeatrium.models import (
     FusedResult,
     HNSWPalaceResult,
 )
+from codeatrium.utils import escape_like
 
 # ---- 内部ヘルパー ----
 
@@ -125,8 +126,8 @@ def search_bm25(
 ) -> list[BM25Result]:
     """FTS5 BM25 で exchanges_fts を検索する"""
     fts_query = _fts5_query(query_text)
-    branch_clause = 'AND e.git_branch LIKE ?' if branch is not None else ''
-    branch_params: list = [f'%{branch}%'] if branch is not None else []
+    branch_clause = "AND e.git_branch LIKE ? ESCAPE '\\'" if branch is not None else ''
+    branch_params: list = [f'%{escape_like(branch)}%'] if branch is not None else []
     with closing(get_connection(db_path)) as con:
         try:
             rows = con.execute(
@@ -163,12 +164,23 @@ def search_bm25(
 # ---- HNSW distilled ----
 
 
+_KNN_OVERFETCH_FACTOR = 5
+"""候補生成側の k を最終 limit の何倍取るか。
+
+vec0 の KNN は min_exchanges/branch フィルタより先に k 件で打ち切られる。
+k を最終 limit と同値にすると、上位k件がたまたま全部フィルタ対象外だった
+場合に recall が 0 になりうる（issue #18）。フィルタ後も limit 件を狙える
+よう、候補プールは limit より大きめに取り、最終件数は outer LIMIT で絞る。
+"""
+
+
 def search_hnsw_palace(
     db_path: Path, query_vec: np.ndarray, limit: int = 10, min_exchanges: int = 2, branch: str | None = None
 ) -> list[HNSWPalaceResult]:
     """sqlite-vec HNSW で vec_palace を検索する（distilled embedding）"""
-    branch_clause = 'AND e.git_branch LIKE ?' if branch is not None else ''
-    branch_params: list = [f'%{branch}%'] if branch is not None else []
+    branch_clause = "AND e.git_branch LIKE ? ESCAPE '\\'" if branch is not None else ''
+    branch_params: list = [f'%{escape_like(branch)}%'] if branch is not None else []
+    candidate_k = limit * _KNN_OVERFETCH_FACTOR
 
     with closing(get_connection(db_path)) as con:
         blob = _serialize(query_vec)
@@ -194,8 +206,9 @@ def search_hnsw_palace(
                        WHERE e2.conversation_id = e.conversation_id) >= ?
                 {branch_clause}
                 ORDER BY v.distance
+                LIMIT ?
                 """,
-                (blob, limit, min_exchanges, *branch_params),
+                (blob, candidate_k, min_exchanges, *branch_params, limit),
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
