@@ -140,6 +140,35 @@ def test_status_shows_ready_distill_client(tmp_path, monkeypatch):
     assert data["distill_available"] is True
 
 
+def test_status_surfaces_broken_config_toml(tmp_path, monkeypatch):
+    """壊れた config.toml は distill_client="unconfigured" に落ちるだけでなく、
+    config_error として明示的に可視化される（#26: 従来は stderr の print だけで、
+    hook のバックグラウンド実行時（stderr は /dev/null に捨てられる）は
+    気づけなかった）"""
+    _setup_db(tmp_path)
+    (tmp_path / ".codeatrium" / "config.toml").write_text("not valid toml [[[")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["status", "--json"])
+    data = json.loads(result.stdout)
+    assert data["distill_client"] == "unconfigured"
+    assert data["config_error"] is not None
+    assert "config.toml" in data["config_error"]
+
+    text_result = runner.invoke(app, ["status"])
+    assert "parse error" in text_result.output
+
+
+def test_status_no_config_error_when_unconfigured(tmp_path, monkeypatch):
+    """config.toml が存在しない通常の未設定状態では config_error は None のまま
+    （壊れた設定との取り違えを防ぐ）"""
+    _setup_db(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["status", "--json"])
+    data = json.loads(result.output)
+    assert data["config_error"] is None
+
+
 # ---- hook install ----
 
 
