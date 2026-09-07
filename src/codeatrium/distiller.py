@@ -36,7 +36,7 @@ _FILES_PATTERN = re.compile(
     r"(?:"
     r"(/(?:[a-zA-Z0-9._\-]+/)*[a-zA-Z0-9._\-]+\.[a-zA-Z][a-zA-Z0-9]*)"  # 絶対パス
     r"|"
-    r"([a-zA-Z0-9_\-]+(?:/[a-zA-Z0-9_\-]+)*/[a-zA-Z0-9._\-]+\.[a-zA-Z][a-zA-Z0-9]*)"  # 相対パス（ディレクトリ部にドット不可・1段以上、拡張子は英字始まり）
+    r"((?:\.?[a-zA-Z0-9_\-]+)(?:/(?:\.?[a-zA-Z0-9_\-]+))*/[a-zA-Z0-9._\-]+\.[a-zA-Z][a-zA-Z0-9]*)"  # 相対パス（隠しディレクトリの先頭ドットのみ許容・1段以上、拡張子は英字始まり）
     r")"
 )
 
@@ -145,13 +145,24 @@ def distill_exchange(
     )
 
 
+# シンボル本文言及チェックの境界判定に使う識別子文字。Python の \b は \w（Unicode
+# 文字・数字・アンダースコア）基準のため、JS/TS の `$trace` のように非 \w 文字で
+# 始まる識別子は空白の後に \b の境界が立たず誤って不一致になる。識別子として
+# 実際に使われる文字（英数字・アンダースコア・$）を明示し、独自に境界を判定する。
+_IDENTIFIER_CHAR = r"[A-Za-z0-9_$]"
+
+
 def _symbol_mentioned_in_body(symbol_name: str, body_text: str) -> bool:
-    """symbol_name が body_text 中に単語境界つきで出現するか判定する。
+    """symbol_name が body_text 中に識別子境界つきで出現するか判定する。
 
     単純な部分一致（in 演算子）では、1文字シンボル名（例: "a"）が任意の単語に
-    混入して全マッチしてしまうため、単語境界（\\b）で区切って判定する。
+    混入して全マッチしてしまうため、識別子文字（英数字・_・$）の直前直後に
+    別の識別子文字が続かないことを条件に判定する。
     """
-    return re.search(rf"\b{re.escape(symbol_name)}\b", body_text) is not None
+    pattern = (
+        rf"(?<!{_IDENTIFIER_CHAR}){re.escape(symbol_name)}(?!{_IDENTIFIER_CHAR})"
+    )
+    return re.search(pattern, body_text) is not None
 
 
 def save_palace_object(
