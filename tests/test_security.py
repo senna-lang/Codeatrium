@@ -29,7 +29,11 @@ runner = CliRunner()
 def test_hooks_quotes_loci_path_with_spaces() -> None:
     """パスにスペースを含む場合、shlex.quote でエスケープされる"""
     fake_path = "/Users/test user/venvs/my env/bin/loci"
-    with patch("codeatrium.hooks.loci_bin", return_value=fake_path):
+    # loci_bin の実際の呼び出し元は lifecycle_commands()（codeatrium.hooks はそれを
+    # 消費するだけ）に一元化された（issue #40）。
+    with patch(
+        "codeatrium.adapters.harness.lifecycle.loci_bin", return_value=fake_path
+    ):
         with patch("codeatrium.hooks.Path") as mock_path_cls:
             with patch("codeatrium.hooks._write_settings"):
                 mock_settings = mock_path_cls.home.return_value / ".claude" / "settings.json"
@@ -41,7 +45,10 @@ def test_hooks_quotes_loci_path_with_spaces() -> None:
 
 def test_hooks_batch_limit_cast_to_int() -> None:
     """batch_limit が int にキャストされることを確認"""
-    with patch("codeatrium.hooks.loci_bin", return_value="/usr/bin/loci"):
+    with patch(
+        "codeatrium.adapters.harness.lifecycle.loci_bin",
+        return_value="/usr/bin/loci",
+    ):
         with patch("codeatrium.hooks.Path") as mock_path_cls:
             with patch("codeatrium.hooks._write_settings"):
                 mock_settings = mock_path_cls.home.return_value / ".claude" / "settings.json"

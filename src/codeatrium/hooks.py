@@ -1,18 +1,23 @@
-"""Claude Code hook 設定の JSON 操作ロジック"""
+"""Claude Code hook 設定の JSON 操作ロジック。
+
+lifecycle イベント→コマンドの対応は `adapters.harness.lifecycle.lifecycle_commands()`
+が唯一の正規情報源（design doc harness-hook-abstraction.md §4.1）。ここでは
+settings.json への差分検出・自動修復・matcher マージという Claude 固有の
+idempotency ロジックだけを担う。
+"""
 
 from __future__ import annotations
 
 import copy
 import json
 import os
-import shlex
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, cast
 
+from codeatrium.adapters.harness.lifecycle import lifecycle_commands
 from codeatrium.config import DEFAULT_DISTILL_BATCH_LIMIT
-from codeatrium.paths import loci_bin
 
 
 def _write_settings(settings_path: Path, settings: dict[str, Any]) -> None:
@@ -56,11 +61,9 @@ def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool,
         settings = {}
 
     hooks = settings.setdefault("hooks", {})
-    loci = shlex.quote(loci_bin())
-    index_cmd = f"{loci} index"
-    distill_cmd = f"nohup {loci} distill --limit {int(batch_limit)} > /dev/null 2>&1 &"
-    server_cmd = f"nohup {loci} server start > /dev/null 2>&1 &"
-    prime_cmd = f"{loci} prime"
+    commands = lifecycle_commands("claude", batch_limit)
+    index_cmd = commands.on_turn_end
+    server_cmd, distill_cmd, prime_cmd = commands.on_session_start
     changed = False
 
     # --- Stop hook: loci index (async: true) ---
