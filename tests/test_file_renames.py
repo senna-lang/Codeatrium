@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 from codeatrium.db import get_connection, init_db
 from codeatrium.file_renames import parse_rename_log, resolve_aliases
+from tests.conftest import run_git
 
 # ---- parse_rename_log（純関数） ----
 
@@ -41,21 +41,17 @@ def test_parse_rename_log_ignores_unrelated_lines() -> None:
 # ---- resolve_aliases（git 呼び出し・キャッシュ） ----
 
 
-def _run(args: list[str], cwd: Path) -> None:
-    subprocess.run(args, cwd=cwd, check=True, capture_output=True)
-
-
 def _make_git_repo_with_rename(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _run(["git", "init", "-q"], repo)
-    _run(["git", "config", "user.email", "test@example.com"], repo)
-    _run(["git", "config", "user.name", "test"], repo)
+    run_git(repo, "init", "-q")
+    run_git(repo, "config", "user.email", "test@example.com")
+    run_git(repo, "config", "user.name", "test")
     (repo / "old_name.py").write_text("def f():\n    return 1\n")
-    _run(["git", "add", "."], repo)
-    _run(["git", "commit", "-q", "-m", "init"], repo)
-    _run(["git", "mv", "old_name.py", "new_name.py"], repo)
-    _run(["git", "commit", "-q", "-m", "rename"], repo)
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-q", "-m", "init")
+    run_git(repo, "mv", "old_name.py", "new_name.py")
+    run_git(repo, "commit", "-q", "-m", "rename")
     return repo
 
 
@@ -63,16 +59,16 @@ def _make_git_repo_with_two_hop_rename(tmp_path: Path) -> Path:
     """old_name.py -> mid_name.py -> new_name.py と2回改名した履歴"""
     repo = tmp_path / "repo"
     repo.mkdir()
-    _run(["git", "init", "-q"], repo)
-    _run(["git", "config", "user.email", "test@example.com"], repo)
-    _run(["git", "config", "user.name", "test"], repo)
+    run_git(repo, "init", "-q")
+    run_git(repo, "config", "user.email", "test@example.com")
+    run_git(repo, "config", "user.name", "test")
     (repo / "old_name.py").write_text("def f():\n    return 1\n")
-    _run(["git", "add", "."], repo)
-    _run(["git", "commit", "-q", "-m", "init"], repo)
-    _run(["git", "mv", "old_name.py", "mid_name.py"], repo)
-    _run(["git", "commit", "-q", "-m", "rename1"], repo)
-    _run(["git", "mv", "mid_name.py", "new_name.py"], repo)
-    _run(["git", "commit", "-q", "-m", "rename2"], repo)
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-q", "-m", "init")
+    run_git(repo, "mv", "old_name.py", "mid_name.py")
+    run_git(repo, "commit", "-q", "-m", "rename1")
+    run_git(repo, "mv", "mid_name.py", "new_name.py")
+    run_git(repo, "commit", "-q", "-m", "rename2")
     return repo
 
 
@@ -157,14 +153,14 @@ def test_resolve_aliases_handles_non_ascii_renamed_path(tmp_path: Path) -> None:
     されたままで実際のファイル名と一致しない（issue #19）。"""
     repo = tmp_path / "repo"
     repo.mkdir()
-    _run(["git", "init", "-q"], repo)
-    _run(["git", "config", "user.email", "test@example.com"], repo)
-    _run(["git", "config", "user.name", "test"], repo)
+    run_git(repo, "init", "-q")
+    run_git(repo, "config", "user.email", "test@example.com")
+    run_git(repo, "config", "user.name", "test")
     (repo / "café.py").write_text("def f():\n    return 1\n", encoding="utf-8")
-    _run(["git", "add", "."], repo)
-    _run(["git", "commit", "-q", "-m", "init"], repo)
-    _run(["git", "mv", "café.py", "new_name.py"], repo)
-    _run(["git", "commit", "-q", "-m", "rename"], repo)
+    run_git(repo, "add", ".")
+    run_git(repo, "commit", "-q", "-m", "init")
+    run_git(repo, "mv", "café.py", "new_name.py")
+    run_git(repo, "commit", "-q", "-m", "rename")
     con = _setup_db(tmp_path)
 
     aliases = resolve_aliases(con, str(repo), "new_name.py")
