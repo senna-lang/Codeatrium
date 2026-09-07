@@ -144,3 +144,159 @@ def test_resolve_grok_sessions_path_returns_none_for_unknown_project(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
     assert resolve_grok_sessions_path(tmp_path / "work" / "other") is None
+
+
+def test_find_project_root_resolves_symlinked_cwd_before_comparing_to_git_root(
+    tmp_path, monkeypatch, capsys
+):
+    """symlink 配下の cwd でも resolve() してから git_root() と比較するため、
+    break 条件 `p == root` が成立し、リポジトリ外の `.codeatrium/` を拾わない。
+
+    実 OS の os.getcwd() は通常シンボリックリンクを解決済みで返すため、ここでは
+    バグを意図的に再現するために Path.cwd() を未解決のシンボリックリンクパスに
+    差し替える（issue #27）。
+    """
+    # 別プロジェクト（git リポジトリ外）の .codeatrium/
+    (tmp_path / ".codeatrium").mkdir()
+
+    real_repo = tmp_path / "real_repo"
+    real_repo.mkdir()
+    symlinked_cwd = tmp_path / "link_repo"
+    symlinked_cwd.symlink_to(real_repo)
+
+    _mock_git_root(monkeypatch, real_repo)
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: symlinked_cwd))
+
+    root = find_project_root()
+    captured = capsys.readouterr()
+
+    assert root == real_repo
+    assert "parent directory" not in captured.err
+
+
+def test_resolve_claude_projects_path_folds_non_alnum_like_claude_does(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Claude Code は "/" だけでなく "." など英数字以外の文字全般を "-" へ畳んだ
+    ディレクトリ名を使う。project_root に "." を含む場合でも実セッション
+    ディレクトリを見つけられる（issue #27）。
+
+    期待値は実装と同じ非英数字置換ルールで組み立てる。tmp_path の絶対パス自体に
+    "_" などの記号が含まれる環境依存の値であっても、テストが環境非依存に成立する
+    ようにするため（"/" のみの単純な置換では tmp_path 由来の "_" を考慮できず、
+    このテスト環境では一致しない）。
+    """
+    import re
+
+    from codeatrium.paths import resolve_claude_projects_path
+
+    claude_projects = tmp_path / "claude_projects"
+    project_root = tmp_path / "work" / "my.repo.v1"
+    project_root.mkdir(parents=True)
+
+    encoded_name = re.sub(r"[^a-zA-Z0-9]", "-", str(project_root))
+    session_dir = claude_projects / encoded_name
+    session_dir.mkdir(parents=True)
+    (session_dir / "session.jsonl").write_text("{}\n")
+
+    monkeypatch.setattr("codeatrium.paths.CLAUDE_PROJECTS_DIR", claude_projects)
+
+    assert resolve_claude_projects_path(project_root) == session_dir
+
+    # "/" のみを置換する旧実装ではヒットしないことを明示（回帰確認）
+    naive_encoded_name = str(project_root).replace("/", "-")
+    assert naive_encoded_name != encoded_name
+
+
+def test_loci_bin_prefers_venv_binary_when_present(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """venv 配下に loci が存在する場合はそれを優先する（PATH 非依存の従来動作を維持）。"""
+    from codeatrium.paths import loci_bin
+
+    fake_python = tmp_path / "venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+    venv_loci = fake_python.parent / "loci"
+    venv_loci.write_text("#!/bin/sh\n")
+
+    monkeypatch.setattr("codeatrium.paths.sys.executable", str(fake_python))
+    monkeypatch.setattr(
+        "codeatrium.paths.shutil.which", lambda name: "/should/not/be/used"
+    )
+
+    assert loci_bin() == str(venv_loci)
+
+
+def test_loci_bin_falls_back_to_which_under_pipx_install(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """venv 配下に loci が無い場合（pipx/global インストール）、
+    shutil.which("loci") にフォールバックする（issue #27）。
+    """
+    from codeatrium.paths import loci_bin
+
+    fake_python = tmp_path / "some_venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+    global_loci = tmp_path / "usr_local_bin" / "loci"
+    global_loci.parent.mkdir(parents=True)
+    global_loci.write_text("#!/bin/sh\n")
+
+    monkeypatch.setattr("codeatrium.paths.sys.executable", str(fake_python))
+    monkeypatch.setattr(
+        "codeatrium.paths.shutil.which",
+        lambda name: str(global_loci) if name == "loci" else None,
+    )
+
+    assert loci_bin() == str(global_loci)
+
+
+def test_loci_bin_normalizes_relative_which_result_to_absolute(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """shutil.which("loci") が PATH の "." や空要素起因で相対パス
+    （例: "loci", "./loci"）を返しても、絶対パスへ正規化してから返す。
+
+    この戻り値はグローバル Claude 設定の hook command へそのまま永続化される
+    ため、相対パスのままだと後で別の cwd から実行された際に解決先が変わる、
+    または解決できず失敗する（issue #27 レビュー指摘）。
+    """
+    from codeatrium.paths import loci_bin
+
+    fake_python = tmp_path / "some_venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    real_loci = project_dir / "loci"
+    real_loci.write_text("#!/bin/sh\n")
+
+    monkeypatch.setattr("codeatrium.paths.sys.executable", str(fake_python))
+    # PATH に "." が含まれる場合の shutil.which の典型的な戻り値を模倣する
+    monkeypatch.setattr("codeatrium.paths.shutil.which", lambda name: "loci")
+    monkeypatch.chdir(project_dir)
+
+    result = loci_bin()
+
+    assert Path(result).is_absolute()
+    assert result == str(real_loci.resolve())
+
+
+def test_loci_bin_warns_when_unresolved(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """venv にも PATH にも loci が見つからない場合、stderr に警告しつつ
+    従来の venv パスをフォールバックとして返す（issue #27）。
+    """
+    from codeatrium.paths import loci_bin
+
+    fake_python = tmp_path / "some_venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+
+    monkeypatch.setattr("codeatrium.paths.sys.executable", str(fake_python))
+    monkeypatch.setattr("codeatrium.paths.shutil.which", lambda name: None)
+
+    result = loci_bin()
+    captured = capsys.readouterr()
+
+    assert result == str(fake_python.parent / "loci")
+    assert "Warning" in captured.err

@@ -123,3 +123,47 @@ def test_embed_serializes_concurrent_model_encode() -> None:
         f"model.encode was called concurrently (max overlap={concurrent['max']}); "
         "expected serialization via Embedder._encode_lock"
     )
+
+
+def test_find_sock_path_matches_nested_project_root(tmp_path, monkeypatch) -> None:
+    """_find_sock_path() は paths.find_project_root()/sock_path() を再利用するため、
+    ネストしたプロジェクト（git root 直下ではなくサブディレクトリの .codeatrium/）でも
+    find_project_root() が解決するのと同じソケットパスを指す。
+
+    以前は git root を直接 subprocess で解決していたため、ネストプロジェクトでは
+    実際のプロジェクトルート（.codeatrium/ の場所）と異なるソケットパスを指し、
+    常時コールドスタートになっていた（issue #27）。
+    """
+    from codeatrium.embedder import _find_sock_path
+    from codeatrium.paths import sock_path
+
+    monkeypatch.delenv("CODEATRIUM_NO_SOCK", raising=False)
+    monkeypatch.delenv("CODEATRIUM_SOCK_PATH", raising=False)
+
+    git_root = tmp_path / "monorepo"
+    nested_project = git_root / "packages" / "app"
+    (nested_project / ".codeatrium").mkdir(parents=True)
+
+    monkeypatch.setattr("codeatrium.paths.git_root", lambda: git_root)
+    monkeypatch.chdir(nested_project)
+
+    result = _find_sock_path()
+
+    assert result == sock_path(nested_project)
+    assert result != sock_path(git_root)
+
+
+def test_find_sock_path_respects_no_sock_env(tmp_path, monkeypatch) -> None:
+    """CODEATRIUM_NO_SOCK が設定されている場合は find_project_root すら呼ばず None を返す
+    （サーバー内自己接続デッドロック防止）。
+    """
+    from codeatrium.embedder import _find_sock_path
+
+    monkeypatch.setenv("CODEATRIUM_NO_SOCK", "1")
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("find_project_root must not be called under NO_SOCK")
+
+    monkeypatch.setattr("codeatrium.paths.find_project_root", _boom)
+
+    assert _find_sock_path() is None

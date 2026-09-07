@@ -55,25 +55,22 @@ def _sock_path_from_env() -> Path | None:
 
 
 def _find_sock_path() -> Path | None:
-    """DB の親ディレクトリの embedder.sock を探す"""
+    """project root の .codeatrium/ 配下の embedder.sock を探す。
+
+    paths.find_project_root()/paths.sock_path() を再利用する。以前は
+    `git rev-parse --show-toplevel` を Embedder() 構築の都度 subprocess 起動して
+    独自に git root を解決しており、find_project_root() が返す実際のプロジェクト
+    ルート（.codeatrium/ を親方向へ探索する）と食い違い得た。ネストプロジェクト
+    構成では毎回別のソケットパスを指し、常時コールドスタートになっていた
+    （issue #27）。
+    """
     import os
 
     if os.environ.get("CODEATRIUM_NO_SOCK"):
         return None
-    # .codeatrium/ の場所を git root から解決
-    try:
-        import subprocess as sp
+    from codeatrium import paths
 
-        result = sp.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            return Path(result.stdout.strip()) / ".codeatrium" / "embedder.sock"
-    except Exception:
-        pass
-    return None
+    return paths.sock_path(paths.find_project_root(notify=False))
 
 
 def _try_socket_embed(sock_path: Path, req_type: str, text: str) -> np.ndarray | None:
