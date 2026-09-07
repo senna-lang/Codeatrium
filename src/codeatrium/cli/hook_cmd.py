@@ -18,6 +18,7 @@ def hook_install(
     """Harness の lifecycle automation を設定する。"""
     from codeatrium.adapters.harness.hooks import hooks_for
     from codeatrium.config import load_config
+    from codeatrium.hooks import SettingsLoadError
     from codeatrium.paths import find_project_root
 
     root = find_project_root()
@@ -28,6 +29,9 @@ def hook_install(
         ).install(root)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--harness") from exc
+    except SettingsLoadError as exc:
+        typer.echo(f"⚠ {exc}", err=True)
+        raise typer.Exit(code=1) from None
     typer.echo(message)
 
 
@@ -39,9 +43,13 @@ def hook_uninstall(
 ) -> None:
     """Harness の native lifecycle automation を解除する。"""
     from codeatrium.adapters.harness.hooks import hooks_for
+    from codeatrium.hooks import SettingsLoadError
 
     try:
         _changed, message = hooks_for(harness).uninstall()
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--harness") from exc
+    except SettingsLoadError as exc:
+        typer.echo(f"⚠ {exc}", err=True)
+        raise typer.Exit(code=1) from None
     typer.echo(message)
