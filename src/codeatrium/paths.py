@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -34,8 +36,12 @@ def find_project_root(notify: bool = True) -> Path:
     cwd 以外（親）で `.codeatrium/` を発見した場合は stderr に注意書きを出す。
     意図せず親プロジェクトの DB を共有していることに気付けるようにするため。
     notify=False で抑止可能（テスト・機械処理用途）。
+
+    cwd は resolve() してから git_root()（実パス）と比較する。symlink 配下の
+    cwd を未解決のまま使うと、`p == root` の break 条件が一致せず走査が
+    git root を超えて続き、リポジトリ外の `.codeatrium/` を拾いうる（issue #27）。
     """
-    cwd = Path.cwd()
+    cwd = Path.cwd().resolve()
     root = git_root()
     if root:
         candidates = [cwd, *cwd.parents]
@@ -63,13 +69,16 @@ def db_path(project_root: Path) -> Path:
 
 def resolve_claude_projects_path(project_root: Path) -> Path | None:
     """project_root から対応する ~/.claude/projects/<hash>/ を解決する。
-    Claude Code はパスの "/" を "-" に変換したディレクトリ名を使う。
+    Claude Code はパス中の英数字以外の文字（"/" や "." を含む）をすべて "-" に
+    変換したディレクトリ名を使う。"/" のみ変換すると、パスに "." を含む
+    プロジェクト（例: バージョン付きディレクトリ名）で実際のセッション
+    ディレクトリと一致しない（issue #27）。
     """
     if not CLAUDE_PROJECTS_DIR.exists():
         return None
     candidates = [project_root, Path.cwd()]
     for base in candidates:
-        dir_name = str(base).replace("/", "-")
+        dir_name = re.sub(r"[^a-zA-Z0-9]", "-", str(base))
         candidate = CLAUDE_PROJECTS_DIR / dir_name
         if candidate.exists() and any(candidate.rglob("*.jsonl")):
             return candidate
@@ -143,7 +152,23 @@ def server_pid_path(project_root: Path) -> Path:
 
 
 def loci_bin() -> str:
-    """sys.executable と同じ venv の bin/loci のフルパスを返す（PATH 非依存）。"""
-    import sys
+    """loci バイナリのフルパスを返す。
+    まず sys.executable と同じ venv の bin/loci を探し、無ければ PATH 上の
+    `loci`（shutil.which）にフォールバックする。venv 外（pipx/global install）
+    での実行では venv 内に loci が存在しないため（issue #27）。
+    どちらも見つからない場合は venv パスを返しつつ stderr に警告する。
+    """
+    venv_bin = Path(sys.executable).parent / "loci"
+    if venv_bin.exists():
+        return str(venv_bin)
 
-    return str(Path(sys.executable).parent / "loci")
+    which_bin = shutil.which("loci")
+    if which_bin:
+        return which_bin
+
+    print(
+        f"Warning: could not locate `loci` binary (checked {venv_bin} and PATH); "
+        "hooks referencing it may fail to run",
+        file=sys.stderr,
+    )
+    return str(venv_bin)
