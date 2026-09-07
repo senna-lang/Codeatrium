@@ -11,6 +11,7 @@ from pathlib import Path
 from codeatrium.db import (
     _MIGRATIONS,
     _backfill_touch_time_symbol_edges,
+    _migrate_v12_add_exchange_conversation_ply_index,
     check_drift,
     get_connection,
     init_db,
@@ -1440,7 +1441,8 @@ def test_migration_v12_adds_exchange_conversation_ply_index_to_existing_db(tmp_p
     init_db(db_path)
     con = sqlite3.connect(db_path)
     con.execute("DROP INDEX idx_exchanges_conversation_ply")
-    con.execute(f"PRAGMA user_version = {len(_MIGRATIONS) - 1}")
+    v12_index = _MIGRATIONS.index(_migrate_v12_add_exchange_conversation_ply_index)
+    con.execute(f"PRAGMA user_version = {v12_index}")
     con.commit()
     con.close()
 
@@ -1508,6 +1510,130 @@ def test_migration_v11_infers_harness_from_source_path_for_non_claude_sessions(
     con.close()
 
     assert row["harness"] == "grok"
+
+
+def test_migration_v13_repairs_exchanges_already_mislabeled_by_old_buggy_v11(
+    tmp_path: Path,
+) -> None:
+    """`_migrate_v11_add_canonical_sessions`（現行の修正版）はもう非claude を
+    誤ラベルしない。しかし、修正が入る**前**に v11 が既に走っていた DB
+    （`PRAGMA user_version >= 11`）は、その時点で `harness='claude'` と
+    claude 由来の `session_id`/`canonical_exchange_id` を永続化済みであり、
+    v11 は二度と走らない。`_backfill_exchange_provenance` も
+    `WHERE session_id IS NULL OR harness IS NULL` にしかヒットしないため、
+    これらの行は v11 の修正だけでは直らない（issue #19 レビュー指摘）。
+    v13 の修復マイグレーションが、既に `claude` 固定されてしまった行を
+    source_path から再判定し、harness・session_id・source_session_id・
+    canonical_exchange_id を正しい値へ書き換えることを確認する。
+    """
+    db_path = tmp_path / "memory.db"
+    grok_path = str(tmp_path / ".grok" / "session.jsonl")
+
+    # 旧バグ版 v11 が実際に書き込んでいた（誤った）値を手で再現する。
+    stale_session_id = hashlib.sha256(f"claude:{grok_path}".encode()).hexdigest()
+    stale_canonical_id = hashlib.sha256(
+        f"claude:{grok_path}:0".encode()
+    ).hexdigest()
+
+    raw_con = sqlite3.connect(db_path)
+    raw_con.execute(
+        """CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            source_path TEXT NOT NULL UNIQUE,
+            started_at TIMESTAMP,
+            last_ply_end INT NOT NULL DEFAULT -1,
+            parent_session_ref TEXT
+        )"""
+    )
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', ?)",
+        (grok_path,),
+    )
+    raw_con.execute(
+        """CREATE TABLE sessions (
+            id                TEXT PRIMARY KEY,
+            harness           TEXT NOT NULL,
+            source_session_id TEXT NOT NULL,
+            primary_ref       TEXT NOT NULL,
+            project_key       TEXT NOT NULL,
+            cursor            TEXT,
+            cursor_version    INTEGER NOT NULL DEFAULT 1,
+            started_at        TEXT,
+            title             TEXT,
+            git_branch_last   TEXT,
+            updated_at        TEXT NOT NULL,
+            UNIQUE(harness, source_session_id)
+        )"""
+    )
+    raw_con.execute(
+        """INSERT INTO sessions
+            (id, harness, source_session_id, primary_ref, project_key, updated_at)
+        VALUES (?, 'claude', ?, ?, '', CURRENT_TIMESTAMP)""",
+        (stale_session_id, grok_path, grok_path),
+    )
+    raw_con.execute(
+        """CREATE TABLE exchanges (
+            id                 TEXT PRIMARY KEY,
+            conversation_id    TEXT NOT NULL,
+            ply_start          INT NOT NULL,
+            ply_end            INT NOT NULL,
+            user_content       TEXT NOT NULL,
+            agent_content      TEXT NOT NULL,
+            distilled_at       TIMESTAMP,
+            distill_status     TEXT NOT NULL DEFAULT 'pending',
+            git_branch         TEXT,
+            session_id         TEXT,
+            harness            TEXT,
+            session_ref        TEXT,
+            source_session_id  TEXT,
+            source_turn_id     TEXT,
+            agent_model        TEXT,
+            agent_provider     TEXT,
+            canonical_exchange_id TEXT
+        )"""
+    )
+    raw_con.execute(
+        "CREATE UNIQUE INDEX idx_exchanges_canonical_id ON exchanges(canonical_exchange_id) "
+        "WHERE canonical_exchange_id IS NOT NULL"
+    )
+    raw_con.execute(
+        """INSERT INTO exchanges VALUES (
+            'ex1', 'conv1', 0, 1, 'user', 'agent', NULL, 'pending', NULL,
+            ?, 'claude', ? || '#ply=0-1', ?, '0', NULL, NULL, ?
+        )""",
+        (stale_session_id, grok_path, grok_path, stale_canonical_id),
+    )
+    raw_con.execute(f"PRAGMA user_version = {len(_MIGRATIONS) - 1}")
+    raw_con.commit()
+    raw_con.close()
+
+    init_db(db_path)
+
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    row = con.execute(
+        "SELECT harness, session_id, source_session_id, canonical_exchange_id "
+        "FROM exchanges WHERE id='ex1'"
+    ).fetchone()
+    stale_session_row = con.execute(
+        "SELECT 1 FROM sessions WHERE id = ?", (stale_session_id,)
+    ).fetchone()
+    correct_session_id = hashlib.sha256(f"grok:{grok_path}".encode()).hexdigest()
+    corrected_session_row = con.execute(
+        "SELECT harness, source_session_id FROM sessions WHERE id = ?",
+        (correct_session_id,),
+    ).fetchone()
+    con.close()
+
+    assert row["harness"] == "grok"
+    assert row["session_id"] == correct_session_id
+    assert row["source_session_id"] == grok_path
+    assert row["canonical_exchange_id"] == hashlib.sha256(
+        f"grok:{grok_path}:0".encode()
+    ).hexdigest()
+    assert stale_session_row is None
+    assert corrected_session_row is not None
+    assert corrected_session_row["harness"] == "grok"
 
 
 def test_backfill_parent_session_ref_populates_subagent_conversations(tmp_path: Path) -> None:
