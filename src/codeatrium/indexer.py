@@ -782,6 +782,17 @@ def _load_opencode_raw_entries(
     return raw_entries, started_at
 
 
+def _is_legacy_opencode_turn_id(source_turn_id: str) -> bool:
+    """このパッチより前の index_opencode_db が書き込んだ position ベースの
+    source_turn_id（str(ply_start)、短い数値文字列）かどうかを判定する。
+
+    新スキームの source_turn_id は常に sha256 hexdigest（64桁の16進文字列）で、
+    数字だけになる確率は無視できるほど低いため、「全桁が数字」かつ「64桁未満」を
+    旧スキームの判定に使う。
+    """
+    return source_turn_id.isdigit() and len(source_turn_id) < 64
+
+
 def index_opencode_db(
     opencode_db_path: Path,
     db_path: Path,
@@ -833,30 +844,52 @@ def index_opencode_db(
                 # exchange.id（user message id 由来で位置非依存）で既取り込み分を
                 # 判定し、旧ターンの再emit/新規ターンの取りこぼしを防ぐ。
                 #
-                # 後方互換: この修正より前に取り込んだ行は source_turn_id に
-                # str(ply_start)（数値文字列）を格納している。新スキームの
-                # exchange.id（sha256 ハッシュ）とは一致しないため、旧スキームの
-                # 数値 id も known set に含め、二重登録を防ぐ（新スキームの id は
-                # 常にハッシュ文字列なので、数値文字列との衝突は起きない）。
-                known_exchange_ids = {
-                    row["source_turn_id"]
-                    for row in con.execute(
-                        "SELECT source_turn_id FROM exchanges "
-                        "WHERE harness = 'opencode' AND source_session_id = ?",
-                        (session_id,),
-                    )
+                # 後方互換: このパッチより前に取り込んだ行は source_turn_id に
+                # str(ply_start)（位置そのもの）を格納しており、位置は安定した
+                # identity ではない。アップグレード後に新規メッセージが
+                # out-of-order で到着すると位置が全体シフトするため、position での
+                # 突き合わせでは新規メッセージを誤って「既知」扱いし、旧 exchange を
+                # 新ハッシュ id で二重登録してしまう（#48 レビュー指摘）。
+                # 位置ではなく実際の内容（user_content・agent_content の組）で
+                # 旧行と現在のパース結果を突き合わせ、一致した旧行の
+                # source_turn_id を新スキームへその場で書き換える。
+                # id/canonical_exchange_id は変更しない — code_touches /
+                # exchange_files / palace_objects / vec_exchanges からの
+                # exchange_id 参照はそのまま有効であり、以後の重複判定は本関数の
+                # 事前フィルタのみで行われるため書き換え不要。
+                existing_rows = con.execute(
+                    "SELECT source_turn_id, user_content, agent_content "
+                    "FROM exchanges WHERE harness = 'opencode' "
+                    "AND source_session_id = ?",
+                    (session_id,),
+                ).fetchall()
+                known_exchange_ids = {row["source_turn_id"] for row in existing_rows}
+                legacy_by_content = {
+                    (row["user_content"], row["agent_content"]): row["source_turn_id"]
+                    for row in existing_rows
+                    if _is_legacy_opencode_turn_id(row["source_turn_id"])
                 }
 
                 raw_entries, started_at = _load_opencode_raw_entries(src, session_id)
                 exchanges = parse_opencode_exchanges(
                     source_path, raw_entries, min_chars=min_chars
                 )
-                new_exchanges = [
-                    ex
-                    for ex in exchanges
-                    if ex.id not in known_exchange_ids
-                    and str(ex.ply_start) not in known_exchange_ids
-                ]
+                new_exchanges = []
+                for exchange in exchanges:
+                    if exchange.id in known_exchange_ids:
+                        continue
+                    legacy_turn_id = legacy_by_content.pop(
+                        (exchange.user_content, exchange.agent_content), None
+                    )
+                    if legacy_turn_id is not None:
+                        con.execute(
+                            "UPDATE exchanges SET source_turn_id = ? "
+                            "WHERE harness = 'opencode' AND source_session_id = ? "
+                            "AND source_turn_id = ?",
+                            (exchange.id, session_id, legacy_turn_id),
+                        )
+                        continue
+                    new_exchanges.append(exchange)
                 if not new_exchanges:
                     continue
 
