@@ -5,7 +5,6 @@ DB 初期化・スキーマのテスト
 import hashlib
 import os
 import sqlite3
-import subprocess
 from pathlib import Path
 
 from codeatrium.db import (
@@ -16,6 +15,7 @@ from codeatrium.db import (
     get_connection,
     init_db,
 )
+from tests.conftest import run_git
 
 
 def test_init_db_creates_conversations_table(tmp_path: Path) -> None:
@@ -2038,10 +2038,6 @@ def test_backfill_sets_meta_flag_so_later_init_db_calls_do_not_rescan(tmp_path: 
     assert row is None
 
 
-def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
-
-
 def _seed_drifted_touch(con: sqlite3.Connection) -> None:
     """One exchange whose touch line range only aligns with the OLD commit,
     plus the stale file-only edge the pre-fix pipeline would have produced."""
@@ -2075,28 +2071,28 @@ def test_backfill_touch_time_symbol_edges_upgrades_stale_file_edge(tmp_path: Pat
     project_root.mkdir()
     db_path = project_root / ".codeatrium" / "memory.db"
 
-    _git(project_root, "init")
-    _git(project_root, "config", "user.email", "t@t.com")
-    _git(project_root, "config", "user.name", "T")
+    run_git(project_root, "init")
+    run_git(project_root, "config", "user.email", "t@t.com")
+    run_git(project_root, "config", "user.name", "T")
     src = project_root / "src.py"
     src.write_text("def foo():\n    pass\n")
-    _git(project_root, "add", ".")
+    run_git(project_root, "add", ".")
     old_env = {
         **os.environ,
         "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
         "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
     }
-    _git(project_root, "commit", "-m", "old", env=old_env)
+    run_git(project_root, "commit", "-m", "old", env=old_env)
 
     padding = "\n".join(f"x{i} = {i}" for i in range(100))
     src.write_text(f"{padding}\n\ndef foo():\n    pass\n")
-    _git(project_root, "add", ".")
+    run_git(project_root, "add", ".")
     new_env = {
         **os.environ,
         "GIT_AUTHOR_DATE": "2026-06-01T00:00:00",
         "GIT_COMMITTER_DATE": "2026-06-01T00:00:00",
     }
-    _git(project_root, "commit", "-m", "new", env=new_env)
+    run_git(project_root, "commit", "-m", "new", env=new_env)
 
     init_db(db_path)
     con = get_connection(db_path)
@@ -2123,12 +2119,12 @@ def test_backfill_touch_time_symbol_edges_is_idempotent(tmp_path: Path) -> None:
     project_root.mkdir()
     db_path = project_root / ".codeatrium" / "memory.db"
 
-    _git(project_root, "init")
-    _git(project_root, "config", "user.email", "t@t.com")
-    _git(project_root, "config", "user.name", "T")
+    run_git(project_root, "init")
+    run_git(project_root, "config", "user.email", "t@t.com")
+    run_git(project_root, "config", "user.name", "T")
     (project_root / "src.py").write_text("def foo():\n    pass\n")
-    _git(project_root, "add", ".")
-    _git(project_root, "commit", "-m", "only")
+    run_git(project_root, "add", ".")
+    run_git(project_root, "commit", "-m", "only")
 
     init_db(db_path)
     con = get_connection(db_path)
@@ -2158,12 +2154,12 @@ def test_backfill_touch_time_symbol_edges_flag_prevents_rescan_via_init_db(
     project_root.mkdir()
     db_path = project_root / ".codeatrium" / "memory.db"
 
-    _git(project_root, "init")
-    _git(project_root, "config", "user.email", "t@t.com")
-    _git(project_root, "config", "user.name", "T")
+    run_git(project_root, "init")
+    run_git(project_root, "config", "user.email", "t@t.com")
+    run_git(project_root, "config", "user.name", "T")
     (project_root / "src.py").write_text("def foo():\n    pass\n")
-    _git(project_root, "add", ".")
-    _git(project_root, "commit", "-m", "only")
+    run_git(project_root, "add", ".")
+    run_git(project_root, "commit", "-m", "only")
 
     init_db(db_path)  # sets the flag over an empty code_touches table
 

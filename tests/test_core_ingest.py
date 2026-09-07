@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
 from codeatrium.core.ingest import _git_blob_near, ingest_parse_result
@@ -15,6 +14,7 @@ from codeatrium.core.models import (
 )
 from codeatrium.db import get_connection, init_db
 from codeatrium.models import CodeTouch, FileOnly, LineRange
+from tests.conftest import run_git
 
 
 def test_ingest_persists_provenance_cursor_and_files(tmp_path: Path) -> None:
@@ -207,10 +207,6 @@ def test_ingest_persists_exchange_scoped_code_touches(tmp_path: Path) -> None:
     assert symbol_count == 1
 
 
-def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
-
-
 def test_ingest_resolves_symbols_against_touch_time_git_blob_not_live_disk(
     tmp_path: Path,
 ) -> None:
@@ -218,31 +214,31 @@ def test_ingest_resolves_symbols_against_touch_time_git_blob_not_live_disk(
     touch time, not the live/current file — regression for the drift bug
     where `code_symbols` only ever reflected the newest on-disk snapshot."""
     project_root = tmp_path
-    _git(project_root, "init")
-    _git(project_root, "config", "user.email", "t@t.com")
-    _git(project_root, "config", "user.name", "T")
+    run_git(project_root, "init")
+    run_git(project_root, "config", "user.email", "t@t.com")
+    run_git(project_root, "config", "user.name", "T")
 
     src = project_root / "src.py"
     src.write_text("def foo():\n    pass\n")
-    _git(project_root, "add", ".")
+    run_git(project_root, "add", ".")
     old_env = {
         **os.environ,
         "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
         "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
     }
-    _git(project_root, "commit", "-m", "old", env=old_env)
+    run_git(project_root, "commit", "-m", "old", env=old_env)
 
     # Grow the file so `foo` moves far down — simulates months of later edits
     # that shift line numbers well past where this touch originally landed.
     padding = "\n".join(f"x{i} = {i}" for i in range(100))
     src.write_text(f"{padding}\n\ndef foo():\n    pass\n")
-    _git(project_root, "add", ".")
+    run_git(project_root, "add", ".")
     new_env = {
         **os.environ,
         "GIT_AUTHOR_DATE": "2026-06-01T00:00:00",
         "GIT_COMMITTER_DATE": "2026-06-01T00:00:00",
     }
-    _git(project_root, "commit", "-m", "new", env=new_env)
+    run_git(project_root, "commit", "-m", "new", env=new_env)
 
     db_path = project_root / "memory.db"
     init_db(db_path)
@@ -302,23 +298,23 @@ def test_git_blob_near_returns_none_outside_a_git_repo(tmp_path: Path) -> None:
 
 
 def test_git_blob_near_returns_none_without_a_timestamp(tmp_path: Path) -> None:
-    _git(tmp_path, "init")
+    run_git(tmp_path, "init")
     assert _git_blob_near(tmp_path, "src.py", None) is None
 
 
 def test_git_blob_near_falls_back_to_after_when_no_earlier_commit(tmp_path: Path) -> None:
-    _git(tmp_path, "init")
-    _git(tmp_path, "config", "user.email", "t@t.com")
-    _git(tmp_path, "config", "user.name", "T")
+    run_git(tmp_path, "init")
+    run_git(tmp_path, "config", "user.email", "t@t.com")
+    run_git(tmp_path, "config", "user.name", "T")
     src = tmp_path / "src.py"
     src.write_text("def only():\n    pass\n")
-    _git(tmp_path, "add", ".")
+    run_git(tmp_path, "add", ".")
     env = {
         **os.environ,
         "GIT_AUTHOR_DATE": "2026-06-01T00:00:00",
         "GIT_COMMITTER_DATE": "2026-06-01T00:00:00",
     }
-    _git(tmp_path, "commit", "-m", "only", env=env)
+    run_git(tmp_path, "commit", "-m", "only", env=env)
 
     # Requested time is BEFORE the only commit — must fall back to --after.
     blob = _git_blob_near(tmp_path, "src.py", "2026-01-01T00:00:00")
