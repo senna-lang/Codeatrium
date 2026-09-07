@@ -852,23 +852,34 @@ def index_opencode_db(
                 # 新ハッシュ id で二重登録してしまう（#48 レビュー指摘）。
                 # 位置ではなく実際の内容（user_content・agent_content の組）で
                 # 旧行と現在のパース結果を突き合わせ、一致した旧行の
-                # source_turn_id を新スキームへその場で書き換える。
-                # id/canonical_exchange_id は変更しない — code_touches /
-                # exchange_files / palace_objects / vec_exchanges からの
-                # exchange_id 参照はそのまま有効であり、以後の重複判定は本関数の
-                # 事前フィルタのみで行われるため書き換え不要。
+                # source_turn_id / ply_start / ply_end / session_ref を新しい
+                # 位置・スキームへその場で書き換える。id/canonical_exchange_id は
+                # 変更しない — code_touches / exchange_files / palace_objects /
+                # vec_exchanges からの exchange_id 参照はそのまま有効であり、以後の
+                # 重複判定は本関数の事前フィルタのみで行われるため書き換え不要。
+                #
+                # 同一セッション内で (user_content, agent_content) が完全一致する
+                # legacy exchange が複数存在し得る（同じ発話の繰り返し等）ため、
+                # content キーごとに候補を list で保持し、元の ply_start 昇順で
+                # FIFO 消費する。old メッセージ同士の相対順序は新規メッセージの
+                # 挿入位置に関わらず保存される（time_created が不変なため）ので、
+                # 現在のパース結果を ply_start 昇順で辿る順序と一致し、1対1で
+                # 正しく対応付けられる。単一 dict スロットだと2件目が1件目を
+                # 上書きし、シフト後に片方が永久に重複したまま残ってしまう。
                 existing_rows = con.execute(
-                    "SELECT source_turn_id, user_content, agent_content "
+                    "SELECT source_turn_id, ply_start, user_content, agent_content "
                     "FROM exchanges WHERE harness = 'opencode' "
                     "AND source_session_id = ?",
                     (session_id,),
                 ).fetchall()
                 known_exchange_ids = {row["source_turn_id"] for row in existing_rows}
-                legacy_by_content = {
-                    (row["user_content"], row["agent_content"]): row["source_turn_id"]
-                    for row in existing_rows
-                    if _is_legacy_opencode_turn_id(row["source_turn_id"])
-                }
+                legacy_by_content: dict[tuple[str, str], list[sqlite3.Row]] = {}
+                for row in existing_rows:
+                    if _is_legacy_opencode_turn_id(row["source_turn_id"]):
+                        key = (row["user_content"], row["agent_content"])
+                        legacy_by_content.setdefault(key, []).append(row)
+                for candidates in legacy_by_content.values():
+                    candidates.sort(key=lambda row: row["ply_start"])
 
                 raw_entries, started_at = _load_opencode_raw_entries(src, session_id)
                 exchanges = parse_opencode_exchanges(
@@ -878,15 +889,25 @@ def index_opencode_db(
                 for exchange in exchanges:
                     if exchange.id in known_exchange_ids:
                         continue
-                    legacy_turn_id = legacy_by_content.pop(
-                        (exchange.user_content, exchange.agent_content), None
+                    candidates = legacy_by_content.get(
+                        (exchange.user_content, exchange.agent_content)
                     )
-                    if legacy_turn_id is not None:
+                    if candidates:
+                        legacy_row = candidates.pop(0)
                         con.execute(
-                            "UPDATE exchanges SET source_turn_id = ? "
+                            "UPDATE exchanges SET source_turn_id = ?, "
+                            "ply_start = ?, ply_end = ?, session_ref = ? "
                             "WHERE harness = 'opencode' AND source_session_id = ? "
                             "AND source_turn_id = ?",
-                            (exchange.id, session_id, legacy_turn_id),
+                            (
+                                exchange.id,
+                                exchange.ply_start,
+                                exchange.ply_end,
+                                f"{source_path}#ply="
+                                f"{exchange.ply_start}-{exchange.ply_end}",
+                                session_id,
+                                legacy_row["source_turn_id"],
+                            ),
                         )
                         continue
                     new_exchanges.append(exchange)

@@ -326,22 +326,19 @@ def test_db_path_with_special_uri_characters_is_opened_correctly(tmp_path: Path)
 
 
 
-def _seed_legacy_opencode_exchange(
+def _seed_legacy_opencode_exchanges(
     opencode_db: Path, db_path: Path, project_root: Path, session_id: str
 ) -> None:
     """このパッチ以前の index_opencode_db が生成していた永続化結果
     （source_turn_id=str(ply_start)、数値の位置カーソル）を、実際に opencode_db を
-    1回パースした結果から直接構築する。session_id には唯一の user メッセージが
-    含まれる前提（他のテストの前提と合わせるため）。"""
+    1回パースした結果から直接構築する。session_id 内の全 exchange を対象にする。"""
     src = sqlite3.connect(f"file:{opencode_db}?mode=ro", uri=True)
     src.row_factory = sqlite3.Row
     raw_entries, started_at = _load_opencode_raw_entries(src, session_id)
     src.close()
     source_path = f"{opencode_db}#{session_id}"
     exchanges = parse_opencode_exchanges(source_path, raw_entries, min_chars=1)
-    assert len(exchanges) == 1
-    legacy_exchange = exchanges[0]
-    legacy_turn_id = str(legacy_exchange.ply_start)
+    assert len(exchanges) >= 1
 
     con = get_connection(db_path)
     ingest_parse_result(
@@ -354,7 +351,7 @@ def _seed_legacy_opencode_exchange(
             started_at=started_at,
         ),
         ParseResult(
-            exchanges=(
+            exchanges=tuple(
                 CanonicalExchange(
                     harness="opencode",
                     session_ref=(
@@ -362,16 +359,17 @@ def _seed_legacy_opencode_exchange(
                         f"{legacy_exchange.ply_start}-{legacy_exchange.ply_end}"
                     ),
                     source_session_id=session_id,
-                    source_turn_id=legacy_turn_id,
+                    source_turn_id=str(legacy_exchange.ply_start),
                     ply_start=legacy_exchange.ply_start,
                     ply_end=legacy_exchange.ply_end,
                     user_content=legacy_exchange.user_content,
                     agent_content=legacy_exchange.agent_content,
                     files_touched=tuple(legacy_exchange.files),
                     git_branch=legacy_exchange.git_branch,
-                ),
+                )
+                for legacy_exchange in exchanges
             ),
-            next_cursor=f"v1:ply:{legacy_exchange.ply_end}",
+            next_cursor=f"v1:ply:{exchanges[-1].ply_end}",
         ),
     )
     con.commit()
@@ -413,7 +411,7 @@ def test_upgrade_from_legacy_position_based_cursor_does_not_duplicate(
     db_path = project_root / ".codeatrium" / "memory.db"
     init_db(db_path)
 
-    _seed_legacy_opencode_exchange(opencode_db, db_path, project_root, "ses1")
+    _seed_legacy_opencode_exchanges(opencode_db, db_path, project_root, "ses1")
 
     con = get_connection(db_path)
     pre_upgrade_count = con.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
@@ -471,7 +469,7 @@ def test_upgrade_with_out_of_order_message_migrates_legacy_and_captures_new(
     init_db(db_path)
 
     # msg1 を旧スキーム（source_turn_id=str(ply_start)=="0"）で取り込み済みにする。
-    _seed_legacy_opencode_exchange(opencode_db, db_path, project_root, "ses1")
+    _seed_legacy_opencode_exchanges(opencode_db, db_path, project_root, "ses1")
 
     # msg1 より古い time_created を持つ新規メッセージが到着する
     # （バックフィル・クロックスキュー等の実運用シナリオ）。(time_created, id) 順
@@ -504,3 +502,171 @@ def test_upgrade_with_out_of_order_message_migrates_legacy_and_captures_new(
     )
     con.close()
     assert contents == sorted(["legacy " + "x" * 60, "new " + "y" * 60])
+
+
+def test_upgrade_with_duplicate_content_legacy_exchanges_does_not_leave_duplicate(
+    tmp_path: Path,
+) -> None:
+    """同一セッション内に (user_content, agent_content) が完全一致する legacy
+    exchange が複数存在する場合でも、位置シフト後にどちらも重複登録されずに
+    それぞれ新スキームへ移行される（#48 レビュー round3 指摘: dict の単一スロットで
+    2件目が1件目を上書きすると、片方が永久に重複したまま残ってしまう）。"""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    opencode_db = tmp_path / "opencode.db"
+
+    dup_text = "dup " + "x" * 60
+    con = _connect(opencode_db)
+    con.execute(
+        "INSERT INTO project (id, worktree, vcs, name) VALUES (?, ?, ?, ?)",
+        ("proj1", str(project_root), "git", "repo"),
+    )
+    con.execute(
+        "INSERT INTO session (id, project_id, directory) VALUES (?, ?, ?)",
+        ("ses1", "proj1", str(project_root)),
+    )
+    # 2つの独立した user メッセージが、たまたま同じ本文を持つ
+    # （同じ発話の繰り返し等）。
+    con.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?)",
+        _user_message("msg_a", "ses1", 1000),
+    )
+    con.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        _text_part("prt_a", "msg_a", "ses1", 1001, dup_text),
+    )
+    con.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?)",
+        _user_message("msg_b", "ses1", 1002),
+    )
+    con.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        _text_part("prt_b", "msg_b", "ses1", 1003, dup_text),
+    )
+    con.commit()
+    con.close()
+
+    db_path = project_root / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    # 両方とも旧スキーム（source_turn_id=str(ply_start)）で取り込み済みにする。
+    _seed_legacy_opencode_exchanges(opencode_db, db_path, project_root, "ses1")
+
+    con = get_connection(db_path)
+    pre_upgrade_count = con.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
+    con.close()
+    assert pre_upgrade_count == 2
+
+    # msg_a より古い time_created を持つ、内容の異なる新規メッセージが到着する。
+    # 両方の legacy exchange の位置がシフトする。
+    con = sqlite3.connect(opencode_db)
+    con.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?)",
+        _user_message("msg_new", "ses1", 500),
+    )
+    con.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        _text_part("prt_new", "msg_new", "ses1", 501, "new " + "z" * 60),
+    )
+    con.commit()
+    con.close()
+
+    reindexed = index_opencode_db(
+        opencode_db, db_path, min_chars=1, project_root=project_root
+    )
+    # 新規に登録されるのは msg_new の1件だけ。同一内容の2件の legacy exchange は
+    # どちらも重複登録されず、それぞれ正しく新スキームへ移行される。
+    assert reindexed == 1
+
+    con = get_connection(db_path)
+    contents = sorted(
+        row[0] for row in con.execute("SELECT user_content FROM exchanges")
+    )
+    total_rows = con.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
+    con.close()
+    assert total_rows == 3
+    assert contents == sorted([dup_text, dup_text, "new " + "z" * 60])
+
+
+def test_migrated_legacy_exchange_reflects_new_position_not_stale_one(
+    tmp_path: Path,
+) -> None:
+    """legacy exchange が新スキームへ移行される際、ply_start/ply_end/session_ref も
+    その exchange の現在の実際の位置に更新される（アップグレード前の位置に
+    取り残されない）。#48 レビュー round3 指摘: これを放置すると context の順序や
+    verbatim_ref の解決が誤った位置を指してしまう。"""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    opencode_db = tmp_path / "opencode.db"
+
+    con = _connect(opencode_db)
+    con.execute(
+        "INSERT INTO project (id, worktree, vcs, name) VALUES (?, ?, ?, ?)",
+        ("proj1", str(project_root), "git", "repo"),
+    )
+    con.execute(
+        "INSERT INTO session (id, project_id, directory) VALUES (?, ?, ?)",
+        ("ses1", "proj1", str(project_root)),
+    )
+    con.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?)",
+        _user_message("msg1", "ses1", 1000),
+    )
+    con.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        _text_part("prt1", "msg1", "ses1", 1001, "legacy " + "x" * 60),
+    )
+    con.commit()
+    con.close()
+
+    db_path = project_root / ".codeatrium" / "memory.db"
+    init_db(db_path)
+
+    # msg1 は ply_start=0, ply_end=1 の legacy exchange として取り込み済み。
+    _seed_legacy_opencode_exchanges(opencode_db, db_path, project_root, "ses1")
+    con = get_connection(db_path)
+    before = con.execute(
+        "SELECT ply_start, ply_end, session_ref FROM exchanges "
+        "WHERE user_content = ?",
+        ("legacy " + "x" * 60,),
+    ).fetchone()
+    con.close()
+    assert (before["ply_start"], before["ply_end"]) == (0, 1)
+    assert before["session_ref"] == f"{opencode_db}#ses1#ply=0-1"
+
+    # msg1 より古い time_created を持つ新規メッセージが到着し、msg1 の実際の位置は
+    # 0-1 から 2-3 へシフトする。
+    con = sqlite3.connect(opencode_db)
+    con.execute(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?)",
+        _user_message("msg0", "ses1", 500),
+    )
+    con.execute(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        _text_part("prt0", "msg0", "ses1", 501, "new " + "y" * 60),
+    )
+    con.commit()
+    con.close()
+
+    index_opencode_db(opencode_db, db_path, min_chars=1, project_root=project_root)
+
+    con = get_connection(db_path)
+    after = con.execute(
+        "SELECT ply_start, ply_end, session_ref FROM exchanges "
+        "WHERE user_content = ?",
+        ("legacy " + "x" * 60,),
+    ).fetchone()
+    con.close()
+    # 移行後は stale な 0-1 ではなく、実際の新しい位置 2-3 を指す。
+    assert (after["ply_start"], after["ply_end"]) == (2, 3)
+    assert after["session_ref"] == f"{opencode_db}#ses1#ply=2-3"
