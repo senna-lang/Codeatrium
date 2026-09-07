@@ -1,16 +1,17 @@
 """lifecycle イベント → loci コマンドの正規定義（1箇所に集約）。
 
-`CodexHooks`/`GrokHooks`/`OmpPiHooks`/`OpenCodeHooks`（`adapters/harness/hooks.py`）は
-どの harness でも「ターン終了時に index」「session 開始時に server/distill/prime」
-「compact 時に prime」という同一の知識を持っており、以前は harness ごとに
-コマンド文字列をリテラルに再構築していた（design doc §1）。この重複を無くし、
-上記4つの Hooks 実装はここが返す `LifecycleCommands` を「どう書き込むか」だけに
-専念して消費する。
+`ClaudeHooks`/`CodexHooks`/`GrokHooks`/`OmpPiHooks`/`OpenCodeHooks`
+（`adapters/harness/hooks.py`、Claude は `codeatrium.hooks.install_hooks`
+経由）は、どの harness でも「ターン終了時に index」「session 開始時に
+server/distill/prime」「compact 時に prime」という同一の知識を持っており、
+以前は harness ごとにコマンド文字列をリテラルに再構築していた（design doc §1）。
+この重複を無くし、上記5つの Hooks 実装はここが返す `LifecycleCommands` を
+「どう書き込むか」だけに専念して消費する。
 
-Claude Code (`codeatrium.hooks.install_hooks`) はこの正規定義の対象外: 差分検出・
-自動修復を含む独自の idempotency ロジックを持ち、`Path.home`/`loci_bin` を
-直接パッチするテスト群（test_status_hook.py, test_security.py, test_init.py）と
-密結合しているため、コマンド組み立てをここへ委譲すると既存の検証面が壊れる。
+`codeatrium.hooks.install_hooks`/`uninstall_hooks` は差分検出・自動修復を含む
+Claude 固有の idempotency ロジックを保つが、コマンド文字列自体は
+`lifecycle_commands("claude", batch_limit)` から取得する（実際の JSON への
+書き込み・`Path.home` 解決は引き続き `codeatrium.hooks` 側の責務）。
 """
 
 from __future__ import annotations

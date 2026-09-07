@@ -287,6 +287,11 @@ def test_hook_install_adds_command(tmp_path, monkeypatch):
         h for entry in data["hooks"]["Stop"] for h in entry.get("hooks", [])
     ]
     assert any("loci index" in h.get("command", "") for h in stop_commands)
+    # lifecycle_commands("claude", ...) が唯一の正規情報源になった（issue #40
+    # レビュー指摘: ClaudeHooks も lifecycle_commands を経由すること）
+    assert any(
+        "loci index --harness claude" in h.get("command", "") for h in stop_commands
+    )
     assert all(
         h.get("async") is True
         for h in stop_commands
@@ -306,6 +311,38 @@ def test_hook_install_adds_command(tmp_path, monkeypatch):
 
     # SessionStart hook: loci prime
     assert any("loci prime" in h.get("command", "") for h in session_start_commands)
+
+
+def test_hook_install_claude_command_tracks_lifecycle_commands_source(
+    tmp_path, monkeypatch
+):
+    """install_hooks() が lifecycle_commands() を経由することを直接確認する
+    （codeatrium.hooks が独立してコマンド文字列を再構築していないことの回帰テスト）。
+    """
+    from codeatrium.hooks import install_hooks
+
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "codeatrium.adapters.harness.lifecycle.loci_bin",
+        lambda: "/fake/venv/bin/loci",
+    )
+
+    install_hooks(batch_limit=7)
+
+    settings_path = tmp_path / ".claude" / "settings.json"
+    data = json.loads(settings_path.read_text())
+    stop_commands = [
+        h["command"] for entry in data["hooks"]["Stop"] for h in entry.get("hooks", [])
+    ]
+    session_commands = [
+        h["command"]
+        for entry in data["hooks"]["SessionStart"]
+        for h in entry.get("hooks", [])
+    ]
+    assert any(
+        cmd == "/fake/venv/bin/loci index --harness claude" for cmd in stop_commands
+    )
+    assert any("--limit 7" in cmd for cmd in session_commands)
 
 
 def test_hook_install_idempotent(tmp_path, monkeypatch):

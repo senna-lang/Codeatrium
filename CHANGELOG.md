@@ -17,8 +17,14 @@
 - Lifecycle event → loci command mapping (`Stop`→`index`, `SessionStart`→
   `server start`/`distill`/`prime`, compact→`prime`) is now a single source of
   truth: `codeatrium.adapters.harness.lifecycle.lifecycle_commands(harness,
-  batch_limit)`. `CodexHooks`/`GrokHooks`/`OmpPiHooks`/`OpenCodeHooks` all derive
-  their commands from it instead of re-deriving the mapping per harness.
+  batch_limit)`. `ClaudeHooks`/`CodexHooks`/`GrokHooks`/`OmpPiHooks`/
+  `OpenCodeHooks` all derive their commands from it instead of re-deriving
+  the mapping per harness (`codeatrium.hooks.install_hooks`/`uninstall_hooks`
+  keep their Claude-specific JSON-merge/idempotency logic, only the command
+  strings themselves are now sourced from the shared helper). One observable
+  side effect: Claude's `Stop` hook now runs `loci index --harness claude`
+  instead of the previous bare `loci index` (which implicitly swept every
+  detected harness on each Claude turn), matching the scoping Codex already had.
 - `DedicatedFileWriter` uninstall only ever deletes files carrying its own
   `CODEATRIUM_HOOK_MARKER`; files without the marker (other tools' extensions/
   plugins sharing the same auto-discovered directory) are left untouched on
