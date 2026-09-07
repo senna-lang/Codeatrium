@@ -9,10 +9,10 @@ idempotency ロジックだけを担う。
 - SessionStart の既存 loci フック検知は matcher 文字列に依存しない（ユーザーが
   matcher をカスタマイズしていても正準 matcher に限定せず全エントリを横断する）。
 - loci が発行したコマンドかどうかは `"loci"` という語の部分一致ではなく、
-  コマンドをトークン分割した上で「`<venv>/bin/loci` という構造を持つ絶対パス」
-  であるかを判定する（無関係なユーザーコマンドの誤検知/誤削除を防ぎつつ、
-  install 時と別の virtualenv からインストールされた hook でも
-  `loci_bin()` の絶対パス一致に依存せず uninstall で安全に認識できる）。
+  コマンドをトークン分割した上で実行ファイル位置（`nohup` のような対応 wrapper
+  の後を含む）が「`<venv>/bin/loci` という構造を持つ絶対パス」であるかを判定する。
+  これにより、無関係なコマンドへ quoted 引数として渡された loci パスを誤検知せず、
+  install 時と別の virtualenv からインストールされた hook も uninstall で認識できる。
 - settings.json の JSON パース失敗は `SettingsLoadError` に変換し、生の
   トレースバックではなく actionable なメッセージを返した上で書き込みを拒否する。
 - `.bak` は上書き前にタイムスタンプ付きアーカイブへ退避し、直近 N 世代を保持する
@@ -38,6 +38,8 @@ from codeatrium.config import DEFAULT_DISTILL_BATCH_LIMIT
 _CANONICAL_MATCHER = "startup|clear|resume|compact"
 _MANAGED_ACTIONS: tuple[str, ...] = ("index", "server", "distill", "prime")
 _MAX_BACKUP_GENERATIONS = 5
+
+_EXECUTABLE_WRAPPERS: frozenset[str] = frozenset(("nohup",))
 
 _backup_counter = count()
 
@@ -80,6 +82,19 @@ def _is_loci_binary_token(token: str) -> bool:
     return path.is_absolute() and path.name == "loci" and path.parent.name == "bin"
 
 
+def _invoked_executable_token(tokens: list[str]) -> str | None:
+    """対応 wrapper を除いた実行ファイル位置のトークンを返す。
+
+    `nohup` は lifecycle_commands() が発行する server / distill hook の wrapper
+    である。wrapper 以外のコマンドでは先頭トークンだけを実行ファイルとして扱い、
+    quoted 引数など後続トークンの `<venv>/bin/loci` を所有権判定に使わない。
+    """
+    token_index = 0
+    while token_index < len(tokens) and tokens[token_index] in _EXECUTABLE_WRAPPERS:
+        token_index += 1
+    return tokens[token_index] if token_index < len(tokens) else None
+
+
 def _command_owned_by_loci(
     cmd: str, actions: tuple[str, ...] = _MANAGED_ACTIONS
 ) -> bool:
@@ -89,16 +104,18 @@ def _command_owned_by_loci(
     旧実装は `"loci" in cmd` という部分一致で判定していたため、パスに "loci"
     を含むだけの無関係なユーザーコマンド（例: `~/tools/my-loci-backup.sh
     --index`）を誤検知し、install 時の誤上書きや uninstall 時の誤削除を
-    招いていた（issue #28）。コマンドを shlex でトークン分割し、
-    `_is_loci_binary_token` で構造的に loci バイナリだと判定できるトークンが
-    存在する場合のみ「自分が発行したコマンド」と判定する。
+    招いていた（issue #28）。コマンドを shlex でトークン分割し、実行ファイル
+    位置（対応 wrapper の後を含む）だけを `_is_loci_binary_token` で判定する。
     """
     try:
         tokens = shlex.split(cmd)
     except ValueError:
         return False
-    return any(_is_loci_binary_token(t) for t in tokens) and any(
-        action in tokens for action in actions
+    executable = _invoked_executable_token(tokens)
+    return (
+        executable is not None
+        and _is_loci_binary_token(executable)
+        and any(action in tokens for action in actions)
     )
 
 

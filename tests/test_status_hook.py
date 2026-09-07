@@ -652,6 +652,33 @@ def test_hook_uninstall_does_not_delete_unrelated_command_with_loci_substring(
     ]
     assert "/home/user/tools/my-loci-backup.sh --index" in stop_commands
 
+def test_hook_uninstall_preserves_quoted_loci_path_passed_to_unrelated_command(
+    tmp_path, monkeypatch
+):
+    """quoted 引数の loci パスは実行ファイルではないため、uninstall で保持する。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    command = 'printf "%s\\n" "/opt/other/bin/loci" index'
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [{"hooks": [{"type": "command", "command": command}]}]
+                }
+            }
+        )
+    )
+
+    from codeatrium.hooks import uninstall_hooks
+
+    changed, message = uninstall_hooks()
+
+    assert changed is False
+    assert "Nothing to uninstall" in message or "No codeatrium" in message
+    data = json.loads(settings_path.read_text())
+    assert data["hooks"]["Stop"][0]["hooks"][0]["command"] == command
+
 def test_hook_uninstall_does_not_delete_relative_bin_loci_command(tmp_path, monkeypatch):
     """絶対パスではない `bin/loci` は codeatrium が生成する hook ではないため、
     action 名が同居していてもユーザーコマンドとして残す。"""
