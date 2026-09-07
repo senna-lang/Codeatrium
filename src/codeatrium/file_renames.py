@@ -53,7 +53,8 @@ def _run_git_follow(project_root: str, file_path: str) -> str:
     try:
         result = subprocess.run(
             [
-                "git", "log", "--follow", "--name-status",
+                "git", "-c", "core.quotepath=false",
+                "log", "--follow", "--name-status",
                 "--diff-filter=R", "--format=", "--", file_path,
             ],
             cwd=project_root,

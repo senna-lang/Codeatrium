@@ -382,22 +382,26 @@ def _migrate_v11_add_canonical_sessions(con: sqlite3.Connection) -> None:
     ).fetchall()
     for row in rows:
         source_path = row["source_path"]
-        session_id = hashlib.sha256(f"claude:{source_path}".encode()).hexdigest()
+        harness, source_session_id = _infer_harness_and_source_session_id(source_path)
+        session_id = hashlib.sha256(f"{harness}:{source_session_id}".encode()).hexdigest()
         cursor = f"v1:ply:{row['last_ply_end']}"
         con.execute(
             """
             INSERT OR IGNORE INTO sessions
                 (id, harness, source_session_id, primary_ref, project_key, cursor,
                  started_at, updated_at)
-            VALUES (?, 'claude', ?, ?, '', ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+            VALUES (?, ?, ?, ?, '', ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
             """,
-            (session_id, source_path, source_path, cursor, row["started_at"], row["started_at"]),
+            (
+                session_id, harness, source_session_id, source_path, cursor,
+                row["started_at"], row["started_at"],
+            ),
         )
         con.execute(
             """
             UPDATE exchanges
             SET session_id = ?,
-                harness = COALESCE(harness, 'claude'),
+                harness = COALESCE(harness, ?),
                 session_ref = COALESCE(
                     session_ref, ? || '#ply=' || ply_start || '-' || ply_end
                 ),
@@ -405,8 +409,29 @@ def _migrate_v11_add_canonical_sessions(con: sqlite3.Connection) -> None:
                 source_turn_id = COALESCE(source_turn_id, CAST(ply_start AS TEXT))
             WHERE conversation_id = ?
             """,
-            (session_id, source_path, source_path, row["id"]),
+            (session_id, harness, source_path, source_session_id, row["id"]),
         )
+
+
+def _infer_harness_and_source_session_id(source_path: str) -> tuple[str, str]:
+    """`source_path` の形状から harness と source_session_id を推定する唯一の正規定義。
+
+    v11 マイグレーションと _backfill_exchange_provenance の両方がこれを使う。
+    以前は v11 が全 pre-existing conversation を無条件に 'claude' 固定していたため、
+    直後に走る _backfill_exchange_provenance の `WHERE harness IS NULL` が
+    ヒットせず、非claude 由来（grok/omp-pi/opencode/codex）の会話も claude 誤ラベルの
+    まま恒久化していた（issue #19）。ヒューリスティックを1箇所に集約し、
+    両者が常に同じ判定・同じ session_id を導出するようにする。
+    """
+    if "opencode.db#" in source_path:
+        return "opencode", source_path.rsplit("#", 1)[1]
+    if "rollout-" in source_path:
+        return "codex", source_path
+    if "/.omp/" in source_path:
+        return "omp-pi", source_path
+    if "/.grok/" in source_path:
+        return "grok", source_path
+    return "claude", source_path
 
 def _backfill_exchange_provenance(con: sqlite3.Connection) -> None:
     exists = con.execute(
@@ -424,21 +449,7 @@ def _backfill_exchange_provenance(con: sqlite3.Connection) -> None:
     ).fetchall()
     for row in rows:
         source_path = row["source_path"]
-        if "opencode.db#" in source_path:
-            harness = "opencode"
-            source_session_id = source_path.rsplit("#", 1)[1]
-        elif "rollout-" in source_path:
-            harness = "codex"
-            source_session_id = source_path
-        elif "/.omp/" in source_path:
-            harness = "omp-pi"
-            source_session_id = source_path
-        elif "/.grok/" in source_path:
-            harness = "grok"
-            source_session_id = source_path
-        else:
-            harness = "claude"
-            source_session_id = source_path
+        harness, source_session_id = _infer_harness_and_source_session_id(source_path)
         session_id = hashlib.sha256(
             f"{harness}:{source_session_id}".encode()
         ).hexdigest()
@@ -487,6 +498,112 @@ def _migrate_v12_add_exchange_conversation_ply_index(con: sqlite3.Connection) ->
     )
 
 
+def _migrate_v13_repair_legacy_claude_mislabel(con: sqlite3.Connection) -> None:
+    """Migration v13: repair exchanges the original (buggy) v11 already
+    mislabeled as harness='claude' before the fix for issue #19 landed.
+
+    The old v11 unconditionally wrote `harness='claude'` and a
+    `claude:<source_path>`-derived `session_id`/`canonical_exchange_id` for
+    every pre-existing conversation, including grok/omp-pi/opencode/codex
+    ones. Fixing v11 itself (this migration's predecessor) only stops *new*
+    mislabeling — on a DB that already ran the buggy v11, `user_version`
+    is already >= 11, so v11 never runs again, and `_backfill_exchange_provenance`
+    only touches rows `WHERE session_id IS NULL OR harness IS NULL`, which the
+    old buggy v11 already filled. Those rows stay wrong forever without an
+    explicit repair pass.
+
+    This walks every conversation, re-derives the correct harness with the
+    same `_infer_harness_and_source_session_id` heuristic used by v11/backfill,
+    and — only where an exchange disagrees with that derivation — rewrites
+    `harness`, `session_id`, `source_session_id`, and (if the column already
+    exists — i.e. `_backfill_canonical_exchange_ids` already ran against the
+    stale values) `canonical_exchange_id`. The stale `claude`-hashed `sessions`
+    row for that conversation is deleted once nothing references it anymore.
+    Idempotent: re-deriving already-correct rows is a no-op.
+    """
+    conversations_exists = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'conversations'"
+    ).fetchone()
+    exchanges_exists = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'exchanges'"
+    ).fetchone()
+    if conversations_exists is None or exchanges_exists is None:
+        return
+
+    exchange_columns = {
+        row[1] for row in con.execute("PRAGMA table_info(exchanges)").fetchall()
+    }
+    has_canonical_column = "canonical_exchange_id" in exchange_columns
+
+    conversations = con.execute(
+        "SELECT id, source_path FROM conversations"
+    ).fetchall()
+    for conversation in conversations:
+        source_path = conversation["source_path"]
+        harness, source_session_id = _infer_harness_and_source_session_id(source_path)
+
+        mislabeled = con.execute(
+            "SELECT id, source_turn_id FROM exchanges "
+            "WHERE conversation_id = ? AND harness IS NOT NULL AND harness != ?",
+            (conversation["id"], harness),
+        ).fetchall()
+        if not mislabeled:
+            continue
+
+        session_id = hashlib.sha256(
+            f"{harness}:{source_session_id}".encode()
+        ).hexdigest()
+        con.execute(
+            """
+            INSERT OR IGNORE INTO sessions
+                (id, harness, source_session_id, primary_ref, project_key,
+                 cursor_version, updated_at)
+            VALUES (?, ?, ?, ?, '', 1, CURRENT_TIMESTAMP)
+            """,
+            (session_id, harness, source_session_id, source_path),
+        )
+        for exchange in mislabeled:
+            canonical_exchange_id = None
+            if has_canonical_column and exchange["source_turn_id"] is not None:
+                canonical_exchange_id = hashlib.sha256(
+                    f"{harness}:{source_session_id}:{exchange['source_turn_id']}".encode()
+                ).hexdigest()
+            if has_canonical_column:
+                con.execute(
+                    """
+                    UPDATE exchanges
+                    SET harness = ?, session_id = ?, source_session_id = ?,
+                        canonical_exchange_id = ?
+                    WHERE id = ?
+                    """,
+                    (harness, session_id, source_session_id, canonical_exchange_id, exchange["id"]),
+                )
+            else:
+                con.execute(
+                    """
+                    UPDATE exchanges
+                    SET harness = ?, session_id = ?, source_session_id = ?
+                    WHERE id = ?
+                    """,
+                    (harness, session_id, source_session_id, exchange["id"]),
+                )
+
+        # The old buggy v11 always hashed `claude:<source_path>` regardless of
+        # actual harness. Each conversation's source_path is unique, so this id
+        # is unique to the row just repaired — safe to drop once unreferenced.
+        stale_claude_session_id = hashlib.sha256(
+            f"claude:{source_path}".encode()
+        ).hexdigest()
+        con.execute(
+            """
+            DELETE FROM sessions
+            WHERE id = ?
+              AND id NOT IN (SELECT DISTINCT session_id FROM exchanges WHERE session_id IS NOT NULL)
+            """,
+            (stale_claude_session_id,),
+        )
+
+
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_add_last_ply_end,
     _migrate_v2_add_distill_status,
@@ -500,6 +617,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v10_add_file_renames,
     _migrate_v11_add_canonical_sessions,
     _migrate_v12_add_exchange_conversation_ply_index,
+    _migrate_v13_repair_legacy_claude_mislabel,
 ]
 
 

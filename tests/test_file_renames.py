@@ -148,3 +148,25 @@ def test_resolve_aliases_returns_empty_when_git_unavailable(tmp_path: Path) -> N
     aliases = resolve_aliases(con, str(non_repo), "whatever.py")
 
     assert aliases == []
+
+
+def test_resolve_aliases_handles_non_ascii_renamed_path(tmp_path: Path) -> None:
+    """git のデフォルト `core.quotepath=true` は非ASCIIパスを `git log --name-status`
+    で `"caf\\303\\251.py"` のように8進数エスケープした二重引用符付き文字列で出力する。
+    `-c core.quotepath=false` を付けないと resolve_aliases が返す旧パスがエスケープ
+    されたままで実際のファイル名と一致しない（issue #19）。"""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run(["git", "init", "-q"], repo)
+    _run(["git", "config", "user.email", "test@example.com"], repo)
+    _run(["git", "config", "user.name", "test"], repo)
+    (repo / "café.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _run(["git", "add", "."], repo)
+    _run(["git", "commit", "-q", "-m", "init"], repo)
+    _run(["git", "mv", "café.py", "new_name.py"], repo)
+    _run(["git", "commit", "-q", "-m", "rename"], repo)
+    con = _setup_db(tmp_path)
+
+    aliases = resolve_aliases(con, str(repo), "new_name.py")
+
+    assert aliases == ["café.py"]
