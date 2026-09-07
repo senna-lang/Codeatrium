@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- `loci hook install`/`uninstall --harness omp-pi|opencode|grok` now write real
+  native hooks (issue #40): `OmpPiHooks`/`OpenCodeHooks` generate a marker-owned
+  `~/.omp/agent/extensions/codeatrium.ts` / `~/.config/opencode/plugins/codeatrium.ts`
+  plugin file (`DedicatedFileWriter`), and `GrokHooks` merges into a dedicated
+  `~/.grok/hooks/codeatrium.json` (`MergedJsonHookWriter`, shared with the new
+  `CodexHooks`). All three previously always failed via `FallbackHooks`, which
+  remains the safety net for unrecognized harnesses.
+
+### Changed
+
+- Lifecycle event → loci command mapping (`Stop`→`index`, `SessionStart`→
+  `server start`/`distill`/`prime`, compact→`prime`) is now a single source of
+  truth: `codeatrium.adapters.harness.lifecycle.lifecycle_commands(harness,
+  batch_limit)`. `CodexHooks`/`GrokHooks`/`OmpPiHooks`/`OpenCodeHooks` all derive
+  their commands from it instead of re-deriving the mapping per harness.
+- `DedicatedFileWriter` uninstall only ever deletes files carrying its own
+  `CODEATRIUM_HOOK_MARKER`; files without the marker (other tools' extensions/
+  plugins sharing the same auto-discovered directory) are left untouched on
+  both install (no clobber) and uninstall (no delete).
+
 ### Fixed
 
 - Embedding server lifecycle races (issue #16): `loci server start` now serializes

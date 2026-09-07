@@ -153,17 +153,99 @@ def test_hook_install_creates_settings(tmp_path, monkeypatch):
     assert "hooks" in data
     assert "Stop" in data["hooks"]
 
-def test_hook_install_non_claude_uses_fallback_without_settings_write(
-    tmp_path, monkeypatch
-):
-    settings_path = tmp_path / ".claude" / "settings.json"
-    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+def test_hook_install_omp_pi_writes_dedicated_extension_file(tmp_path, monkeypatch):
+    """omp-pi は FallbackHooks ではなく ~/.omp/agent/extensions/*.ts へ実際に書く（issue #40）"""
+    ext_path = tmp_path / ".omp" / "agent" / "extensions" / "codeatrium.ts"
+    monkeypatch.setattr(
+        "codeatrium.adapters.harness.hooks.Path.home", lambda: tmp_path
+    )
 
     result = runner.invoke(app, ["hook", "install", "--harness", "omp-pi"])
 
     assert result.exit_code == 0
-    assert "loci index --harness omp-pi" in result.output
-    assert not settings_path.exists()
+    assert ext_path.exists()
+    content = ext_path.read_text()
+    assert "CODEATRIUM_HOOK_MARKER" in content
+    assert "loci index --harness omp-pi" in content
+    assert "agent_end" in content
+    assert "session_start" in content
+
+    second = runner.invoke(app, ["hook", "install", "--harness", "omp-pi"])
+    assert "already up to date" in second.output
+
+
+def test_hook_uninstall_omp_pi_removes_only_marker_owned_file(tmp_path, monkeypatch):
+    """マーカーの無いファイルは誤削除しない（issue #28 の共有ディレクトリ誤削除対策）"""
+    ext_dir = tmp_path / ".omp" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    other_file = ext_dir / "other-tool.ts"
+    other_file.write_text("// not ours\n")
+    monkeypatch.setattr(
+        "codeatrium.adapters.harness.hooks.Path.home", lambda: tmp_path
+    )
+
+    runner.invoke(app, ["hook", "install", "--harness", "omp-pi"])
+    result = runner.invoke(app, ["hook", "uninstall", "--harness", "omp-pi"])
+
+    assert result.exit_code == 0
+    assert not (ext_dir / "codeatrium.ts").exists()
+    assert other_file.exists()  # 他ツールのファイルは無傷
+
+
+def test_hook_install_opencode_writes_dedicated_plugin_file(tmp_path, monkeypatch):
+    plugin_path = tmp_path / ".config" / "opencode" / "plugins" / "codeatrium.ts"
+    monkeypatch.setattr(
+        "codeatrium.adapters.harness.hooks.Path.home", lambda: tmp_path
+    )
+
+    result = runner.invoke(app, ["hook", "install", "--harness", "opencode"])
+
+    assert result.exit_code == 0
+    assert plugin_path.exists()
+    content = plugin_path.read_text()
+    assert "CODEATRIUM_HOOK_MARKER" in content
+    assert "loci index --harness opencode" in content
+    assert "session.idle" in content
+    assert "session.created" in content
+    assert "session.compacted" in content
+
+
+def test_hook_install_grok_uses_native_hooks_file(tmp_path, monkeypatch):
+    hooks_path = tmp_path / ".grok" / "hooks" / "codeatrium.json"
+    monkeypatch.setattr(
+        "codeatrium.adapters.harness.hooks.Path.home", lambda: tmp_path
+    )
+
+    result = runner.invoke(app, ["hook", "install", "--harness", "grok"])
+
+    assert result.exit_code == 0
+    data = json.loads(hooks_path.read_text())
+    stop_commands = [
+        hook["command"] for entry in data["hooks"]["Stop"] for hook in entry["hooks"]
+    ]
+    assert any("loci index --harness grok" in cmd for cmd in stop_commands)
+    session_commands = [
+        hook["command"]
+        for entry in data["hooks"]["SessionStart"]
+        for hook in entry["hooks"]
+    ]
+    assert any("loci server start" in cmd for cmd in session_commands)
+    assert any("loci distill" in cmd for cmd in session_commands)
+    assert any("loci prime" in cmd for cmd in session_commands)
+    compact_commands = [
+        hook["command"]
+        for entry in data["hooks"]["PostCompact"]
+        for hook in entry["hooks"]
+    ]
+    assert any("loci prime" in cmd for cmd in compact_commands)
+
+    second = runner.invoke(app, ["hook", "install", "--harness", "grok"])
+    assert "already up to date" in second.output
+
+    uninstall_result = runner.invoke(app, ["hook", "uninstall", "--harness", "grok"])
+    assert uninstall_result.exit_code == 0
+    data_after = json.loads(hooks_path.read_text())
+    assert "hooks" not in data_after or not data_after["hooks"]
 
 
 def test_hook_install_codex_uses_native_hooks_file(tmp_path, monkeypatch):
