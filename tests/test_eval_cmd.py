@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -11,6 +10,7 @@ from typer.testing import CliRunner
 from codeatrium.cli import app
 from codeatrium.db import get_connection, init_db
 from codeatrium.eval.datasets.schema import Query, dump_dataset
+from tests.conftest import run_git
 
 runner = CliRunner()
 
@@ -124,14 +124,11 @@ def test_eval_gen_writes_symbol_recall_dataset(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "foo.py").write_text("def list_dir():\n    pass\n")
-    for cmd in (
-        ["git", "init"],
-        ["git", "config", "user.email", "test@example.com"],
-        ["git", "config", "user.name", "Test"],
-        ["git", "add", "."],
-        ["git", "commit", "-m", "initial"],
-    ):
-        subprocess.run(cmd, cwd=tmp_path, check=True, capture_output=True)
+    run_git(tmp_path, "init")
+    run_git(tmp_path, "config", "user.email", "test@example.com")
+    run_git(tmp_path, "config", "user.name", "Test")
+    run_git(tmp_path, "add", ".")
+    run_git(tmp_path, "commit", "-m", "initial")
 
     db = tmp_path / ".codeatrium" / "memory.db"
     init_db(db)
