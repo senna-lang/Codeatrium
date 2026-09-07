@@ -146,16 +146,37 @@ def distill_exchange(
     )
 
 
-# TypeScript の IdentifierPart は Unicode combining mark（Mn/Mc/Me）も許容する。
-# Python の \w はそのマークを含まない一方、`$trace` のように `$` で始まる識別子も
-# \b では検出できない。そのため、`$`、Python の \w 相当、全 combining mark を
-# 識別子内部として判定する。
+# ECMAScript IdentifierPart は Unicode ID_Continue、`$`、ZWNJ、ZWJ から成る。
+# ID_Continue は Unicode の指定する general category 群と Other_ID_Continue の全例外を
+# 合わせた導出プロパティである。正規表現依存を増やさず stdlib の Unicode database から
+# category を判定し、category だけでは表せない例外を明示する。
+_UNICODE_ID_CONTINUE_CATEGORIES = frozenset(
+    {"Lu", "Ll", "Lt", "Lm", "Lo", "Nl", "Mn", "Mc", "Nd", "Pc"}
+)
+_OTHER_ID_CONTINUE = frozenset(
+    {
+        "\u00b7",
+        "\u0387",
+        "\u1369",
+        "\u136a",
+        "\u136b",
+        "\u136c",
+        "\u136d",
+        "\u136e",
+        "\u136f",
+        "\u1370",
+        "\u1371",
+        "\u19da",
+    }
+)
+_ECMASCRIPT_IDENTIFIER_PART_EXTRAS = frozenset({"$", "\u200c", "\u200d"})
+
+
 def _is_identifier_part(character: str) -> bool:
     return (
-        character == "$"
-        or character == "_"
-        or character.isalnum()
-        or unicodedata.category(character).startswith("M")
+        character in _ECMASCRIPT_IDENTIFIER_PART_EXTRAS
+        or unicodedata.category(character) in _UNICODE_ID_CONTINUE_CATEGORIES
+        or character in _OTHER_ID_CONTINUE
     )
 
 

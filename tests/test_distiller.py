@@ -604,6 +604,66 @@ def test_save_palace_object_excludes_dollar_symbol_inside_combining_identifier(
 
     assert count == 0
 
+@pytest.mark.parametrize(
+    ("prefix", "description"),
+    [
+        ("a\u203f", "U+203F UNDERTIE"),
+        ("a\u200c", "U+200C ZERO WIDTH NON-JOINER"),
+        ("a\u200d", "U+200D ZERO WIDTH JOINER"),
+        ("a\u00b7", "U+00B7 MIDDLE DOT"),
+        ("a\u0387", "U+0387 GREEK ANO TELEIA"),
+        ("a\u1369", "U+1369 ETHIOPIC DIGIT ONE"),
+        ("a\u136a", "U+136A ETHIOPIC DIGIT TWO"),
+        ("a\u136b", "U+136B ETHIOPIC DIGIT THREE"),
+        ("a\u136c", "U+136C ETHIOPIC DIGIT FOUR"),
+        ("a\u136d", "U+136D ETHIOPIC DIGIT FIVE"),
+        ("a\u136e", "U+136E ETHIOPIC DIGIT SIX"),
+        ("a\u136f", "U+136F ETHIOPIC DIGIT SEVEN"),
+        ("a\u1370", "U+1370 ETHIOPIC DIGIT EIGHT"),
+        ("a\u1371", "U+1371 ETHIOPIC DIGIT NINE"),
+        ("a\u19da", "U+19DA NEW TAI LUE THAM DIGIT ONE"),
+    ],
+)
+def test_save_palace_object_excludes_dollar_symbol_inside_ecmascript_identifier_part(
+    tmp_path,
+    prefix: str,
+    description: str,
+) -> None:
+    """$trace は全 ECMAScript IdentifierPart の接頭辞内では言及扱いしない。"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path,
+        "ex1",
+        user_text=f"updated {prefix}$trace " * 5,
+        agent_text="more text " * 5,
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "$trace"
+    sym.symbol_kind = "variable"
+    sym.signature = "const $trace"
+    sym.line = 1
+    sym.file_path = "src/foo.ts"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.ts"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == 0, description
+
 
 def test_save_palace_object_sets_distilled_at(tmp_path) -> None:
     db_path = tmp_path / "memory.db"
