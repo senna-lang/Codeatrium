@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -145,23 +146,34 @@ def distill_exchange(
     )
 
 
-# シンボル本文言及チェックの境界判定に使う識別子文字。Python の \b は \w（Unicode
-# 文字・数字・アンダースコア）基準のため、JS/TS の `$trace` のように非 \w 文字で
-# 始まる識別子は空白の後に \b の境界が立たず誤って不一致になる。Unicode の文字も
-# 識別子の一部として扱うため、\w に $ を加えて独自に境界を判定する。
-_IDENTIFIER_CHAR = r"[\w$]"
+# TypeScript の IdentifierPart は Unicode combining mark（Mn/Mc/Me）も許容する。
+# Python の \w はそのマークを含まない一方、`$trace` のように `$` で始まる識別子も
+# \b では検出できない。そのため、`$`、Python の \w 相当、全 combining mark を
+# 識別子内部として判定する。
+def _is_identifier_part(character: str) -> bool:
+    return (
+        character == "$"
+        or character == "_"
+        or character.isalnum()
+        or unicodedata.category(character).startswith("M")
+    )
 
 
 def _symbol_mentioned_in_body(symbol_name: str, body_text: str) -> bool:
-    """symbol_name が body_text 中に識別子境界つきで出現するか判定する。
-
-    混入して全マッチしてしまうため、Unicode の文字を含む識別子文字（\\w と $）の
-    直前直後に別の識別子文字が続かないことを条件に判定する。
-    """
-    pattern = (
-        rf"(?<!{_IDENTIFIER_CHAR}){re.escape(symbol_name)}(?!{_IDENTIFIER_CHAR})"
-    )
-    return re.search(pattern, body_text) is not None
+    """symbol_name が body_text 中に識別子境界つきで出現するか判定する。"""
+    start = body_text.find(symbol_name)
+    while start != -1:
+        end = start + len(symbol_name)
+        previous_is_identifier_part = (
+            start > 0 and _is_identifier_part(body_text[start - 1])
+        )
+        next_is_identifier_part = (
+            end < len(body_text) and _is_identifier_part(body_text[end])
+        )
+        if not previous_is_identifier_part and not next_is_identifier_part:
+            return True
+        start = body_text.find(symbol_name, start + 1)
+    return False
 
 
 def save_palace_object(
