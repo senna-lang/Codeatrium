@@ -605,6 +605,56 @@ def test_save_palace_object_excludes_dollar_symbol_inside_combining_identifier(
     assert count == 0
 
 @pytest.mark.parametrize(
+    ("prefix", "expected_count", "description"),
+    [
+        (r"a\u309B", 0, "fixed-width U+309B escape"),
+        (r"a\u{309B}", 0, "braced U+309B escape"),
+        (r"a\u{002D}", 1, "valid escape for non-IdentifierPart U+002D"),
+        (r"a\u{not-a-code-point}", 1, "malformed braced escape"),
+    ],
+)
+def test_save_palace_object_handles_dollar_symbol_after_unicode_escape(
+    tmp_path,
+    prefix: str,
+    expected_count: int,
+    description: str,
+) -> None:
+    """直前の Unicode escape が IdentifierPart の場合だけ $trace を除外する。"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(
+        db_path,
+        "ex1",
+        user_text=f"updated {prefix}$trace " * 5,
+        agent_text="more text " * 5,
+    )
+
+    resolver = MagicMock()
+    sym = MagicMock()
+    sym.symbol_name = "$trace"
+    sym.symbol_kind = "variable"
+    sym.signature = "const $trace"
+    sym.line = 1
+    sym.file_path = "src/foo.ts"
+    resolver.extract.return_value = [sym]
+
+    palace = PalaceObject(
+        exchange_core="c",
+        specific_context="s",
+        room_assignments=[],
+        files_touched=["src/foo.ts"],
+    )
+    save_palace_object(
+        db_path, "ex1", palace, np.zeros(384, dtype=np.float32), resolver=resolver
+    )
+
+    con = get_connection(db_path)
+    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    con.close()
+
+    assert count == expected_count, description
+
+@pytest.mark.parametrize(
     ("prefix", "description"),
     [
         ("a\u203f", "U+203F UNDERTIE"),

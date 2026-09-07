@@ -192,14 +192,44 @@ def _is_identifier_part(character: str) -> bool:
     )
 
 
+def _decode_unicode_escape_before(text: str, index: int) -> str | None:
+    """index の直前で終わる ECMAScript Unicode escape を1文字だけ復元する。"""
+    fixed_width_start = index - 6
+    if fixed_width_start >= 0 and text.startswith(r"\u", fixed_width_start):
+        digits = text[fixed_width_start + 2 : index]
+        if all(character in "0123456789abcdefABCDEF" for character in digits):
+            return chr(int(digits, 16))
+
+    if index >= 5 and text[index - 1] == "}":
+        for digit_count in range(1, 7):
+            escape_start = index - digit_count - 4
+            if escape_start < 0 or not text.startswith(r"\u{", escape_start):
+                continue
+            digits = text[escape_start + 3 : index - 1]
+            if all(character in "0123456789abcdefABCDEF" for character in digits):
+                code_point = int(digits, 16)
+                if code_point <= 0x10FFFF:
+                    return chr(code_point)
+
+    return None
+
+
+def _is_identifier_part_before(text: str, index: int) -> bool:
+    """text の index 直前が ECMAScript IdentifierPart か判定する。"""
+    if index == 0:
+        return False
+    escaped_character = _decode_unicode_escape_before(text, index)
+    if escaped_character is not None:
+        return _is_identifier_part(escaped_character)
+    return _is_identifier_part(text[index - 1])
+
+
 def _symbol_mentioned_in_body(symbol_name: str, body_text: str) -> bool:
     """symbol_name が body_text 中に識別子境界つきで出現するか判定する。"""
     start = body_text.find(symbol_name)
     while start != -1:
         end = start + len(symbol_name)
-        previous_is_identifier_part = (
-            start > 0 and _is_identifier_part(body_text[start - 1])
-        )
+        previous_is_identifier_part = _is_identifier_part_before(body_text, start)
         next_is_identifier_part = (
             end < len(body_text) and _is_identifier_part(body_text[end])
         )
