@@ -41,6 +41,11 @@ class JsonlLogSource:
         self._touch_adapter = touch_adapter
         self._parent_ref_resolver = parent_ref_resolver
 
+    @property
+    def parent_ref_resolver(self) -> ParentRefResolver | None:
+        """公開ポート: この harness の親セッション参照リゾルバ（未対応なら None）。"""
+        return self._parent_ref_resolver
+
     def detect(self, project_root: Path) -> bool:
         directory = self._resolve_path(project_root)
         return directory is not None and any(directory.rglob(self._pattern))
