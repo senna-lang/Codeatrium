@@ -207,6 +207,147 @@ def test_ingest_persists_exchange_scoped_code_touches(tmp_path: Path) -> None:
     assert symbol_count == 1
 
 
+def test_ingest_duplicate_touch_within_one_parse_does_not_double_count_added(
+    tmp_path: Path,
+) -> None:
+    """Regression for #20: an adapter re-emitting the same tool-call event
+    twice within one `ParseResult` (e.g. a hook firing twice for a retried
+    call) must not double the resulting edge's `added`. `code_touches`
+    already dedupes such a replay via `INSERT OR IGNORE`; `code_edges` must
+    honor that and skip re-accumulating a touch it already recorded, or the
+    `ON CONFLICT ... added = added + excluded.added` merge silently sums the
+    same edit twice."""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    source = tmp_path / "src" / "target.py"
+    source.parent.mkdir()
+    source.write_text("def target() -> None:\n    pass\n")
+    session = CanonicalSession(
+        harness="codex",
+        source_session_id="session-1",
+        primary_ref="/tmp/rollout.jsonl",
+        project_key=str(tmp_path),
+    )
+    touch = CodeTouch(
+        harness="codex",
+        tool_call_id="call-1",
+        file_path=str(source),
+        touch_kind="edit",
+        locators=(FileOnly(),),
+        added=5,
+        removed=0,
+        ts=None,
+    )
+    result = ParseResult(
+        exchanges=(
+            CanonicalExchange(
+                harness="codex",
+                session_ref="/tmp/rollout.jsonl#ply=2-4",
+                source_session_id="session-1",
+                source_turn_id="turn-2",
+                ply_start=2,
+                ply_end=4,
+                user_content="update the target function",
+                agent_content="updated target",
+            ),
+        ),
+        next_cursor="v1:ply:4",
+        artifacts=(
+            ExchangeArtifacts(
+                source_turn_id="turn-2",
+                code_touches=(touch, touch),  # same event, represented twice
+            ),
+        ),
+    )
+
+    con = get_connection(db_path)
+    assert ingest_parse_result(con, session, result) == 1
+    con.commit()
+    touch_count = con.execute("SELECT COUNT(*) FROM code_touches").fetchone()[0]
+    edges = con.execute("SELECT added FROM code_edges").fetchall()
+    con.close()
+
+    assert touch_count == 1
+    assert len(edges) == 1
+    assert edges[0]["added"] == 5
+
+
+def test_ingest_parse_result_rerun_on_unchanged_content_does_not_duplicate(
+    tmp_path: Path,
+) -> None:
+    """Regression for #20: re-running `ingest_parse_result` a second time
+    with the exact same session+result (e.g. a re-index over an unchanged
+    transcript) must leave code_touches/code_symbols/code_edges exactly as
+    they were after the first run — no new rows, no changed values."""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    source = tmp_path / "src" / "target.py"
+    source.parent.mkdir()
+    source.write_text("def target() -> None:\n    pass\n")
+    session = CanonicalSession(
+        harness="codex",
+        source_session_id="session-1",
+        primary_ref="/tmp/rollout.jsonl",
+        project_key=str(tmp_path),
+    )
+    result = ParseResult(
+        exchanges=(
+            CanonicalExchange(
+                harness="codex",
+                session_ref="/tmp/rollout.jsonl#ply=2-4",
+                source_session_id="session-1",
+                source_turn_id="turn-2",
+                ply_start=2,
+                ply_end=4,
+                user_content="update the target function",
+                agent_content="updated target",
+            ),
+        ),
+        next_cursor="v1:ply:4",
+        artifacts=(
+            ExchangeArtifacts(
+                source_turn_id="turn-2",
+                code_touches=(
+                    CodeTouch(
+                        harness="codex",
+                        tool_call_id="call-1",
+                        file_path=str(source),
+                        touch_kind="edit",
+                        locators=(FileOnly(),),
+                        added=3,
+                        removed=0,
+                        ts=None,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    con = get_connection(db_path)
+    assert ingest_parse_result(con, session, result) == 1
+    con.commit()
+    first = (
+        con.execute("SELECT * FROM code_touches").fetchall(),
+        con.execute("SELECT * FROM code_symbols").fetchall(),
+        con.execute("SELECT * FROM code_edges").fetchall(),
+    )
+
+    assert ingest_parse_result(con, session, result) == 0
+    con.commit()
+    second = (
+        con.execute("SELECT * FROM code_touches").fetchall(),
+        con.execute("SELECT * FROM code_symbols").fetchall(),
+        con.execute("SELECT * FROM code_edges").fetchall(),
+    )
+    con.close()
+
+    assert [dict(r) for r in second[0]] == [dict(r) for r in first[0]]
+    assert [dict(r) for r in second[1]] == [dict(r) for r in first[1]]
+    assert [dict(r) for r in second[2]] == [dict(r) for r in first[2]]
+    assert len(second[2]) == 1
+    assert second[2][0]["added"] == 3
+
+
 def test_ingest_resolves_symbols_against_touch_time_git_blob_not_live_disk(
     tmp_path: Path,
 ) -> None:

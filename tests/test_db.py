@@ -15,6 +15,7 @@ from codeatrium.db import (
     get_connection,
     init_db,
 )
+from codeatrium.utils import sha256
 from tests.conftest import run_git
 
 
@@ -2112,6 +2113,99 @@ def test_backfill_touch_time_symbol_edges_upgrades_stale_file_edge(tmp_path: Pat
     assert granularities == {"file", "line"}
     line_edge = next(e for e in edges if e["granularity"] == "line")
     assert line_edge["symbol_id"] is not None
+
+
+def test_backfill_touch_time_symbol_edges_never_clobbers_current_symbol_row(
+    tmp_path: Path,
+) -> None:
+    """PR #51 review: `code_symbols` is read by `loci context <file>:<line>`
+    to map a CURRENT source line to a symbol. If a symbol's row already
+    reflects its up-to-date (moved) location, a historical touch from
+    *before* the move must not clobber it with stale pre-move coordinates
+    when this backfill runs — current-line lookup for that symbol must
+    keep working."""
+    from codeatrium.context_lookup import pick_enclosing_symbol_name
+    from codeatrium.resolver import SymbolResolver
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    db_path = project_root / ".codeatrium" / "memory.db"
+
+    run_git(project_root, "init")
+    run_git(project_root, "config", "user.email", "t@t.com")
+    run_git(project_root, "config", "user.name", "T")
+    src = project_root / "src.py"
+    src.write_text("def foo():\n    pass\n")
+    run_git(project_root, "add", ".")
+    old_env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
+    }
+    run_git(project_root, "commit", "-m", "old", env=old_env)
+
+    # foo() moves far down the file — its up-to-date location.
+    padding = "\n".join(f"x{i} = {i}" for i in range(100))
+    src.write_text(f"{padding}\n\ndef foo():\n    pass\n")
+    run_git(project_root, "add", ".")
+    new_env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-06-01T00:00:00",
+        "GIT_COMMITTER_DATE": "2026-06-01T00:00:00",
+    }
+    run_git(project_root, "commit", "-m", "new", env=new_env)
+
+    current_symbol = next(
+        s for s in SymbolResolver().extract(src) if s.symbol_name == "foo"
+    )
+
+    init_db(db_path)
+    con = get_connection(db_path)
+
+    # The row a live ingest would already have written for the up-to-date
+    # (post-move) location — established directly here (equivalent to what
+    # core.ingest's own INSERT OR REPLACE would do for a real post-move
+    # touch) so the test isolates the backfill's write policy.
+    symbol_id = sha256("src.py:foo")
+    con.execute(
+        """
+        INSERT OR REPLACE INTO code_symbols
+            (id, file_path, symbol_name, symbol_kind, signature, line, end_line, lang, resolved_at)
+        VALUES (?, 'src.py', 'foo', ?, ?, ?, ?, ?, '2026-06-01T00:00:00')
+        """,
+        (
+            symbol_id,
+            current_symbol.symbol_kind,
+            current_symbol.signature,
+            current_symbol.line,
+            current_symbol.end_line,
+            current_symbol.lang,
+        ),
+    )
+
+    con.execute("DELETE FROM meta WHERE key = 'touch_time_symbol_edges_backfilled'")
+    _seed_drifted_touch(con)  # historical touch, timestamped before the move
+    con.commit()
+
+    _backfill_touch_time_symbol_edges(con, project_root)
+    con.commit()
+
+    row = con.execute(
+        "SELECT line, end_line FROM code_symbols WHERE id = ?", (symbol_id,)
+    ).fetchone()
+    all_symbols = [
+        (r["symbol_name"], r["line"], r["end_line"])
+        for r in con.execute(
+            "SELECT symbol_name, line, end_line FROM code_symbols WHERE file_path = 'src.py'"
+        ).fetchall()
+    ]
+    con.close()
+
+    # The current/authoritative coordinates survive the backfill untouched.
+    assert (row["line"], row["end_line"]) == (current_symbol.line, current_symbol.end_line)
+    # And a line lookup at the symbol's real current location still resolves.
+    assert pick_enclosing_symbol_name(current_symbol.line, all_symbols) == "foo"
+
 
 
 def test_backfill_touch_time_symbol_edges_is_idempotent(tmp_path: Path) -> None:

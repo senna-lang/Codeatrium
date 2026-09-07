@@ -714,13 +714,28 @@ def _backfill_touch_time_symbol_edges(con: sqlite3.Connection, project_root: Pat
     this backfill applies the same resolution retroactively to touches
     already persisted under the old (live-disk) behavior.
 
-    Purely additive: only inserts new `line`-granularity edges (via the
-    same deterministic id `touches_to_edges` always uses, so re-running is
-    a no-op). Never deletes the coarser `file`-granularity edges the old
-    behavior already created — those stay harmless alongside a precise
-    match (`resolve_u1`'s symbol tier only ever joins on a non-null
-    `symbol_id`, so a leftover file-level row is never consulted once a
-    line-level row for the same exchange/file exists).
+    Purely additive on `code_edges`: only inserts new `line`-granularity
+    edges (via the same deterministic id `touches_to_edges` always uses, so
+    re-running is a no-op). Never deletes the coarser `file`-granularity
+    edges the old behavior already created — those stay harmless alongside
+    a precise match (`resolve_u1`'s symbol tier only ever joins on a
+    non-null `symbol_id`, so a leftover file-level row is never consulted
+    once a line-level row for the same exchange/file exists).
+
+    `code_symbols` rows are written with `INSERT OR IGNORE`, deliberately
+    *not* matching `core.ingest`'s `INSERT OR REPLACE`: this backfill
+    resolves each historical touch against a git blob picked by that
+    touch's *own*, possibly old, timestamp, so its reconstruction can be
+    staler than a row `core.ingest` already wrote from a more recent touch
+    (or from a prior run of this same backfill). Backfill must never
+    clobber an existing row with a historical reconstruction — `IGNORE`
+    only fills in symbols that have no current row at all, leaving whatever
+    is already there (necessarily at least as fresh) untouched. Overwriting
+    unconditionally regressed `code_symbols` — the table `loci context
+    <file>:<line>` reads for CURRENT line→symbol matching — back to a
+    symbol's stale pre-move coordinates whenever a pre-move touch got
+    backfilled after the symbol's current location was already known
+    (issue #20 review).
 
     project_root-dependent (like `_backfill_legacy_code_edges`), so this
     stays outside `_MIGRATIONS`/`user_version` and runs once via a `meta`
