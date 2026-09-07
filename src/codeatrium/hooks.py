@@ -9,8 +9,10 @@ idempotency ロジックだけを担う。
 - SessionStart の既存 loci フック検知は matcher 文字列に依存しない（ユーザーが
   matcher をカスタマイズしていても正準 matcher に限定せず全エントリを横断する）。
 - loci が発行したコマンドかどうかは `"loci"` という語の部分一致ではなく、
-  `loci_bin()` が返す実行バイナリの絶対パスがコマンドのトークンとして厳密に
-  一致するかで判定する（無関係なユーザーコマンドの誤検知/誤削除を防ぐ）。
+  コマンドをトークン分割した上で「`<venv>/bin/loci` という構造を持つ絶対パス」
+  であるかを判定する（無関係なユーザーコマンドの誤検知/誤削除を防ぎつつ、
+  install 時と別の virtualenv からインストールされた hook でも
+  `loci_bin()` の絶対パス一致に依存せず uninstall で安全に認識できる）。
 - settings.json の JSON パース失敗は `SettingsLoadError` に変換し、生の
   トレースバックではなく actionable なメッセージを返した上で書き込みを拒否する。
 - `.bak` は上書き前にタイムスタンプ付きアーカイブへ退避し、直近 N 世代を保持する
@@ -27,12 +29,11 @@ import shutil
 import tempfile
 from datetime import datetime
 from itertools import count
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from codeatrium.adapters.harness.lifecycle import lifecycle_commands
 from codeatrium.config import DEFAULT_DISTILL_BATCH_LIMIT
-from codeatrium.paths import loci_bin
 
 _CANONICAL_MATCHER = "startup|clear|resume|compact"
 _MANAGED_ACTIONS: tuple[str, ...] = ("index", "server", "distill", "prime")
@@ -63,26 +64,46 @@ def _load_settings(settings_path: Path) -> dict[str, Any]:
             ) from exc
 
 
-def _command_owned_by_loci(
-    cmd: str, loci_path: str, actions: tuple[str, ...] = _MANAGED_ACTIONS
-) -> bool:
-    """cmd がこの loci_bin() が発行した managed hook コマンドかどうかを判定する。
+def _is_loci_binary_token(token: str) -> bool:
+    """token がこの codeatrium がインストールした loci バイナリ
+    （`<venv>/bin/loci`）を指しているかどうかを判定する。
 
-    旧実装は `"loci" in cmd` という部分一致で判定していたため、パスに "loci" を
-    含むだけの無関係なユーザーコマンド（例: `~/tools/my-loci-backup.sh --index`）
-    を誤検知し、install 時の誤上書きや uninstall 時の誤削除を招いていた
-    （issue #28）。コマンドを shlex でトークン分割し、loci バイナリの絶対パスが
-    トークンとして厳密に一致する場合のみ「自分が発行したコマンド」と判定する。
+    `loci_bin()` の絶対パスと厳密一致させると、install 時と異なる
+    virtualenv から `loci hook uninstall` を実行した場合に既存の hook を
+    一切認識できず、削除されずに残ってしまう（PR #54 レビュー指摘）。
+    そのため実行時パスには依存せず、トークンをパスとして解釈したときの
+    「basename が `loci` かつ親ディレクトリ名が `bin`」という構造だけで
+    判定する。単に語として "loci" を含むコマンド（例: `my-loci-backup.sh`）
+    は basename が一致しないため誤検知しない。
+    """
+    path = PurePosixPath(token)
+    return path.is_absolute() and path.name == "loci" and path.parent.name == "bin"
+
+
+def _command_owned_by_loci(
+    cmd: str, actions: tuple[str, ...] = _MANAGED_ACTIONS
+) -> bool:
+    """cmd が（どの virtualenv からインストールされたかを問わず）loci が
+    発行した managed hook コマンドかどうかを判定する。
+
+    旧実装は `"loci" in cmd` という部分一致で判定していたため、パスに "loci"
+    を含むだけの無関係なユーザーコマンド（例: `~/tools/my-loci-backup.sh
+    --index`）を誤検知し、install 時の誤上書きや uninstall 時の誤削除を
+    招いていた（issue #28）。コマンドを shlex でトークン分割し、
+    `_is_loci_binary_token` で構造的に loci バイナリだと判定できるトークンが
+    存在する場合のみ「自分が発行したコマンド」と判定する。
     """
     try:
         tokens = shlex.split(cmd)
     except ValueError:
         return False
-    return loci_path in tokens and any(action in tokens for action in actions)
+    return any(_is_loci_binary_token(t) for t in tokens) and any(
+        action in tokens for action in actions
+    )
 
 
 def _find_hook_by_action(
-    session_start_hooks: list[dict[str, Any]], loci_path: str, action: str
+    session_start_hooks: list[dict[str, Any]], action: str
 ) -> dict[str, Any] | None:
     """SessionStart の全エントリを matcher を問わず横断して、指定 action の
     既存 loci コマンドを持つ hook dict を探す。
@@ -93,7 +114,7 @@ def _find_hook_by_action(
     """
     for entry in session_start_hooks:
         for h in entry.get("hooks", []):
-            if _command_owned_by_loci(h.get("command", ""), loci_path, (action,)):
+            if _command_owned_by_loci(h.get("command", ""), (action,)):
                 return h
     return None
 
@@ -143,13 +164,13 @@ def _write_settings(settings_path: Path, settings: dict[str, Any]) -> None:
         raise
 
 
-def _install_stop_hook(stop_hooks: list[dict[str, Any]], loci_path: str, index_cmd: str) -> bool:
+def _install_stop_hook(stop_hooks: list[dict[str, Any]], index_cmd: str) -> bool:
     """Stop フック（loci index, async: true）を検知・自動修復する。"""
     changed = False
     installed = False
     for entry in stop_hooks:
         for h in entry.get("hooks", []):
-            if _command_owned_by_loci(h.get("command", ""), loci_path, ("index",)):
+            if _command_owned_by_loci(h.get("command", ""), ("index",)):
                 installed = True
                 if h.get("command") != index_cmd or not h.get("async"):
                     h["command"] = index_cmd
@@ -166,7 +187,6 @@ def _install_stop_hook(stop_hooks: list[dict[str, Any]], loci_path: str, index_c
 
 def _install_session_start_hooks(
     session_start_hooks: list[dict[str, Any]],
-    loci_path: str,
     server_cmd: str,
     distill_cmd: str,
     prime_cmd: str,
@@ -184,7 +204,7 @@ def _install_session_start_hooks(
         ("distill", distill_cmd),
         ("prime", prime_cmd),
     ):
-        existing = _find_hook_by_action(session_start_hooks, loci_path, action)
+        existing = _find_hook_by_action(session_start_hooks, action)
         if existing is not None:
             if existing.get("command") != cmd:
                 existing["command"] = cmd
@@ -204,7 +224,7 @@ def _install_session_start_hooks(
     return changed
 
 
-def _cleanup_legacy_session_end(hooks: dict[str, Any], loci_path: str) -> bool:
+def _cleanup_legacy_session_end(hooks: dict[str, Any]) -> bool:
     """古い SessionEnd の loci distill エントリがあれば削除する。"""
     if "SessionEnd" not in hooks:
         return False
@@ -213,7 +233,7 @@ def _cleanup_legacy_session_end(hooks: dict[str, Any], loci_path: str) -> bool:
         entry
         for entry in before
         if not any(
-            _command_owned_by_loci(h.get("command", ""), loci_path, ("distill",))
+            _command_owned_by_loci(h.get("command", ""), ("distill",))
             for h in entry.get("hooks", [])
         )
     ]
@@ -240,18 +260,14 @@ def install_hooks(batch_limit: int = DEFAULT_DISTILL_BATCH_LIMIT) -> tuple[bool,
     commands = lifecycle_commands("claude", batch_limit)
     index_cmd = commands.on_turn_end
     server_cmd, distill_cmd, prime_cmd = commands.on_session_start
-    # 4コマンドはすべて同じ loci バイナリから組み立てられる（lifecycle_commands
-    # 内で shlex.quote(loci_bin()) の結果を使い回している）ので、index_cmd の
-    # 先頭トークンを逆算すれば実際に発行される loci バイナリの絶対パスが得られる。
-    loci_path = shlex.split(index_cmd)[0]
 
     stop_hooks: list[dict[str, Any]] = hooks.setdefault("Stop", [])
     session_start_hooks: list[dict[str, Any]] = hooks.setdefault("SessionStart", [])
-    changed = _install_stop_hook(stop_hooks, loci_path, index_cmd)
+    changed = _install_stop_hook(stop_hooks, index_cmd)
     changed |= _install_session_start_hooks(
-        session_start_hooks, loci_path, server_cmd, distill_cmd, prime_cmd
+        session_start_hooks, server_cmd, distill_cmd, prime_cmd
     )
-    changed |= _cleanup_legacy_session_end(hooks, loci_path)
+    changed |= _cleanup_legacy_session_end(hooks)
 
     if not changed:
         return False, "Hooks already up to date."
@@ -286,8 +302,6 @@ def uninstall_hooks() -> tuple[bool, str]:
     if not hooks:
         return False, "No hooks section found. Nothing to uninstall."
 
-    loci_path = loci_bin()
-
     for section in ("Stop", "SessionStart", "SessionEnd"):
         if section not in hooks:
             continue
@@ -297,7 +311,7 @@ def uninstall_hooks() -> tuple[bool, str]:
             entry["hooks"] = [
                 h
                 for h in hooks_list
-                if not _command_owned_by_loci(h.get("command", ""), loci_path)
+                if not _command_owned_by_loci(h.get("command", ""))
             ]
         hooks[section] = [e for e in entries if e.get("hooks")]
         if not hooks[section]:

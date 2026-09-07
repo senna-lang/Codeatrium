@@ -652,6 +652,117 @@ def test_hook_uninstall_does_not_delete_unrelated_command_with_loci_substring(
     ]
     assert "/home/user/tools/my-loci-backup.sh --index" in stop_commands
 
+def test_hook_uninstall_does_not_delete_relative_bin_loci_command(tmp_path, monkeypatch):
+    """絶対パスではない `bin/loci` は codeatrium が生成する hook ではないため、
+    action 名が同居していてもユーザーコマンドとして残す。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "bin/loci index --harness claude",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        )
+    )
+
+    from codeatrium.hooks import uninstall_hooks
+
+    changed, _message = uninstall_hooks()
+
+    assert changed is False
+    data = json.loads(settings_path.read_text())
+    assert data["hooks"]["Stop"][0]["hooks"][0]["command"] == (
+        "bin/loci index --harness claude"
+    )
+
+
+def test_hook_uninstall_removes_hooks_installed_from_different_venv(
+    tmp_path, monkeypatch
+):
+    """install 時と異なる virtualenv の loci バイナリで登録された hook でも、
+    現在の環境から `loci hook uninstall` すれば安全に検知・削除できる
+    （PR #54 レビュー: `loci_bin()` の絶対パス厳密一致だけに頼ると、別 venv で
+    インストール後に uninstall した際に既存 hook を取りこぼす）。同時に、
+    無関係なユーザーコマンドは誤って削除されない（広すぎる部分文字列判定への
+    後退防止）。"""
+    monkeypatch.setattr("codeatrium.hooks.Path.home", lambda: tmp_path)
+    settings_path = tmp_path / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    # 現在の環境の loci_bin() とは異なる、別 virtualenv (/old-venv) の loci で
+    # インストールされた hook を模す。あわせて "loci" を含むだけの無関係な
+    # ユーザーコマンドも同居させ、それが誤削除されないことも検証する。
+    settings_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "/old-venv/bin/loci index --harness claude",
+                                    "async": True,
+                                },
+                                {
+                                    "type": "command",
+                                    "command": "/home/user/tools/my-loci-backup.sh --index",
+                                },
+                            ]
+                        }
+                    ],
+                    "SessionStart": [
+                        {
+                            "matcher": "startup|clear|resume|compact",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "nohup /old-venv/bin/loci server start > /dev/null 2>&1 &",
+                                },
+                                {
+                                    "type": "command",
+                                    "command": "nohup /old-venv/bin/loci distill --limit 20 > /dev/null 2>&1 &",
+                                },
+                                {
+                                    "type": "command",
+                                    "command": "/old-venv/bin/loci prime",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+
+    from codeatrium.hooks import uninstall_hooks
+
+    changed, message = uninstall_hooks()
+
+    assert changed is True
+    assert "Hooks uninstalled" in message
+    data = json.loads(settings_path.read_text())
+    stop_commands = [
+        h["command"] for entry in data["hooks"].get("Stop", []) for h in entry["hooks"]
+    ]
+    # 別 venv の loci hook は削除される
+    assert "/old-venv/bin/loci index --harness claude" not in stop_commands
+    # 無関係なユーザーコマンド（"loci" を含むだけ）は残る
+    assert "/home/user/tools/my-loci-backup.sh --index" in stop_commands
+    # SessionStart は全エントリが loci hook のみだったため丸ごと消える
+    assert "SessionStart" not in data.get("hooks", {})
+
 
 def test_install_hooks_malformed_json_raises_actionable_error(tmp_path, monkeypatch):
     """settings.json が壊れている場合、生のトレースバックではなく actionable な
