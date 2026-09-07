@@ -250,6 +250,37 @@ def test_loci_bin_falls_back_to_which_under_pipx_install(
     assert loci_bin() == str(global_loci)
 
 
+def test_loci_bin_normalizes_relative_which_result_to_absolute(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """shutil.which("loci") が PATH の "." や空要素起因で相対パス
+    （例: "loci", "./loci"）を返しても、絶対パスへ正規化してから返す。
+
+    この戻り値はグローバル Claude 設定の hook command へそのまま永続化される
+    ため、相対パスのままだと後で別の cwd から実行された際に解決先が変わる、
+    または解決できず失敗する（issue #27 レビュー指摘）。
+    """
+    from codeatrium.paths import loci_bin
+
+    fake_python = tmp_path / "some_venv" / "bin" / "python3"
+    fake_python.parent.mkdir(parents=True)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    real_loci = project_dir / "loci"
+    real_loci.write_text("#!/bin/sh\n")
+
+    monkeypatch.setattr("codeatrium.paths.sys.executable", str(fake_python))
+    # PATH に "." が含まれる場合の shutil.which の典型的な戻り値を模倣する
+    monkeypatch.setattr("codeatrium.paths.shutil.which", lambda name: "loci")
+    monkeypatch.chdir(project_dir)
+
+    result = loci_bin()
+
+    assert Path(result).is_absolute()
+    assert result == str(real_loci.resolve())
+
+
 def test_loci_bin_warns_when_unresolved(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

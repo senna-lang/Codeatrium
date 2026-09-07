@@ -157,6 +157,12 @@ def loci_bin() -> str:
     `loci`（shutil.which）にフォールバックする。venv 外（pipx/global install）
     での実行では venv 内に loci が存在しないため（issue #27）。
     どちらも見つからない場合は venv パスを返しつつ stderr に警告する。
+
+    shutil.which() の結果は PATH に "." や空要素が含まれると相対パス
+    （例: "./loci", "loci"）になり得る。この戻り値はグローバル Claude 設定の
+    hook command へそのまま永続化されるため、相対パスのままだと後で別の cwd
+    から実行された際に解決先が変わる、または解決できず失敗する。永続化前に
+    必ず絶対パスへ正規化する（issue #27 レビュー指摘）。
     """
     venv_bin = Path(sys.executable).parent / "loci"
     if venv_bin.exists():
@@ -164,7 +170,7 @@ def loci_bin() -> str:
 
     which_bin = shutil.which("loci")
     if which_bin:
-        return which_bin
+        return str(Path(which_bin).resolve())
 
     print(
         f"Warning: could not locate `loci` binary (checked {venv_bin} and PATH); "
