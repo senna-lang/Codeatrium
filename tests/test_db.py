@@ -497,6 +497,61 @@ def test_init_db_chmod_600(tmp_path: Path) -> None:
     assert mode_str == "600"
 
 
+def test_init_db_secures_directory_to_owner_only(tmp_path: Path) -> None:
+    """WAL/SHM は書き込みが起きるまで存在しないため、ファイル単体の chmod だけでは
+    生成タイミングを問わず守り切れない。ディレクトリを 0o700 にして、遅延生成される
+    任意のサイドカーをタイミング非依存で遮蔽する（issue #36）。
+    """
+    db_path = tmp_path / "sub" / "memory.db"
+    init_db(db_path)
+
+    mode_str = oct(db_path.parent.stat().st_mode)[-3:]
+    assert mode_str == "700"
+
+
+def test_secure_db_files_chmods_existing_directory_and_sidecars(tmp_path: Path) -> None:
+    """`_secure_db_files` はディレクトリ・DB 本体・存在する WAL/SHM のいずれも
+    0o700/0o600 へ強制する（issue #36 のコア機構そのものの直接テスト）。
+    """
+    from codeatrium.db import _secure_db_files
+
+    db_dir = tmp_path / "sub"
+    db_dir.mkdir()
+    db_path = db_dir / "memory.db"
+    wal = db_dir / "memory.db-wal"
+    shm = db_dir / "memory.db-shm"
+    db_path.write_text("")
+    wal.write_text("")
+    shm.write_text("")
+    os.chmod(db_dir, 0o755)
+    for f in (db_path, wal, shm):
+        os.chmod(f, 0o644)
+
+    _secure_db_files(db_path)
+
+    assert oct(db_dir.stat().st_mode)[-3:] == "700"
+    assert oct(db_path.stat().st_mode)[-3:] == "600"
+    assert oct(wal.stat().st_mode)[-3:] == "600"
+    assert oct(shm.stat().st_mode)[-3:] == "600"
+
+
+def test_get_connection_restores_directory_permission_if_loosened(
+    tmp_path: Path,
+) -> None:
+    """DB ディレクトリの権限が何らかの理由で緩んでいても、次の接続で 0o700 へ
+    戻す（issue #36: 旧実装は接続のたびに再確認していなかった）。
+    """
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+
+    os.chmod(db_path.parent, 0o755)
+
+    con = get_connection(db_path)
+    con.close()
+
+    assert oct(db_path.parent.stat().st_mode)[-3:] == "700"
+
+
 def test_migration_v5_creates_exchange_files(tmp_path: Path) -> None:
     db_path = tmp_path / "memory.db"
 

@@ -32,6 +32,7 @@ from codeatrium.adapters.harness import omp_pi as omp_pi_adapter
 from codeatrium.adapters.harness import opencode as opencode_adapter
 from codeatrium.code_touches import (
     is_external_path,
+    normalize_touched_paths,
 )
 from codeatrium.utils import sha256
 
@@ -826,9 +827,12 @@ def index_opencode_db(
     Returns: 新規登録した exchange 数（全セッション合計）
     """
     from codeatrium.db import get_connection
+    from codeatrium.ignore import load_ignore
 
     if project_root is None:
         return 0
+
+    ignore_matcher = load_ignore(project_root)
 
     db_uri = f"file:{quote(str(opencode_db_path), safe='/')}?mode=ro"
     src = sqlite3.connect(db_uri, uri=True)
@@ -905,6 +909,13 @@ def index_opencode_db(
                 )
                 new_exchanges = []
                 for exchange in exchanges:
+                    if ignore_matcher.matches_any(
+                        normalize_touched_paths(exchange.files, str(project_root))
+                    ):
+                        # issue #36: 機微パスへ触れた exchange は永続化しない。
+                        # known_exchange_ids に加えないため、次回実行時も再判定される
+                        # （後から ignore パターンを外した場合に遡って拾えるようにする）。
+                        continue
                     if exchange.id in known_exchange_ids:
                         continue
                     candidates = legacy_by_content.get(
@@ -1028,6 +1039,7 @@ def index_file(
     Returns: 新規登録した exchange 数
     """
     from codeatrium.db import get_connection
+    from codeatrium.ignore import load_ignore
 
     if harness == "claude":
         parse = parse_exchanges
@@ -1064,6 +1076,17 @@ def index_file(
         raw_entries=raw_entries,
     )
     new_exchanges = [ex for ex in exchanges if ex.ply_start > last_ply_end]
+    if project_root is not None:
+        # issue #36: 機微パスへ触れた exchange は永続化前に除外する。cursor は
+        # 除外分だけ進めない——後から ignore パターンを外した場合に遡って拾える。
+        ignore_matcher = load_ignore(project_root)
+        new_exchanges = [
+            ex
+            for ex in new_exchanges
+            if not ignore_matcher.matches_any(
+                normalize_touched_paths(ex.files, str(project_root))
+            )
+        ]
 
     if not new_exchanges:
         con.close()

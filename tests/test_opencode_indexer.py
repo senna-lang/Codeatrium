@@ -130,6 +130,33 @@ def test_index_opencode_db_skips_sessions_outside_project_root(tmp_path: Path) -
     con.close()
 
 
+def test_index_opencode_db_excludes_exchange_touching_ignored_file(tmp_path: Path) -> None:
+    """`.codeatrium/ignore` にマッチするファイルへ触れた exchange は取り込まない（issue #36）"""
+    project_root = tmp_path / "project"
+    source_dir = project_root / "src"
+    source_dir.mkdir(parents=True)
+    (source_dir / "fs.py").write_text("def list_dir(path):\n    return path\n")
+    (source_dir / "result.py").write_text("class Result:\n    pass\n")
+
+    codeatrium_dir = project_root / ".codeatrium"
+    codeatrium_dir.mkdir(parents=True)
+    (codeatrium_dir / "ignore").write_text("src/*\n")
+
+    opencode_db = tmp_path / "opencode.db"
+    _write_opencode_db(opencode_db, project_root)
+    db_path = codeatrium_dir / "memory.db"
+    init_db(db_path)
+
+    indexed = index_opencode_db(
+        opencode_db, db_path, min_chars=1, project_root=project_root
+    )
+
+    assert indexed == 0
+    con = get_connection(db_path)
+    assert con.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0] == 0
+    con.close()
+
+
 def test_index_opencode_db_is_incremental(tmp_path: Path) -> None:
     """同じセッションを再実行しても exchange を重複登録しない。"""
     project_root = tmp_path / "project"

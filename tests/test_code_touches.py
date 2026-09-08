@@ -7,11 +7,29 @@ from codeatrium.code_touches import (
     intersect_span,
     is_external_path,
     normalize_repo_path,
+    normalize_touched_paths,
     touches_to_edges,
 )
 from codeatrium.models import CodeTouch, FileOnly, LineRange, TextAnchor
 from codeatrium.resolver import Symbol
 from codeatrium.utils import sha256
+
+
+def test_normalize_touched_paths_passes_relative_paths_through() -> None:
+    result = normalize_touched_paths(["src/foo.py", "src/bar.py"], "/Users/x/repo")
+    assert result == ["src/foo.py", "src/bar.py"]
+
+
+def test_normalize_touched_paths_relativizes_absolute_paths() -> None:
+    result = normalize_touched_paths(
+        ["/Users/x/repo/src/foo.py"], "/Users/x/repo"
+    )
+    assert result == ["src/foo.py"]
+
+
+def test_normalize_touched_paths_drops_paths_outside_project() -> None:
+    result = normalize_touched_paths(["/tmp/scratch/foo.py"], "/Users/x/repo")
+    assert result == []
 
 
 def test_normalize_repo_path_inside_project_returns_relative() -> None:

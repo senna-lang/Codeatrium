@@ -878,9 +878,34 @@ def _run_migrations(con: sqlite3.Connection) -> None:
                 raise
 
 
+def _secure_db_files(db_path: Path) -> None:
+    """会話・コードの逐語データを含む DB 関連ファイルを所有者以外から遮蔽する（issue #36）。
+
+    -wal/-shm サイドカーは実際の書き込みが起きるまで生成されず、生成された瞬間の
+    プロセス umask（既定なら 0o644）に委ねられる。ファイル単体の chmod だけでは
+    「まだ存在しない」タイミングを捉え損ねるため、親ディレクトリ自体を 0o700 にして
+    所有者以外のトラバースを断つ——これはサイドカーがいつ・どんな umask で
+    生成されても効く、タイミング非依存の防御になる。存在するファイルは個別にも
+    0o600 へ追認する（多層防御）。
+    """
+    if db_path.parent.exists():
+        os.chmod(db_path.parent, 0o700)
+    if db_path.exists():
+        os.chmod(db_path, 0o600)
+    for suffix in ("-wal", "-shm"):
+        sidecar = db_path.parent / (db_path.name + suffix)
+        if sidecar.exists():
+            os.chmod(sidecar, 0o600)
+
+
 def get_connection(db_path: Path) -> sqlite3.Connection:
-    """sqlite-vec 拡張をロードし WAL モード・busy_timeout を設定した接続を返す"""
+    """sqlite-vec 拡張をロードし WAL モード・busy_timeout を設定した接続を返す。
+
+    接続の度に `_secure_db_files` で DB ディレクトリ・本体・サイドカーの権限を
+    再確認する（issue #36: 遅延生成される -wal/-shm の露出防止）。
+    """
     con = sqlite3.connect(db_path, timeout=10.0)
+    _secure_db_files(db_path)
     con.enable_load_extension(True)
     sqlite_vec.load(con)
     con.enable_load_extension(False)
@@ -972,13 +997,8 @@ def init_db(db_path: Path) -> None:
     """DB を初期化してスキーマを作成する（冪等）"""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = get_connection(db_path)
-    # memory.db 本体と WAL サイドカー（-wal / -shm）は会話・コードの逐語データを含むため
-    # 所有者のみ読み書き可（0o600）にする。WAL モードでサイドカーが生成される。
-    os.chmod(db_path, 0o600)
-    for suffix in ("-wal", "-shm"):
-        sidecar = db_path.parent / (db_path.name + suffix)
-        if sidecar.exists():
-            os.chmod(sidecar, 0o600)
+    # DB ディレクトリ・本体・WAL/SHM サイドカーの権限は get_connection が
+    # 接続の度に再確認する（_secure_db_files、issue #36）。
 
     # Check if conversations table exists (indicates existing DB)
     table_exists = con.execute(

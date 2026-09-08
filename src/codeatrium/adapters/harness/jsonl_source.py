@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from codeatrium.code_touches import normalize_touched_paths
 from codeatrium.core.models import (
     CanonicalExchange,
     CanonicalSession,
@@ -15,6 +16,7 @@ from codeatrium.core.models import (
     FileRename,
     ParseResult,
 )
+from codeatrium.ignore import load_ignore
 from codeatrium.utils import sha256
 
 LegacyParser = Callable[..., list]
@@ -104,7 +106,24 @@ class JsonlLogSource:
             )
             for exchange in legacy
         )
+        if session.project_key:
+            # issue #36: 機微パスへ触れた exchange は永続化前に除外する。cursor は
+            # 除外分だけ進めない——後から ignore パターンを外した場合に遡って拾える。
+            ignore_matcher = load_ignore(Path(session.project_key))
+            exchanges = tuple(
+                exchange
+                for exchange in exchanges
+                if not ignore_matcher.matches_any(
+                    normalize_touched_paths(
+                        exchange.files_touched, session.project_key
+                    )
+                )
+            )
         artifacts = self._extract_artifacts(session, legacy)
+        kept_turn_ids = {exchange.source_turn_id for exchange in exchanges}
+        artifacts = tuple(
+            artifact for artifact in artifacts if artifact.source_turn_id in kept_turn_ids
+        )
         next_cursor = cursor
         if exchanges:
             next_cursor = f"v1:ply:{exchanges[-1].ply_end}"
