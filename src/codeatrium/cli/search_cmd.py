@@ -335,6 +335,7 @@ def _print_context_hits(hits, json_output: bool, full: bool) -> None:
                 "specific_context": h.specific_context,
                 "verbatim_ref": h.verbatim_ref,
                 "git_branch": h.git_branch,
+                "distilled": h.distilled,
                 "context": [
                     {
                         "relation": s.relation,
@@ -360,8 +361,8 @@ def _print_context_hits(hits, json_output: bool, full: bool) -> None:
     else:
         for i, h in enumerate(hits, 1):
             label = h.symbol_name or h.file_path
-            typer.echo(f"\n[{i}] {h.match_kind} (confidence={h.confidence:.2f}) {label}")
-            typer.echo(f"    {h.file_path}")
+            source_note = "" if h.distilled else " [undistilled: code-touch based]"
+            typer.echo(f"\n[{i}] {h.match_kind} (confidence={h.confidence:.2f}) {label}{source_note}")
             if h.exchange_core:
                 typer.echo(f"    Core: {h.exchange_core}")
             if h.verbatim_ref:

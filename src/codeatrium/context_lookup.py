@@ -2,8 +2,19 @@
 `loci context` の U1/U2 解決ロジック（design §6.0・§6.1・§6.2）。
 
 U1（ファイル内の関数・コンポーネント）: symbol(1.00) → file(0.45) → directory(0.25)
-の順に試し、**最初にヒットした段だけ**を返す（下の段で埋め合わせない）。
-U2（ファイルそのもの）: file(1.00) → directory(0.30) も同様。
+→ touch_symbol(0.20) → touch_file(0.15) の順に試し、**最初にヒットした段だけ**を
+返す（下の段で埋め合わせない）。
+U2（ファイルそのもの）: file(1.00) → directory(0.30) → touch_file(0.20) も同様。
+
+touch_symbol/touch_file（design: issue #32）は distill 済み `code_edges` が
+1件も無い場合の最終段一歩手前のフォールバック。`code_touches` は記録時に
+tree-sitter 解決を待たずに残る生の編集ログなので、distill キューが溜まって
+いても（あるいは symbol 解決が何らかの理由で失敗していても）「このファイルを
+触った会話」を返せる。symbol_name が与えられていれば、そのファイルを触った
+exchange のうち本文に symbol 名が語境界付きで現れるものだけに絞る
+（eval/gen/gen_symbol_recall.py の gold 判定と同じ best-effort 基準）。
+絞り込みでヒットが無ければ symbol 制約なしの touch_file へ落ちる。
+`ContextHit.distilled` でこの段を区別する（False = code_touches 由来）。
 
 semantic 段（0.10、design §6.2 の最終段）はここでは扱わない。embedding は重い
 依存であり、`search_combined` を通じて呼び出し側（CLI 層）が担当する — このモジュールは
@@ -25,14 +36,18 @@ DB を読むだけで書き込みはしない。接続のライフサイクル�
 from __future__ import annotations
 
 import posixpath
+import re
 import sqlite3
 from dataclasses import dataclass, field
 
 _TIER_SYMBOL_CONFIDENCE = 1.00
 _TIER_FILE_CONFIDENCE_U1 = 0.45
 _TIER_DIRECTORY_CONFIDENCE_U1 = 0.25
+_TIER_TOUCH_SYMBOL_CONFIDENCE_U1 = 0.20
+_TIER_TOUCH_FILE_CONFIDENCE_U1 = 0.15
 _TIER_FILE_CONFIDENCE_U2 = 1.00
 _TIER_DIRECTORY_CONFIDENCE_U2 = 0.30
+_TIER_TOUCH_FILE_CONFIDENCE_U2 = 0.20
 
 # ply_adjacent レーンの窓幅。前を厚く・後ろを薄くするのは、編集の動機になった議論は
 # 直前に集中していることが多いという実測（本リポジトリの実例で確認済み）に基づく。
@@ -69,7 +84,7 @@ class ContextSnippet:
 class ContextHit:
     """U1/U2 の1件のヒット。`match_kind`/`confidence` がどの段で見つかったかを表す"""
 
-    match_kind: str  # 'symbol' | 'file' | 'directory' | 'semantic'
+    match_kind: str  # 'symbol' | 'file' | 'directory' | 'touch_symbol' | 'touch_file' | 'semantic'
     confidence: float
     exchange_id: str
     file_path: str
@@ -81,6 +96,9 @@ class ContextHit:
     user_content: str | None = None
     agent_content: str | None = None
     context: list[ContextSnippet] = field(default_factory=list)
+    # distill 済み code_edges 由来なら True。code_touches フォールバック段
+    # （touch_symbol/touch_file、design: issue #32）なら False。
+    distilled: bool = True
 
 
 def parse_context_target(target: str) -> ContextTarget:
@@ -298,6 +316,80 @@ def _directory_rows(con: sqlite3.Connection, file_path: str) -> list[sqlite3.Row
     return _dedup_by_exchange(same_dir)
 
 
+_TOUCH_HIT_QUERY = """
+    SELECT DISTINCT
+        ct.exchange_id, ct.file_path,
+        e.git_branch, e.user_content, e.agent_content,
+        p.exchange_core, p.specific_context,
+        c.source_path, e.ply_start,
+        e.conversation_id, c.parent_session_ref
+    FROM code_touches ct
+    JOIN exchanges e ON e.id = ct.exchange_id
+    JOIN conversations c ON c.id = e.conversation_id
+    LEFT JOIN palace_objects p ON p.exchange_id = e.id
+    WHERE {where}
+    ORDER BY e.ply_start DESC
+"""
+
+
+def _query_touch_rows(
+    con: sqlite3.Connection, where: str, params: tuple
+) -> list[sqlite3.Row]:
+    return con.execute(_TOUCH_HIT_QUERY.format(where=where), params).fetchall()
+
+
+def _touch_file_rows(
+    con: sqlite3.Connection, file_path: str, alias_paths: tuple[str, ...] = ()
+) -> list[sqlite3.Row]:
+    """`code_touches`（distill/tree-sitter 解決を経ない生の編集ログ）から
+    file_path（および旧パス）を触った exchange を返す（design: issue #32）。
+    symbol/file/directory 段が全て空だったときの最終段一歩手前のフォールバック。
+    """
+    paths = (file_path, *alias_paths)
+    placeholders = ",".join("?" for _ in paths)
+    return _dedup_by_exchange(
+        _query_touch_rows(con, f"ct.file_path IN ({placeholders})", paths)
+    )
+
+
+def _touch_mentions_symbol(
+    user_content: str | None, agent_content: str | None, symbol_name: str
+) -> bool:
+    """symbol_name（またはドット区切り末尾の leaf、例: "Foo.bar" の "bar"）が
+    語境界付きで会話本文に現れるか判定する純関数。tree-sitter 解決前の
+    code_touches しか無い場合の best-effort フォールバック判定であり、
+    eval/gen/gen_symbol_recall.py の gold 判定と意図的に同じ基準を使う。
+    """
+    leaf = symbol_name.rsplit(".", 1)[-1]
+    pattern = re.compile(rf"\b({re.escape(symbol_name)}|{re.escape(leaf)})\b")
+    text = f"{user_content or ''}\n{agent_content or ''}"
+    return pattern.search(text) is not None
+
+
+def _touch_row_to_hit(
+    con: sqlite3.Connection,
+    row: sqlite3.Row,
+    match_kind: str,
+    confidence: float,
+    symbol_name: str | None,
+) -> ContextHit:
+    return ContextHit(
+        match_kind=match_kind,
+        confidence=confidence,
+        exchange_id=row["exchange_id"],
+        file_path=row["file_path"],
+        symbol_name=symbol_name,
+        exchange_core=row["exchange_core"],
+        specific_context=row["specific_context"],
+        verbatim_ref=f"{row['source_path']}:ply={row['ply_start']}",
+        git_branch=row["git_branch"],
+        user_content=row["user_content"],
+        agent_content=row["agent_content"],
+        context=_build_context(con, row),
+        distilled=False,
+    )
+
+
 def resolve_u1(
     con: sqlite3.Connection,
     file_path: str,
@@ -338,6 +430,25 @@ def resolve_u1(
             _row_to_hit(con, r, "directory", _TIER_DIRECTORY_CONFIDENCE_U1) for r in rows[:limit]
         ]
 
+    touch_rows = _touch_file_rows(con, file_path, alias_paths)
+    symbol_touch_rows = [
+        r
+        for r in touch_rows
+        if _touch_mentions_symbol(r["user_content"], r["agent_content"], symbol_name)
+    ]
+    if symbol_touch_rows:
+        return [
+            _touch_row_to_hit(
+                con, r, "touch_symbol", _TIER_TOUCH_SYMBOL_CONFIDENCE_U1, symbol_name
+            )
+            for r in symbol_touch_rows[:limit]
+        ]
+    if touch_rows:
+        return [
+            _touch_row_to_hit(con, r, "touch_file", _TIER_TOUCH_FILE_CONFIDENCE_U1, None)
+            for r in touch_rows[:limit]
+        ]
+
     return []
 
 
@@ -361,6 +472,13 @@ def resolve_u2(
     if rows:
         return [
             _row_to_hit(con, r, "directory", _TIER_DIRECTORY_CONFIDENCE_U2) for r in rows[:limit]
+        ]
+
+    touch_rows = _touch_file_rows(con, file_path, alias_paths)
+    if touch_rows:
+        return [
+            _touch_row_to_hit(con, r, "touch_file", _TIER_TOUCH_FILE_CONFIDENCE_U2, None)
+            for r in touch_rows[:limit]
         ]
 
     return []
