@@ -108,7 +108,9 @@ class SymbolResolver:
         if node.type == "class_definition":
             name_node = node.child_by_field_name("name")
             if name_node:
-                class_name = source[name_node.start_byte : name_node.end_byte].decode()
+                class_name = source[
+                    name_node.start_byte : name_node.end_byte
+                ].decode("utf-8", errors="replace")
                 symbols.append(
                     Symbol(
                         symbol_name=class_name,
@@ -134,7 +136,9 @@ class SymbolResolver:
         if node.type == "function_definition":
             name_node = node.child_by_field_name("name")
             if name_node:
-                func_name = source[name_node.start_byte : name_node.end_byte].decode()
+                func_name = source[
+                    name_node.start_byte : name_node.end_byte
+                ].decode("utf-8", errors="replace")
                 kind = "method" if parent_class else "function"
                 full_name = f"{parent_class}.{func_name}" if parent_class else func_name
                 symbols.append(
@@ -181,7 +185,9 @@ class SymbolResolver:
         if node.type == "class_declaration":
             name_node = node.child_by_field_name("name")
             if name_node:
-                class_name = source[name_node.start_byte : name_node.end_byte].decode()
+                class_name = source[
+                    name_node.start_byte : name_node.end_byte
+                ].decode("utf-8", errors="replace")
                 symbols.append(
                     Symbol(
                         symbol_name=class_name,
@@ -207,7 +213,9 @@ class SymbolResolver:
         if node.type == "function_declaration":
             name_node = node.child_by_field_name("name")
             if name_node:
-                func_name = source[name_node.start_byte : name_node.end_byte].decode()
+                func_name = source[
+                    name_node.start_byte : name_node.end_byte
+                ].decode("utf-8", errors="replace")
                 symbols.append(
                     Symbol(
                         symbol_name=func_name,
@@ -224,7 +232,9 @@ class SymbolResolver:
         if node.type == "method_definition":
             name_node = node.child_by_field_name("name")
             if name_node and parent_class:
-                method_name = source[name_node.start_byte : name_node.end_byte].decode()
+                method_name = source[
+                    name_node.start_byte : name_node.end_byte
+                ].decode("utf-8", errors="replace")
                 symbols.append(
                     Symbol(
                         symbol_name=f"{parent_class}.{method_name}",
@@ -272,7 +282,9 @@ class SymbolResolver:
         if anchor.parent is None or anchor.parent.type != "program":
             return None
 
-        func_name = source[name_node.start_byte : name_node.end_byte].decode()
+        func_name = source[name_node.start_byte : name_node.end_byte].decode(
+            "utf-8", errors="replace"
+        )
         return Symbol(
             symbol_name=func_name,
             symbol_kind="function",
@@ -328,7 +340,9 @@ class SymbolResolver:
             name_node = node.child_by_field_name("name")
             if name_node:
                 type_names.add(
-                    source[name_node.start_byte : name_node.end_byte].decode()
+                    source[name_node.start_byte : name_node.end_byte].decode(
+                        "utf-8", errors="replace"
+                    )
                 )
         for child in node.children:
             self._collect_go_types(child, source, type_names)
@@ -351,15 +365,19 @@ class SymbolResolver:
                             Symbol(
                                 symbol_name=source[
                                     name_node.start_byte : name_node.end_byte
-                                ].decode(),
+                                ].decode("utf-8", errors="replace"),
                                 symbol_kind="class",
                                 signature=_signature(node, source),
-                                line=node.start_point[0] + 1,
-                                end_line=node.end_point[0] + 1,
+                                # grouped 宣言 `type ( A ...; B ... )` では複数の
+                                # type_spec が親の type_declaration 行範囲を共有
+                                # してしまうため、各 spec 自身の行範囲を使う。
+                                line=child.start_point[0] + 1,
+                                end_line=child.end_point[0] + 1,
                                 file_path=path,
                                 lang=lang,
                             )
                         )
+            return
 
         elif node.type == "function_declaration":
             name_node = node.child_by_field_name("name")
@@ -368,7 +386,7 @@ class SymbolResolver:
                     Symbol(
                         symbol_name=source[
                             name_node.start_byte : name_node.end_byte
-                        ].decode(),
+                        ].decode("utf-8", errors="replace"),
                         symbol_kind="function",
                         signature=_signature(node, source),
                         line=node.start_point[0] + 1,
@@ -377,6 +395,7 @@ class SymbolResolver:
                         lang=lang,
                     )
                 )
+            return
 
         elif node.type == "method_declaration":
             # receiver から型名を取得: (f Foo) → "Foo"
@@ -384,7 +403,9 @@ class SymbolResolver:
             name_node = node.child_by_field_name("name")
             if receiver and name_node:
                 receiver_type = self._go_receiver_type(receiver, source)
-                method_name = source[name_node.start_byte : name_node.end_byte].decode()
+                method_name = source[
+                    name_node.start_byte : name_node.end_byte
+                ].decode("utf-8", errors="replace")
                 full_name = (
                     f"{receiver_type}.{method_name}" if receiver_type else method_name
                 )
@@ -399,6 +420,7 @@ class SymbolResolver:
                         lang=lang,
                     )
                 )
+            return
 
         for child in node.children:
             self._walk_go(child, source, path, lang, type_names, symbols)
@@ -409,11 +431,13 @@ class SymbolResolver:
             if child.type == "parameter_declaration":
                 for sub in child.children:
                     if sub.type == "type_identifier":
-                        return source[sub.start_byte : sub.end_byte].decode()
+                        return source[sub.start_byte : sub.end_byte].decode(
+                            "utf-8", errors="replace"
+                        )
                     if sub.type == "pointer_type":
                         for ptr_child in sub.children:
                             if ptr_child.type == "type_identifier":
                                 return source[
                                     ptr_child.start_byte : ptr_child.end_byte
-                                ].decode()
+                                ].decode("utf-8", errors="replace")
         return ""

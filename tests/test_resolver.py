@@ -301,6 +301,66 @@ def test_go_lang(tmp_path):
     assert s.lang == ".go"
 
 
+# ---- Robustness (issue #24) ----
+
+
+def test_go_nested_local_type_is_not_collected_as_top_level_symbol(tmp_path):
+    """`_walk_go` は function_declaration を処理した後 return せず本体へ
+    再帰していたため、関数内のローカル型宣言までトップレベルシンボルとして
+    誤収集していた（Python/TS の walker は再帰しない）。"""
+    f = tmp_path / "foo.go"
+    f.write_text(
+        "package main\n\nfunc Foo() {\n\ttype Bar struct{}\n\t_ = Bar{}\n}\n"
+    )
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert names == ["Foo"]
+
+
+def test_go_grouped_type_spec_has_its_own_line_range(tmp_path):
+    """`type ( A ...; B ... )` のような grouped 宣言では、各 type_spec が
+    親の type_declaration 全体の行範囲を共有してしまい line→symbol の
+    マッチングが劣化していた。各 spec は自分自身の行範囲を持つべき。"""
+    f = tmp_path / "foo.go"
+    f.write_text("package main\n\ntype (\n\tA struct{}\n\tB struct{}\n)\n")
+    symbols = resolver.extract(f)
+    by_name = {s.symbol_name: s for s in symbols}
+    assert (by_name["A"].line, by_name["A"].end_line) == (4, 4)
+    assert (by_name["B"].line, by_name["B"].end_line) == (5, 5)
+
+
+def test_python_invalid_identifier_bytes_do_not_abort_whole_file():
+    """識別子スパンの decode が strict だと、不正な UTF-8 バイトを含む識別子1つで
+    UnicodeDecodeError が送出され、そのファイルの以降のシンボル解決が全て
+    中断されてしまう（`_signature` は既に errors='replace' だが、識別子名側は
+    未対応だった）。
+
+    tree-sitter のトークナイザは、有効な UTF-8 にしか一致しない identifier
+    トークンしか生成しないため、正規の `extract`/`extract_source` の入力
+    バイト列を細工しただけでは、このパスを外部から直接再現できない
+    （検証済み: ランダムフォールト含む数万通りの入力で識別子スパンに不正
+    バイトが混入するケースは確認できなかった）。そのため、パース後の
+    `source` バイト列だけを意図的に破損させ、strict decode 経路そのものを
+    直接検証する。破損させるのは識別子スパンの1バイトのみで、他のノードの
+    バイト境界（オフセット）には影響しない。
+    """
+    import tree_sitter_python as tspython
+    from tree_sitter import Language, Parser
+
+    source = b"def foo():\n    pass\n\n\ndef bar():\n    pass\n"
+    parser = Parser(Language(tspython.language()))
+    tree = parser.parse(source)
+
+    corrupted = bytearray(source)
+    corrupted[source.index(b"foo")] = 0xFF  # "foo" の先頭バイトを不正なUTF-8にする
+
+    symbols = resolver._extract_python(
+        tree.root_node, bytes(corrupted), "foo.py", ".py"
+    )
+    names = [s.symbol_name for s in symbols]
+    assert "bar" in names
+
+
 # ---- Symbol dataclass ----
 
 
