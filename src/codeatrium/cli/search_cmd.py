@@ -20,6 +20,14 @@ from typing import Annotated
 import typer
 
 
+def _fetchall_and_close(con, query: str, parameters: tuple[object, ...]):
+    """Execute a single lookup while guaranteeing its short-lived connection closes."""
+    try:
+        return con.execute(query, parameters).fetchall()
+    finally:
+        con.close()
+
+
 def search(
     query: Annotated[str, typer.Argument(help="検索クエリ")],
     limit: Annotated[int, typer.Option("--limit", "-n", help="返す件数")] = 5,
@@ -55,6 +63,7 @@ def search(
         output = [
             {
                 "exchange_id": r.exchange_id,
+                "score": r.score,
                 "exchange_core": r.exchange_core,
                 "specific_context": r.specific_context,
                 "rooms": r.rooms,
@@ -126,7 +135,8 @@ def context(
 
     if symbol is not None and branch is not None:
         # Both symbol and branch specified
-        rows = con.execute(
+        rows = _fetchall_and_close(
+            con,
             """
             SELECT
                 s.symbol_name,
@@ -150,10 +160,11 @@ def context(
             LIMIT ?
             """,
             (f"%{symbol}%", f"%{branch}%", limit),
-        ).fetchall()
+        )
     elif symbol is not None:
         # Symbol only (existing behavior with git_branch added)
-        rows = con.execute(
+        rows = _fetchall_and_close(
+            con,
             """
             SELECT
                 s.symbol_name,
@@ -177,10 +188,11 @@ def context(
             LIMIT ?
             """,
             (f"%{symbol}%", limit),
-        ).fetchall()
+        )
     else:
         # Branch only (LEFT JOIN to include undistilled exchanges)
-        rows = con.execute(
+        rows = _fetchall_and_close(
+            con,
             """
             SELECT
                 e.id AS exchange_id,
@@ -199,8 +211,7 @@ def context(
             LIMIT ?
             """,
             (f"%{branch}%", limit),
-        ).fetchall()
-    con.close()
+        )
 
     if not rows:
         typer.echo("No results found.")
@@ -398,25 +409,27 @@ def _context_u1_u2(target: str, limit: int, json_output: bool, full: bool) -> No
 
     con = get_connection(db)
 
-    from codeatrium.file_renames import resolve_aliases
+    try:
+        from codeatrium.file_renames import resolve_aliases
 
-    alias_paths = tuple(resolve_aliases(con, str(root), file_path))
+        alias_paths = tuple(resolve_aliases(con, str(root), file_path))
 
-    symbol_name = parsed.symbol_name
-    if parsed.line is not None:
-        sym_rows = con.execute(
-            "SELECT symbol_name, line, end_line FROM code_symbols WHERE file_path = ?",
-            (file_path,),
-        ).fetchall()
-        symbols = [(r["symbol_name"], r["line"], r["end_line"]) for r in sym_rows]
-        symbol_name = pick_enclosing_symbol_name(parsed.line, symbols)
+        symbol_name = parsed.symbol_name
+        if parsed.line is not None:
+            sym_rows = con.execute(
+                "SELECT symbol_name, line, end_line FROM code_symbols WHERE file_path = ?",
+                (file_path,),
+            ).fetchall()
+            symbols = [(r["symbol_name"], r["line"], r["end_line"]) for r in sym_rows]
+            symbol_name = pick_enclosing_symbol_name(parsed.line, symbols)
 
-    hits = (
-        resolve_u1(con, file_path, symbol_name, limit, alias_paths)
-        if symbol_name is not None
-        else resolve_u2(con, file_path, limit, alias_paths)
-    )
-    con.close()
+        hits = (
+            resolve_u1(con, file_path, symbol_name, limit, alias_paths)
+            if symbol_name is not None
+            else resolve_u2(con, file_path, limit, alias_paths)
+        )
+    finally:
+        con.close()
 
     if not hits:
         hits = _semantic_fallback_hits(db, file_path, symbol_name, limit)

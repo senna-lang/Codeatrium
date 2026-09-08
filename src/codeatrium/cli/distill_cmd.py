@@ -165,7 +165,7 @@ def distill(
     except BlockingIOError:
         os.close(fd)
         typer.echo("loci distill is already running. Exiting.", err=True)
-        raise typer.Exit(0)
+        raise typer.Exit(1)
 
     backend = _resolve_backend(cfg, root, is_tty)
     if backend is None:

@@ -10,8 +10,15 @@ import typer
 
 def status(
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
+    check: Annotated[
+        bool,
+        typer.Option(
+            "--check",
+            help="設定済み distill client の readiness を確認する（サービスへ接続する場合がある）",
+        ),
+    ] = False,
 ) -> None:
-    """インデックス状態（exchange 数・蒸留済み数・DB サイズ）を表示する"""
+    """インデックス状態を表示し、--check 指定時だけ distill client の readiness を確認する"""
     from codeatrium.adapters.model.registry import check_ready
     from codeatrium.config import load_config
     from codeatrium.db import check_drift, get_connection
@@ -25,27 +32,33 @@ def status(
         raise typer.Exit(1)
 
     con = get_connection(db)
-    total = con.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
-    distilled = con.execute(
-        "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'distilled'"
-    ).fetchone()[0]
-    skipped = con.execute(
-        "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'skipped'"
-    ).fetchone()[0]
-    pending = con.execute(
-        "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'pending'"
-    ).fetchone()[0]
-    palace_count = con.execute("SELECT COUNT(*) FROM palace_objects").fetchone()[0]
-    symbol_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
-    con.close()
-
+    try:
+        total = con.execute("SELECT COUNT(*) FROM exchanges").fetchone()[0]
+        distilled = con.execute(
+            "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'distilled'"
+        ).fetchone()[0]
+        skipped = con.execute(
+            "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'skipped'"
+        ).fetchone()[0]
+        pending = con.execute(
+            "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'pending'"
+        ).fetchone()[0]
+        palace_count = con.execute("SELECT COUNT(*) FROM palace_objects").fetchone()[0]
+        symbol_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    finally:
+        con.close()
     cfg = load_config(root)
+
     if cfg.distill_unconfigured or not cfg.distill_client:
         distill_client_label = "unconfigured"
         distill_available = False
+        distill_checked = False
     else:
         distill_client_label = cfg.distill_client
-        distill_available = check_ready(cfg.distill_client).state == "ready"
+        distill_checked = check
+        distill_available = (
+            check_ready(cfg.distill_client).state == "ready" if check else None
+        )
 
     # config.toml の構文エラーは background hook からは stderr が
     # `> /dev/null 2>&1` に捨てられ気づけないため、`loci status` で明示的に
@@ -82,6 +95,7 @@ def status(
                     "db_size_kb": round(db_size_kb, 1),
                     "distill_client": distill_client_label,
                     "distill_available": distill_available,
+                    "distill_checked": distill_checked,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -94,7 +108,10 @@ def status(
         )
         typer.echo(f"Palace    : {palace_count}")
         typer.echo(f"Symbols   : {symbol_count}")
-        avail = "ready" if distill_available else "not ready"
+        if distill_available is None:
+            avail = "not checked"
+        else:
+            avail = "ready" if distill_available else "not ready"
         typer.echo(f"Distill   : {distill_client_label} ({avail})")
         if cfg.config_error:
             typer.echo(f"Config    : ⚠ parse error — {cfg.config_error}")

@@ -178,8 +178,8 @@ def test_distill_lock_atomic_creation(tmp_path: Path) -> None:
         os.close(fd2)
 
 
-def test_distill_lock_already_running(tmp_path: Path, monkeypatch) -> None:
-    """ロック保持中の distill は already running で exit 0"""
+def test_distill_lock_already_running_exits_nonzero(tmp_path: Path, monkeypatch) -> None:
+    """A manual distill invocation must report lock contention as a failure."""
     codeatrium_dir = tmp_path / ".codeatrium"
     codeatrium_dir.mkdir(parents=True)
     init_db(codeatrium_dir / "memory.db")
@@ -192,7 +192,7 @@ def test_distill_lock_already_running(tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         result = runner.invoke(app, ["distill"])
 
-        assert result.exit_code == 0
+        assert result.exit_code != 0
         output = result.output + (getattr(result, "stderr", "") or "")
         assert "already running" in output
     finally:

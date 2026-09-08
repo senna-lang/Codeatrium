@@ -1,10 +1,11 @@
 """
-loci show / loci dump --distilled のテスト
+loci show / loci dump コマンドのテスト
 
 show: exchange id から原文を取得。同一会話内の ply 隣接（`context`、confidence 無しの
       additive レーン）も返し、そこに載る exchange_id で loci show を繰り返せば
       任意の深さまで前後を辿れる（design: 案2「loci show --context N」撤回の代替）。
-dump: 蒸留済み palace objects を新しい順に出力
+dump: 蒸留済み palace objects を新しい順に出力。唯一の出力モードなので --distilled は
+      省略でき、既存スクリプト向けに指定時も受け付ける。
 """
 
 from __future__ import annotations
@@ -190,21 +191,50 @@ def test_show_text_output_lists_context_neighbors(tmp_path, monkeypatch):
 # ---- loci dump --distilled ----
 
 
-def test_dump_requires_distilled_flag(tmp_path, monkeypatch):
+def test_dump_defaults_to_distilled_objects_without_a_flag(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    db, con = _setup(tmp_path)
+    _db, con = _setup(tmp_path)
     con.close()
+
     result = runner.invoke(app, ["dump"])
-    assert result.exit_code != 0
 
-
-def test_dump_empty(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    db, con = _setup(tmp_path)
-    con.close()
-    result = runner.invoke(app, ["dump", "--distilled"])
     assert result.exit_code == 0
     assert "No distilled" in result.output
+
+
+def test_dump_accepts_legacy_distilled_flag(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _db, con = _setup(tmp_path)
+    con.close()
+
+    result = runner.invoke(app, ["dump", "--distilled"])
+
+    assert result.exit_code == 0
+    assert "No distilled" in result.output
+
+
+def test_dump_closes_connection_when_query_fails(tmp_path, monkeypatch):
+    class FailingConnection:
+        closed = False
+
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("query failed")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.chdir(tmp_path)
+    _db, con = _setup(tmp_path)
+    con.close()
+    failing_connection = FailingConnection()
+    monkeypatch.setattr(
+        "codeatrium.db.get_connection", lambda _db: failing_connection
+    )
+
+    result = runner.invoke(app, ["dump"])
+
+    assert result.exit_code != 0
+    assert failing_connection.closed
 
 
 def test_dump_returns_palace_objects(tmp_path, monkeypatch):

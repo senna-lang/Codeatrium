@@ -202,6 +202,86 @@ def test_search_json_has_git_branch_field(tmp_path, monkeypatch):
         assert "git_branch" in data[0]
         assert data[0]["git_branch"] == "feature-branch"
 
+def test_search_json_includes_result_score(tmp_path, monkeypatch):
+    """Agents can apply confidence thresholds to machine-readable search results."""
+    from unittest.mock import MagicMock, patch
+
+    from codeatrium.models import FusedResult
+
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_fixture(con)
+    con.close()
+
+    mock_result = FusedResult(
+        exchange_id="ex1",
+        user_content="user content",
+        agent_content="agent content",
+        score=0.95,
+        exchange_core="core summary",
+        specific_context="specific detail",
+        verbatim_ref="/fake/session.jsonl:ply=0",
+        rooms=[],
+        symbols=[],
+    )
+
+    with (
+        patch("codeatrium.embedder.Embedder", return_value=MagicMock()),
+        patch("codeatrium.search.search_combined", return_value=[mock_result]),
+    ):
+        result = runner.invoke(app, ["search", "test query", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.output)[0]["score"] == 0.95
+
+
+def test_context_closes_connection_when_symbol_query_fails(tmp_path, monkeypatch):
+    class FailingConnection:
+        closed = False
+
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("query failed")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.chdir(tmp_path)
+    _db, con = _setup(tmp_path)
+    con.close()
+    failing_connection = FailingConnection()
+    monkeypatch.setattr(
+        "codeatrium.db.get_connection", lambda _db: failing_connection
+    )
+
+    result = runner.invoke(app, ["context", "--symbol", "MyFunc"])
+
+    assert result.exit_code != 0
+    assert failing_connection.closed
+
+
+def test_context_closes_connection_when_target_resolution_fails(tmp_path, monkeypatch):
+    class FailingConnection:
+        closed = False
+
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("query failed")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.chdir(tmp_path)
+    _db, con = _setup(tmp_path)
+    con.close()
+    failing_connection = FailingConnection()
+    monkeypatch.setattr(
+        "codeatrium.db.get_connection", lambda _db: failing_connection
+    )
+
+    result = runner.invoke(app, ["context", "src/foo.py"])
+
+    assert result.exit_code != 0
+    assert failing_connection.closed
+
 
 def test_search_json_has_exchange_id_field(tmp_path, monkeypatch):
     """design: exchange_id が無いと loci show へ繋げられず、周辺コンテキストの
