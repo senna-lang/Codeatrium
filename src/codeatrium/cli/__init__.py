@@ -14,6 +14,7 @@ import typer
 
 from codeatrium.cli.distill_cmd import distill
 from codeatrium.cli.eval_cmd import eval_app
+from codeatrium.cli.gc_cmd import gc
 from codeatrium.cli.hook_cmd import hook_app
 from codeatrium.cli.index_cmd import index
 from codeatrium.cli.prime_cmd import prime
@@ -52,9 +53,7 @@ def _print_banner() -> None:
     content.append("   ")
     content.append(f"v{__version__}", style="dim cyan")
 
-    console.print(
-        Panel(content, border_style="blue", padding=(1, 3), expand=False)
-    )
+    console.print(Panel(content, border_style="blue", padding=(1, 3), expand=False))
 
 
 def _cleanup_partial_codeatrium_dir(codeatrium_dir: Path, dir_preexisted: bool) -> None:
@@ -73,11 +72,16 @@ def init(
     ] = False,
     distill_limit: Annotated[
         int | None,
-        typer.Option("--distill-limit", help="既存 exchange のうち直近 N 件のみ蒸留対象にする"),
+        typer.Option(
+            "--distill-limit", help="既存 exchange のうち直近 N 件のみ蒸留対象にする"
+        ),
     ] = None,
     min_chars: Annotated[
         int | None,
-        typer.Option("--min-chars", help="既存 exchange の最小文字数フィルタ（省略時は対話で選択）"),
+        typer.Option(
+            "--min-chars",
+            help="既存 exchange の最小文字数フィルタ（省略時は対話で選択）",
+        ),
     ] = None,
     no_hooks: Annotated[
         bool,
@@ -134,9 +138,7 @@ def init(
         parsed_exchanges_by_file = {
             jsonl: parse_exchanges(jsonl, min_chars=0) for jsonl in jsonl_files
         }
-        all_exchanges = [
-            ex for exs in parsed_exchanges_by_file.values() for ex in exs
-        ]
+        all_exchanges = [ex for exs in parsed_exchanges_by_file.values() for ex in exs]
 
         resolved_min_chars = _resolve_min_chars(all_exchanges, min_chars)
 
@@ -203,9 +205,7 @@ def init(
 
         typer.echo(f"Initialized: {db}")
     except KeyboardInterrupt:
-        typer.echo(
-            "\n⚠ Interrupted. Cleaning up partial state...", err=True
-        )
+        typer.echo("\n⚠ Interrupted. Cleaning up partial state...", err=True)
         _cleanup_partial_codeatrium_dir(codeatrium_dir, dir_preexisted)
         raise typer.Exit(code=130) from None
     except Exception as exc:  # noqa: BLE001
@@ -244,7 +244,8 @@ def init(
                     filtered = [
                         ex
                         for ex in parsed_exchanges_by_file[jsonl]
-                        if len(ex.user_content) + len(ex.agent_content) >= resolved_min_chars
+                        if len(ex.user_content) + len(ex.agent_content)
+                        >= resolved_min_chars
                     ]
                     actual_total += index_file(
                         jsonl,
@@ -289,9 +290,7 @@ def init(
             else:
                 typer.echo(f"All {actual_total} exchange(s) will be distilled.")
     except KeyboardInterrupt:
-        typer.echo(
-            "\n⚠ Interrupted. Cleaning up partial state...", err=True
-        )
+        typer.echo("\n⚠ Interrupted. Cleaning up partial state...", err=True)
         _cleanup_partial_codeatrium_dir(codeatrium_dir, dir_preexisted)
         raise typer.Exit(code=130) from None
     except Exception as exc:  # noqa: BLE001
@@ -311,8 +310,7 @@ def init(
             typer.echo(message)
         except Exception as exc:  # noqa: BLE001
             typer.echo(
-                f"\n⚠ Hook install failed: {exc}\n"
-                "Retry later with: loci hook install",
+                f"\n⚠ Hook install failed: {exc}\nRetry later with: loci hook install",
                 err=True,
             )
 
@@ -329,9 +327,7 @@ def init(
             cfg = load_config(root)
             typer.echo("Running distillation...")
 
-            def _on_progress(
-                cur: int, tot: int, error: str | None = None
-            ) -> None:
+            def _on_progress(cur: int, tot: int, error: str | None = None) -> None:
                 if error:
                     typer.echo(f"  [{cur}/{tot}] error: {error}", err=True)
                 else:
@@ -346,7 +342,9 @@ def init(
             )
             typer.echo(f"Distilled {count} exchange(s).")
             if err_count > 0:
-                typer.echo(f"{err_count} exchange(s) failed — see errors above.", err=True)
+                typer.echo(
+                    f"{err_count} exchange(s) failed — see errors above.", err=True
+                )
         except KeyboardInterrupt:
             typer.echo(
                 "\n⚠ Distillation interrupted. "
@@ -396,9 +394,7 @@ def _prompt_choice(valid: set[str], default: str = "1") -> str:
         choice = typer.prompt("Choice", default=default).strip()
         if choice in valid:
             return choice
-        typer.echo(
-            f"  Invalid choice. Please enter one of: {', '.join(sorted_valid)}"
-        )
+        typer.echo(f"  Invalid choice. Please enter one of: {', '.join(sorted_valid)}")
 
 
 def _prompt_int_range(prompt: str, min_v: int, max_v: int | None = None) -> int:
@@ -414,9 +410,7 @@ def _prompt_int_range(prompt: str, min_v: int, max_v: int | None = None) -> int:
         return n
 
 
-def _resolve_min_chars(
-    exchanges: list[Exchange], min_chars_flag: int | None
-) -> int:
+def _resolve_min_chars(exchanges: list[Exchange], min_chars_flag: int | None) -> int:
     """init 時の min_chars を決定する。フラグ指定済みならそのまま、未指定なら対話。"""
     if min_chars_flag is not None:
         return min_chars_flag
@@ -487,8 +481,7 @@ def _resolve_init_distill_client(
         status = check_ready(distill_client_flag)
         if status.state != "ready" or status.client is None:
             typer.echo(
-                f"--distill-client {distill_client_flag} is not ready: "
-                f"{status.reason}",
+                f"--distill-client {distill_client_flag} is not ready: {status.reason}",
                 err=True,
             )
             raise typer.Exit(code=1)
@@ -574,9 +567,7 @@ def _resolve_skip_count(
     if choice == "2":
         skip = max(0, total - DEFAULT_DISTILL_RECENT)
     else:  # "4": Custom
-        n = _prompt_int_range(
-            "How many exchanges to distill?", min_v=1, max_v=total
-        )
+        n = _prompt_int_range("How many exchanges to distill?", min_v=1, max_v=total)
         skip = max(0, total - n)
 
     strategy = _ask_distill_priority() if skip > 0 else "recent"
@@ -586,6 +577,7 @@ def _resolve_skip_count(
 app.command()(index)
 app.command()(distill)
 app.command()(search)
+app.command()(gc)
 app.command()(context)
 app.command()(status)
 app.command()(show)

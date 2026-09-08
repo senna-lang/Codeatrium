@@ -54,11 +54,16 @@ def _insert_fixture(
         ("p1", ex_id, "core summary", "specific detail", "core summary"),
     )
     con.execute(
-        """INSERT OR IGNORE INTO symbols
-           (id, palace_object_id, symbol_name, symbol_kind, file_path,
-            signature, line, dedup_hash)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        ("s1", "p1", symbol_name, "function", "src/foo.py", "def MyFunc()", 42, "hash1"),
+        """INSERT OR IGNORE INTO code_symbols
+           (id, file_path, symbol_name, symbol_kind, signature, line, end_line, lang, resolved_at)
+           VALUES ('s1', 'src/foo.py', ?, 'function', 'def MyFunc()', 42, 42, '.py', '2026-01-01')""",
+        (symbol_name,),
+    )
+    con.execute(
+        """INSERT OR IGNORE INTO code_edges
+           (id, exchange_id, file_path, symbol_id, edge_kind, granularity, confidence)
+           VALUES ('edge-s1', ?, 'src/foo.py', 's1', 'distill', 'line', 1.0)""",
+        (ex_id,),
     )
     con.commit()
 
@@ -83,9 +88,7 @@ def test_context_full_flag_includes_content(tmp_path, monkeypatch):
     _insert_fixture(con)
     con.close()
 
-    result = runner.invoke(
-        app, ["context", "--symbol", "MyFunc", "--json", "--full"]
-    )
+    result = runner.invoke(app, ["context", "--symbol", "MyFunc", "--json", "--full"])
     assert result.exit_code == 0
     data = json.loads(result.output)
     assert "user_content" in data[0]
@@ -353,7 +356,14 @@ def _insert_code_edge_fixture(
         """INSERT OR IGNORE INTO code_edges
            (id, exchange_id, file_path, symbol_id, edge_kind, granularity, confidence, added, ts)
            VALUES (?, ?, ?, ?, 'edit', ?, ?, 1, '2026-08-09T00:00:00Z')""",
-        (f"edge-{ex_id}-{file_path}-{symbol_name}", ex_id, file_path, symbol_id, granularity, confidence),
+        (
+            f"edge-{ex_id}-{file_path}-{symbol_name}",
+            ex_id,
+            file_path,
+            symbol_id,
+            granularity,
+            confidence,
+        ),
     )
     con.commit()
 
@@ -386,7 +396,6 @@ def test_context_u1_symbol_match_text_output_shows_file_path(tmp_path, monkeypat
     result = runner.invoke(app, ["context", "src/foo.py:greet"])
     assert result.exit_code == 0
     assert "src/foo.py" in result.output
-
 
 
 def test_context_u1_full_flag_includes_content(tmp_path, monkeypatch):
@@ -450,7 +459,9 @@ def test_context_absolute_path_outside_project_errors(tmp_path, monkeypatch):
     assert result.exit_code == 1
 
 
-def test_context_positional_target_takes_precedence_over_symbol_flag(tmp_path, monkeypatch):
+def test_context_positional_target_takes_precedence_over_symbol_flag(
+    tmp_path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)
     db, con = _setup(tmp_path)
     _insert_code_edge_fixture(con)

@@ -32,7 +32,10 @@ def search(
     query: Annotated[str, typer.Argument(help="検索クエリ")],
     limit: Annotated[int, typer.Option("--limit", "-n", help="返す件数")] = 5,
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
-    branch: Annotated[str | None, typer.Option("--branch", "-b", help="ブランチ名で絞り込む（部分一致）")] = None,
+    branch: Annotated[
+        str | None,
+        typer.Option("--branch", "-b", help="ブランチ名で絞り込む（部分一致）"),
+    ] = None,
 ) -> None:
     """BM25(V) + HNSW(D) RRF でクエリに近い過去会話を返す"""
     from codeatrium.embedder import Embedder
@@ -47,9 +50,13 @@ def search(
         raise typer.Exit(1)
 
     from codeatrium.db import check_drift
+
     drifts = check_drift(db)
     for key, recorded, current in drifts:
-        typer.echo(f"[warn] {key} changed ({recorded} -> {current}). Re-index recommended.", err=True)
+        typer.echo(
+            f"[warn] {key} changed ({recorded} -> {current}). Re-index recommended.",
+            err=True,
+        )
 
     embedder = Embedder()
     query_vec = embedder.embed(query)
@@ -96,13 +103,21 @@ def context(
     symbol: Annotated[
         str | None,
         typer.Option(
-            "--symbol", "-s", help="シンボル名（部分一致・非推奨）。ファイル指定付きの位置引数を推奨"
+            "--symbol",
+            "-s",
+            help="シンボル名（部分一致・非推奨）。ファイル指定付きの位置引数を推奨",
         ),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", "-n", help="返す件数")] = 5,
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
-    full: Annotated[bool, typer.Option("--full", help="全文（user_content / agent_content）を含める")] = False,
-    branch: Annotated[str | None, typer.Option("--branch", "-b", help="ブランチ名で絞り込む（部分一致）")] = None,
+    full: Annotated[
+        bool,
+        typer.Option("--full", help="全文（user_content / agent_content）を含める"),
+    ] = False,
+    branch: Annotated[
+        str | None,
+        typer.Option("--branch", "-b", help="ブランチ名で絞り込む（部分一致）"),
+    ] = None,
 ) -> None:
     """コードから会話を思い出す（design §6.1 主機能）。
 
@@ -138,7 +153,7 @@ def context(
         rows = _fetchall_and_close(
             con,
             """
-            SELECT
+            SELECT DISTINCT
                 s.symbol_name,
                 s.symbol_kind,
                 s.file_path,
@@ -152,10 +167,11 @@ def context(
                 c.source_path,
                 e.ply_start,
                 e.git_branch
-            FROM symbols s
-            JOIN palace_objects p ON p.id = s.palace_object_id
-            JOIN exchanges e ON e.id = p.exchange_id
+            FROM code_edges ce
+            JOIN code_symbols s ON s.id = ce.symbol_id
+            JOIN exchanges e ON e.id = ce.exchange_id
             JOIN conversations c ON c.id = e.conversation_id
+            JOIN palace_objects p ON p.exchange_id = e.id
             WHERE s.symbol_name LIKE ? AND e.git_branch LIKE ?
             LIMIT ?
             """,
@@ -166,7 +182,7 @@ def context(
         rows = _fetchall_and_close(
             con,
             """
-            SELECT
+            SELECT DISTINCT
                 s.symbol_name,
                 s.symbol_kind,
                 s.file_path,
@@ -180,10 +196,11 @@ def context(
                 c.source_path,
                 e.ply_start,
                 e.git_branch
-            FROM symbols s
-            JOIN palace_objects p ON p.id = s.palace_object_id
-            JOIN exchanges e ON e.id = p.exchange_id
+            FROM code_edges ce
+            JOIN code_symbols s ON s.id = ce.symbol_id
+            JOIN exchanges e ON e.id = ce.exchange_id
             JOIN conversations c ON c.id = e.conversation_id
+            JOIN palace_objects p ON p.exchange_id = e.id
             WHERE s.symbol_name LIKE ?
             LIMIT ?
             """,
@@ -263,7 +280,9 @@ def context(
                 typer.echo(f"    {r['source_path']}:ply={r['ply_start']}")
             else:
                 # Branch-only mode display
-                typer.echo(f"\n[{i}] exchange_id={r['exchange_id']} git_branch={r['git_branch']}")
+                typer.echo(
+                    f"\n[{i}] exchange_id={r['exchange_id']} git_branch={r['git_branch']}"
+                )
                 if r["exchange_core"]:
                     typer.echo(f"    Core: {r['exchange_core']}")
                 typer.echo(f"    {r['source_path']}:ply={r['ply_start']}")
@@ -300,9 +319,7 @@ def _semantic_query_text(file_path: str, symbol_name: str | None) -> str:
     return f"{module_name} {file_path}"
 
 
-def _semantic_fallback_hits(
-    db, file_path: str, symbol_name: str | None, limit: int
-):
+def _semantic_fallback_hits(db, file_path: str, symbol_name: str | None, limit: int):
     """symbol/file/directory 段が全て空だったときの最終フォールバック（design §6.2）。
     embedding を使うため、このモジュール（CLI層）でのみ組み立てる
     （context_lookup.py は embedding に依存させない、design の意図的な分離）"""
@@ -356,7 +373,10 @@ def _print_context_hits(hits, json_output: bool, full: bool) -> None:
                         "specific_context": s.specific_context,
                         "verbatim_ref": s.verbatim_ref,
                         **(
-                            {"user_content": s.user_content, "agent_content": s.agent_content}
+                            {
+                                "user_content": s.user_content,
+                                "agent_content": s.agent_content,
+                            }
                             if full
                             else {}
                         ),
@@ -373,16 +393,23 @@ def _print_context_hits(hits, json_output: bool, full: bool) -> None:
         for i, h in enumerate(hits, 1):
             label = h.symbol_name or h.file_path
             source_note = "" if h.distilled else " [undistilled: code-touch based]"
-            typer.echo(f"\n[{i}] {h.match_kind} (confidence={h.confidence:.2f}) {label}{source_note}")
+            typer.echo(
+                f"\n[{i}] {h.match_kind} (confidence={h.confidence:.2f}) {label}{source_note}"
+            )
             typer.echo(f"    {h.file_path}")
             if h.exchange_core:
                 typer.echo(f"    Core: {h.exchange_core}")
             if h.verbatim_ref:
                 typer.echo(f"    {h.verbatim_ref}")
             if h.context:
-                labels = {"ply_adjacent": "同一会話の前後", "parent_session": "親会話（同一ファイル編集）"}
+                labels = {
+                    "ply_adjacent": "同一会話の前後",
+                    "parent_session": "親会話（同一ファイル編集）",
+                }
                 for s in h.context:
-                    typer.echo(f"    + [{labels.get(s.relation, s.relation)}] {s.exchange_core or s.user_content[:80]}")
+                    typer.echo(
+                        f"    + [{labels.get(s.relation, s.relation)}] {s.exchange_core or s.user_content[:80]}"
+                    )
 
 
 def _context_u1_u2(target: str, limit: int, json_output: bool, full: bool) -> None:

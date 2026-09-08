@@ -10,6 +10,8 @@ from pathlib import Path
 from codeatrium.db import (
     _MIGRATIONS,
     _backfill_touch_time_symbol_edges,
+    _migrate_v6_recompute_symbol_ids,
+    _migrate_v7_repair_distill,
     _migrate_v12_add_exchange_conversation_ply_index,
     check_drift,
     get_connection,
@@ -70,13 +72,13 @@ def test_get_connection_returns_connection(tmp_path: Path) -> None:
     con.close()
 
 
-def test_init_db_creates_vec_table(tmp_path: Path) -> None:
+def test_init_db_does_not_create_unused_verbatim_vec_table(tmp_path: Path) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
 
     con = get_connection(db_path)
     cur = con.execute("SELECT name FROM sqlite_master WHERE name='vec_exchanges'")
-    assert cur.fetchone() is not None
+    assert cur.fetchone() is None
     con.close()
 
 
@@ -197,11 +199,11 @@ def test_init_db_new_db_has_indexes(tmp_path: Path) -> None:
 
     con = sqlite3.connect(db_path)
     indexes = con.execute(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_rooms_palace_object_id', 'idx_symbols_palace_object_id', 'idx_palace_objects_exchange_id')"
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND name IN ('idx_rooms_palace_object_id', 'idx_palace_objects_exchange_id')"
     ).fetchall()
     index_names = [idx[0] for idx in indexes]
     assert "idx_rooms_palace_object_id" in index_names
-    assert "idx_symbols_palace_object_id" in index_names
     assert "idx_palace_objects_exchange_id" in index_names
     con.close()
 
@@ -241,7 +243,9 @@ def test_migration_v2_converts_skipped(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -296,7 +300,9 @@ def test_migration_v3_creates_meta(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -348,7 +354,9 @@ def test_migration_v4_creates_indexes(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -362,12 +370,8 @@ def test_migration_v4_creates_indexes(tmp_path: Path) -> None:
         )"""
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -410,11 +414,11 @@ def test_migration_v4_creates_indexes(tmp_path: Path) -> None:
     # Verify indexes exist
     con = sqlite3.connect(db_path)
     indexes = con.execute(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name IN ('idx_rooms_palace_object_id', 'idx_symbols_palace_object_id', 'idx_palace_objects_exchange_id')"
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND name IN ('idx_rooms_palace_object_id', 'idx_palace_objects_exchange_id')"
     ).fetchall()
     index_names = [idx[0] for idx in indexes]
     assert "idx_rooms_palace_object_id" in index_names
-    assert "idx_symbols_palace_object_id" in index_names
     assert "idx_palace_objects_exchange_id" in index_names
     con.close()
 
@@ -468,7 +472,9 @@ def test_check_drift_absent_meta_returns_empty(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -565,7 +571,9 @@ def test_migration_v5_creates_exchange_files(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -579,12 +587,8 @@ def test_migration_v5_creates_exchange_files(tmp_path: Path) -> None:
         )"""
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -652,7 +656,9 @@ def test_migration_v6_recomputes_symbol_ids(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -666,12 +672,8 @@ def test_migration_v6_recomputes_symbol_ids(tmp_path: Path) -> None:
         )"""
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -721,15 +723,14 @@ def test_migration_v6_recomputes_symbol_ids(tmp_path: Path) -> None:
     raw_con.commit()
     raw_con.close()
 
-    # Run init_db which should run v6 and v7 migrations
-    init_db(db_path)
-
-    # Verify symbol id was recomputed with NEW formula: sha256("Sym:file.py:po1")
+    # v14 removes this historical table, so test the preserved v6 migration
+    # directly against its native schema.
     con = sqlite3.connect(db_path)
+    _migrate_v6_recompute_symbol_ids(con)
+    con.commit()
+
     expected_new_id = hashlib.sha256(b"Sym:file.py:po1").hexdigest()
-    row = con.execute(
-        "SELECT id FROM symbols WHERE symbol_name='Sym'"
-    ).fetchone()
+    row = con.execute("SELECT id FROM symbols WHERE symbol_name='Sym'").fetchone()
     assert row is not None
     assert row[0] == expected_new_id
     con.close()
@@ -748,7 +749,9 @@ def test_migration_v7_resets_orphan_distilled(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -762,12 +765,8 @@ def test_migration_v7_resets_orphan_distilled(tmp_path: Path) -> None:
         )"""
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -837,7 +836,9 @@ def test_migration_v7_removes_orphan_symbols(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -851,12 +852,8 @@ def test_migration_v7_removes_orphan_symbols(tmp_path: Path) -> None:
         )"""
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -901,11 +898,12 @@ def test_migration_v7_removes_orphan_symbols(tmp_path: Path) -> None:
     raw_con.commit()
     raw_con.close()
 
-    # Run init_db which should run v7 migration
-    init_db(db_path)
-
-    # Verify orphan symbol was deleted
+    # v14 later drops this historical table, so test v7's orphan cleanup
+    # directly against the schema it originally maintained.
     con = sqlite3.connect(db_path)
+    _migrate_v7_repair_distill(con)
+    con.commit()
+
     count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
     assert count == 0
     con.close()
@@ -924,7 +922,9 @@ def test_migration_v7_removes_bm25_text_column(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -938,12 +938,8 @@ def test_migration_v7_removes_bm25_text_column(tmp_path: Path) -> None:
         )"""
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -997,9 +993,7 @@ def test_migration_v7_removes_bm25_text_column(tmp_path: Path) -> None:
     assert "bm25_text" not in column_names
 
     # Verify palace_objects row still exists
-    row = con.execute(
-        "SELECT id FROM palace_objects WHERE id='po1'"
-    ).fetchone()
+    row = con.execute("SELECT id FROM palace_objects WHERE id='po1'").fetchone()
     assert row is not None
     con.close()
 
@@ -1018,7 +1012,9 @@ def test_migration_v8_adds_git_branch_column(tmp_path: Path) -> None:
             last_ply_end INT NOT NULL DEFAULT -1
         )"""
     )
-    raw_con.execute("INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')")
+    raw_con.execute(
+        "INSERT INTO conversations(id, source_path) VALUES ('conv1', '/src')"
+    )
     raw_con.execute(
         """CREATE TABLE exchanges (
             id              TEXT PRIMARY KEY,
@@ -1032,12 +1028,8 @@ def test_migration_v8_adds_git_branch_column(tmp_path: Path) -> None:
         )"""
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -1107,7 +1099,9 @@ def test_migration_v8_backfills_git_branch(tmp_path: Path) -> None:
         "type": "assistant",
         "content": "This is a long agent response string that should be stored in the database",
     }
-    jsonl_path.write_text(json.dumps(user_entry) + "\n" + json.dumps(agent_entry) + "\n")
+    jsonl_path.write_text(
+        json.dumps(user_entry) + "\n" + json.dumps(agent_entry) + "\n"
+    )
 
     # Create a v7 DB with a conversation pointing to the jsonl file
     raw_con = sqlite3.connect(db_path)
@@ -1140,12 +1134,8 @@ def test_migration_v8_backfills_git_branch(tmp_path: Path) -> None:
         "INSERT INTO exchanges VALUES ('ex1', 'conv1', 0, 1, 'user', 'agent', NULL, 'pending')"
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -1191,9 +1181,7 @@ def test_migration_v8_backfills_git_branch(tmp_path: Path) -> None:
 
     # Verify git_branch was backfilled to 'main'
     con = sqlite3.connect(db_path)
-    row = con.execute(
-        "SELECT git_branch FROM exchanges WHERE id='ex1'"
-    ).fetchone()
+    row = con.execute("SELECT git_branch FROM exchanges WHERE id='ex1'").fetchone()
     assert row is not None
     assert row[0] == "main"
     con.close()
@@ -1233,12 +1221,8 @@ def test_migration_v8_missing_jsonl_stays_null(tmp_path: Path) -> None:
         "INSERT INTO exchanges VALUES ('ex1', 'conv1', 0, 1, 'user', 'agent', NULL, 'pending')"
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -1284,9 +1268,7 @@ def test_migration_v8_missing_jsonl_stays_null(tmp_path: Path) -> None:
 
     # Verify git_branch is NULL (not filled in due to missing jsonl)
     con = sqlite3.connect(db_path)
-    row = con.execute(
-        "SELECT git_branch FROM exchanges WHERE id='ex1'"
-    ).fetchone()
+    row = con.execute("SELECT git_branch FROM exchanges WHERE id='ex1'").fetchone()
     assert row is not None
     assert row[0] is None
     con.close()
@@ -1347,12 +1329,8 @@ def test_migration_v8_malformed_line_coordinate(tmp_path: Path) -> None:
         "INSERT INTO exchanges VALUES ('ex1', 'conv1', 0, 1, 'user', 'agent', NULL, 'pending')"
     )
     raw_con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('embedding_model', 'test-model')"
-    )
-    raw_con.execute(
-        "INSERT INTO meta VALUES ('prompt_version', 'v0000001')"
-    )
+    raw_con.execute("INSERT INTO meta VALUES ('embedding_model', 'test-model')")
+    raw_con.execute("INSERT INTO meta VALUES ('prompt_version', 'v0000001')")
     raw_con.execute(
         """CREATE TABLE palace_objects (
             id               TEXT PRIMARY KEY,
@@ -1399,9 +1377,7 @@ def test_migration_v8_malformed_line_coordinate(tmp_path: Path) -> None:
     # Verify git_branch was backfilled to 'feature-x' (not NULL)
     # This proves ply_index was 1 when the valid line was processed
     con = sqlite3.connect(db_path)
-    row = con.execute(
-        "SELECT git_branch FROM exchanges WHERE id='ex1'"
-    ).fetchone()
+    row = con.execute("SELECT git_branch FROM exchanges WHERE id='ex1'").fetchone()
     assert row is not None
     assert row[0] == "feature-x"
     con.close()
@@ -1468,7 +1444,9 @@ def test_init_db_new_db_has_code_edges_table(tmp_path: Path) -> None:
     con.close()
 
 
-def test_init_db_new_db_conversations_has_parent_session_ref_column(tmp_path: Path) -> None:
+def test_init_db_new_db_conversations_has_parent_session_ref_column(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
 
@@ -1491,7 +1469,9 @@ def test_init_db_new_db_has_exchanges_conversation_ply_index(tmp_path: Path) -> 
     con.close()
 
 
-def test_migration_v12_adds_exchange_conversation_ply_index_to_existing_db(tmp_path: Path) -> None:
+def test_migration_v12_adds_exchange_conversation_ply_index_to_existing_db(
+    tmp_path: Path,
+) -> None:
     """v12 未満の既存 DB にも (conversation_id, ply_start) の複合インデックスを追加する"""
     db_path = tmp_path / "memory.db"
     init_db(db_path)
@@ -1587,9 +1567,7 @@ def test_migration_v13_repairs_exchanges_already_mislabeled_by_old_buggy_v11(
 
     # 旧バグ版 v11 が実際に書き込んでいた（誤った）値を手で再現する。
     stale_session_id = hashlib.sha256(f"claude:{grok_path}".encode()).hexdigest()
-    stale_canonical_id = hashlib.sha256(
-        f"claude:{grok_path}:0".encode()
-    ).hexdigest()
+    stale_canonical_id = hashlib.sha256(f"claude:{grok_path}:0".encode()).hexdigest()
 
     raw_con = sqlite3.connect(db_path)
     raw_con.execute(
@@ -1659,7 +1637,7 @@ def test_migration_v13_repairs_exchanges_already_mislabeled_by_old_buggy_v11(
         )""",
         (stale_session_id, grok_path, grok_path, stale_canonical_id),
     )
-    raw_con.execute(f"PRAGMA user_version = {len(_MIGRATIONS) - 1}")
+    raw_con.execute("PRAGMA user_version = 12")
     raw_con.commit()
     raw_con.close()
 
@@ -1684,15 +1662,18 @@ def test_migration_v13_repairs_exchanges_already_mislabeled_by_old_buggy_v11(
     assert row["harness"] == "grok"
     assert row["session_id"] == correct_session_id
     assert row["source_session_id"] == grok_path
-    assert row["canonical_exchange_id"] == hashlib.sha256(
-        f"grok:{grok_path}:0".encode()
-    ).hexdigest()
+    assert (
+        row["canonical_exchange_id"]
+        == hashlib.sha256(f"grok:{grok_path}:0".encode()).hexdigest()
+    )
     assert stale_session_row is None
     assert corrected_session_row is not None
     assert corrected_session_row["harness"] == "grok"
 
 
-def test_backfill_parent_session_ref_populates_subagent_conversations(tmp_path: Path) -> None:
+def test_backfill_parent_session_ref_populates_subagent_conversations(
+    tmp_path: Path,
+) -> None:
     """design §2.3・§4.2: 既存 DB のサブエージェント会話にも parent_session_ref を後付けする"""
     db_path = tmp_path / "memory.db"
     init_db(db_path)
@@ -1707,7 +1688,10 @@ def test_backfill_parent_session_ref_populates_subagent_conversations(tmp_path: 
     )
     con.execute(
         "INSERT INTO conversations (id, source_path) VALUES (?, ?)",
-        ("parent1", "/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b.jsonl"),
+        (
+            "parent1",
+            "/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b.jsonl",
+        ),
     )
     con.commit()
     con.close()
@@ -1723,7 +1707,10 @@ def test_backfill_parent_session_ref_populates_subagent_conversations(tmp_path: 
     ).fetchone()[0]
     con.close()
 
-    assert ref == "/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b.jsonl"
+    assert (
+        ref
+        == "/Users/x/.claude/projects/proj/2be98365-a88a-4ff6-96db-f8ba2a356d9b.jsonl"
+    )
     assert parent_ref is None
 
 
@@ -1905,7 +1892,9 @@ def _build_pre_backfill_db(db_path: Path) -> sqlite3.Connection:
     return con
 
 
-def _seed_conversation_and_exchange(con: sqlite3.Connection, conv_id: str, ex_id: str) -> None:
+def _seed_conversation_and_exchange(
+    con: sqlite3.Connection, conv_id: str, ex_id: str
+) -> None:
     con.execute(
         "INSERT INTO conversations (id, source_path) VALUES (?, ?)",
         (conv_id, f"/fake/{conv_id}.jsonl"),
@@ -1969,7 +1958,9 @@ def test_backfill_stage_b_skips_paths_outside_project_root(tmp_path: Path) -> No
     assert row is None
 
 
-def test_backfill_stage_b_skips_exchange_already_covered_by_code_edges(tmp_path: Path) -> None:
+def test_backfill_stage_b_skips_exchange_already_covered_by_code_edges(
+    tmp_path: Path,
+) -> None:
     """既に code_edges を持つ exchange（新パイプライン経由）は上書き・重複させない"""
     db_path = _project_db_path(tmp_path)
     project_root = db_path.parent.parent
@@ -1997,7 +1988,7 @@ def test_backfill_stage_b_skips_exchange_already_covered_by_code_edges(tmp_path:
     assert [r[0] for r in rows] == ["real-edge"]
 
 
-def test_backfill_stage_c_creates_file_edge_from_legacy_symbols(tmp_path: Path) -> None:
+def test_migration_v14_creates_symbol_edge_from_legacy_symbols(tmp_path: Path) -> None:
     db_path = _project_db_path(tmp_path)
 
     con = _build_pre_backfill_db(db_path)
@@ -2021,11 +2012,13 @@ def test_backfill_stage_c_creates_file_edge_from_legacy_symbols(tmp_path: Path) 
     ).fetchone()
     con.close()
 
-    assert row == ("src/legacy.py", "mention", "file", 0.5)
+    assert row == ("src/legacy.py", "distill", "line", 1.0)
 
 
-def test_backfill_stage_c_skips_exchange_already_covered_by_stage_b(tmp_path: Path) -> None:
-    """段階Bが先に処理される。同じexchangeなら段階Cは(別ファイルでも)追加しない"""
+def test_migration_v14_preserves_symbol_edge_with_exchange_file_data(
+    tmp_path: Path,
+) -> None:
+    """Legacy symbols remain exact symbol edges; file mentions do not replace them."""
     db_path = _project_db_path(tmp_path)
     project_root = db_path.parent.parent
 
@@ -2049,13 +2042,17 @@ def test_backfill_stage_c_skips_exchange_already_covered_by_stage_b(tmp_path: Pa
     init_db(db_path)
 
     con = sqlite3.connect(db_path)
-    rows = con.execute("SELECT file_path FROM code_edges WHERE exchange_id='ex1'").fetchall()
+    rows = con.execute(
+        "SELECT file_path FROM code_edges WHERE exchange_id='ex1'"
+    ).fetchall()
     con.close()
 
-    assert [r[0] for r in rows] == ["src/foo.py"]
+    assert [r[0] for r in rows] == ["src/legacy.py"]
 
 
-def test_backfill_sets_meta_flag_so_later_init_db_calls_do_not_rescan(tmp_path: Path) -> None:
+def test_backfill_sets_meta_flag_so_later_init_db_calls_do_not_rescan(
+    tmp_path: Path,
+) -> None:
     """meta フラグで一度だけ実行される——以後の init_db（毎回の loci index）は再走査しない"""
     db_path = _project_db_path(tmp_path)
     project_root = db_path.parent.parent
@@ -2119,7 +2116,9 @@ def _seed_drifted_touch(con: sqlite3.Connection) -> None:
     )
 
 
-def test_backfill_touch_time_symbol_edges_upgrades_stale_file_edge(tmp_path: Path) -> None:
+def test_backfill_touch_time_symbol_edges_upgrades_stale_file_edge(
+    tmp_path: Path,
+) -> None:
     """A `code_touches` row valid against an OLD commit, but stale against
     the live (later-edited) file, gets a new line-level edge; the coarser
     file edge the old pipeline made is left in place, not deleted."""
@@ -2257,10 +2256,12 @@ def test_backfill_touch_time_symbol_edges_never_clobbers_current_symbol_row(
     con.close()
 
     # The current/authoritative coordinates survive the backfill untouched.
-    assert (row["line"], row["end_line"]) == (current_symbol.line, current_symbol.end_line)
+    assert (row["line"], row["end_line"]) == (
+        current_symbol.line,
+        current_symbol.end_line,
+    )
     # And a line lookup at the symbol's real current location still resolves.
     assert pick_enclosing_symbol_name(current_symbol.line, all_symbols) == "foo"
-
 
 
 def test_backfill_touch_time_symbol_edges_is_idempotent(tmp_path: Path) -> None:

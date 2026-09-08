@@ -9,7 +9,7 @@
 検索結果には SPEC 準拠で verbatim_ref / rooms / symbols を付加する。
   - verbatim_ref: "{source_path}:ply={ply_start}"
   - rooms: palace_objects に紐づく room_assignments
-  - symbols: palace_objects に紐づく tree-sitter 解決済みシンボル
+  - symbols: code_edges から exchange に紐づく tree-sitter 解決済みシンボル
 """
 
 from __future__ import annotations
@@ -81,10 +81,10 @@ def _enrich_results(con: sqlite3.Connection, results: list[FusedResult]) -> None
 
     sym_rows = con.execute(
         f"""
-        SELECT p.exchange_id, s.symbol_name, s.file_path, s.line, s.signature
-        FROM palace_objects p
-        JOIN symbols s ON s.palace_object_id = p.id
-        WHERE p.exchange_id IN ({placeholders})
+        SELECT DISTINCT ce.exchange_id, s.symbol_name, s.file_path, s.line, s.signature
+        FROM code_edges ce
+        JOIN code_symbols s ON s.id = ce.symbol_id
+        WHERE ce.exchange_id IN ({placeholders})
         """,
         exchange_ids,
     ).fetchall()
@@ -131,8 +131,8 @@ def search_bm25(
     省略時は従来どおり自前で接続を開き、返す前に閉じる。
     """
     fts_query = _fts5_query(query_text)
-    branch_clause = "AND e.git_branch LIKE ? ESCAPE '\\'" if branch is not None else ''
-    branch_params: list = [f'%{escape_like(branch)}%'] if branch is not None else []
+    branch_clause = "AND e.git_branch LIKE ? ESCAPE '\\'" if branch is not None else ""
+    branch_params: list = [f"%{escape_like(branch)}%"] if branch is not None else []
     ctx = nullcontext(con) if con is not None else closing(get_connection(db_path))
     with ctx as c:
         try:
@@ -200,8 +200,8 @@ def search_hnsw_palace(
 
     `con` の共有規約は `search_bm25` と同じ（issue #25）。
     """
-    branch_clause = "AND e.git_branch LIKE ? ESCAPE '\\'" if branch is not None else ''
-    branch_params: list = [f'%{escape_like(branch)}%'] if branch is not None else []
+    branch_clause = "AND e.git_branch LIKE ? ESCAPE '\\'" if branch is not None else ""
+    branch_params: list = [f"%{escape_like(branch)}%"] if branch is not None else []
 
     ctx = nullcontext(con) if con is not None else closing(get_connection(db_path))
     with ctx as c:
@@ -211,7 +211,9 @@ def search_hnsw_palace(
             total_row = c.execute("SELECT COUNT(*) AS n FROM vec_palace").fetchone()
             total_candidates = total_row["n"] if total_row is not None else 0
 
-            candidate_k = min(limit * _KNN_INITIAL_CANDIDATE_FACTOR, _KNN_MAX_CANDIDATE_K)
+            candidate_k = min(
+                limit * _KNN_INITIAL_CANDIDATE_FACTOR, _KNN_MAX_CANDIDATE_K
+            )
             while True:
                 rows = c.execute(
                     f"""
@@ -245,7 +247,9 @@ def search_hnsw_palace(
                 at_hard_cap = candidate_k >= _KNN_MAX_CANDIDATE_K
                 if exhausted_index or at_hard_cap:
                     break
-                candidate_k = min(candidate_k * _KNN_CANDIDATE_GROWTH_FACTOR, _KNN_MAX_CANDIDATE_K)
+                candidate_k = min(
+                    candidate_k * _KNN_CANDIDATE_GROWTH_FACTOR, _KNN_MAX_CANDIDATE_K
+                )
         except sqlite3.OperationalError:
             rows = []
 
@@ -326,10 +330,20 @@ def search_combined(
     """
     with closing(get_connection(db_path)) as con:
         bm25_results = search_bm25(
-            db_path, query_text, limit=limit * 2, min_exchanges=min_exchanges, branch=branch, con=con
+            db_path,
+            query_text,
+            limit=limit * 2,
+            min_exchanges=min_exchanges,
+            branch=branch,
+            con=con,
         )
         hnsw_results = search_hnsw_palace(
-            db_path, query_vec, limit=limit * 2, min_exchanges=min_exchanges, branch=branch, con=con
+            db_path,
+            query_vec,
+            limit=limit * 2,
+            min_exchanges=min_exchanges,
+            branch=branch,
+            con=con,
         )
         fused = rrf(bm25_results, hnsw_results, limit=limit)
 

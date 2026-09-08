@@ -97,6 +97,7 @@ Invalid input on any prompt re-prompts instead of silently falling back to a def
 | `loci init` | Initialize `.codeatrium/`, write common `AGENTS.md` instructions, and install Claude hooks (`--no-hooks` to skip, `--no-local-distiller` to skip the local-model prompt) |
 | `loci index [--harness all\|claude\|codex\|opencode\|omp-pi\|grok]` | Index new session logs; the default indexes every detected harness |
 | `loci distill [--limit N]` | Distill undistilled exchanges via LLM |
+| `loci gc` | Snapshot `memory.db` to `.bak`, remove only orphaned palace/vector/session records, retain the current backup plus three archives, then run `VACUUM` |
 | `loci search "query" --json` | Semantic search (agent-facing); add `--branch NAME` to filter by git branch |
 | `loci context --symbol "name" --json` | Code symbol → past conversations (lightweight; add `--full` for verbatim text) |
 | `loci context --branch "name" --json` | Git branch → past conversations (includes undistilled exchanges) |

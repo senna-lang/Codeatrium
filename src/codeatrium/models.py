@@ -102,12 +102,9 @@ class CodeTouch:
     added: int
     removed: int
     ts: str | None
-    # 以下は core が後から埋める
-    symbol_name: str | None = None
-    resolved_by: str | None = None
 
 
-EdgeKind = Literal["edit", "write", "read", "mention"]
+EdgeKind = Literal["edit", "write", "read", "mention", "distill"]
 Granularity = Literal["line", "file"]
 
 

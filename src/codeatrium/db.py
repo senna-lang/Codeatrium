@@ -5,11 +5,9 @@ SQLite DB の初期化・スキーマ定義・接続管理
   conversations  - .jsonl ファイル単位の会話記録（重複排除キャッシュ）
   exchanges      - exchange 単位の verbatim テキスト
   exchanges_fts  - exchanges の FTS5 仮想テーブル（BM25 verbatim 検索用）
-  vec_exchanges  - sqlite-vec HNSW インデックス（Phase1 verbatim ベクトル検索用）
   palace_objects - 蒸留済み palace object（exchange_core + specific_context）
   rooms          - palace object の room_assignments
   vec_palace     - sqlite-vec HNSW インデックス（Phase2 distilled ベクトル検索用）
-  symbols        - tree-sitter 解決済みシンボル（Phase3 コード逆引き用、読み取り専用で残置）
   code_touches   - ハーネスの編集ログから記録時に保存する加工前の手がかり（design §4.1）
   code_symbols   - tree-sitter で解決したシンボルの正本（design §4.1）
   code_edges     - 会話とコードのひも付け（design §4.1）
@@ -44,7 +42,9 @@ def _migrate_v1_add_last_ply_end(con: sqlite3.Connection) -> None:
 
 def _migrate_v2_add_distill_status(con: sqlite3.Connection) -> None:
     """Migration v2: exchanges に distill_status カラムを追加し既存データを変換する"""
-    table_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'").fetchone()
+    table_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'"
+    ).fetchone()
     if table_exists is None:
         return
     columns = con.execute("PRAGMA table_info(exchanges)").fetchall()
@@ -65,9 +65,7 @@ def _migrate_v2_add_distill_status(con: sqlite3.Connection) -> None:
 
 def _migrate_v3_add_meta(con: sqlite3.Connection) -> None:
     """Migration v3: meta テーブルを新設し embedding_model と prompt_version を初期化する"""
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
-    )
+    con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
 
     from codeatrium.embedder import MODEL_NAME
     from codeatrium.llm import DISTILL_PROMPT_VERSION
@@ -84,19 +82,25 @@ def _migrate_v3_add_meta(con: sqlite3.Connection) -> None:
 
 def _migrate_v4_add_indexes(con: sqlite3.Connection) -> None:
     """Migration v4: rooms/symbols/palace_objects に検索用インデックスを追加する"""
-    rooms_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='rooms'").fetchone()
+    rooms_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='rooms'"
+    ).fetchone()
     if rooms_exists is not None:
         con.execute(
             "CREATE INDEX IF NOT EXISTS idx_rooms_palace_object_id ON rooms(palace_object_id)"
         )
 
-    symbols_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'").fetchone()
+    symbols_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'"
+    ).fetchone()
     if symbols_exists is not None:
         con.execute(
             "CREATE INDEX IF NOT EXISTS idx_symbols_palace_object_id ON symbols(palace_object_id)"
         )
 
-    palace_objects_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'").fetchone()
+    palace_objects_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'"
+    ).fetchone()
     if palace_objects_exists is not None:
         con.execute(
             "CREATE INDEX IF NOT EXISTS idx_palace_objects_exchange_id ON palace_objects(exchange_id)"
@@ -105,7 +109,9 @@ def _migrate_v4_add_indexes(con: sqlite3.Connection) -> None:
 
 def _migrate_v5_add_exchange_files(con: sqlite3.Connection) -> None:
     """Migration v5: exchange_files テーブルを新設する"""
-    table_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchange_files'").fetchone()
+    table_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='exchange_files'"
+    ).fetchone()
     if table_exists is None:
         con.execute(
             "CREATE TABLE exchange_files (exchange_id TEXT, file_path TEXT, PRIMARY KEY(exchange_id, file_path))"
@@ -114,20 +120,28 @@ def _migrate_v5_add_exchange_files(con: sqlite3.Connection) -> None:
 
 def _migrate_v6_recompute_symbol_ids(con: sqlite3.Connection) -> None:
     """Migration v6: symbols テーブルの id カラムを hash 再計算する"""
-    symbols_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'").fetchone()
+    symbols_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'"
+    ).fetchone()
     if symbols_exists is None:
         return
 
-    rows = con.execute("SELECT rowid, symbol_name, file_path, palace_object_id FROM symbols").fetchall()
+    rows = con.execute(
+        "SELECT rowid, symbol_name, file_path, palace_object_id FROM symbols"
+    ).fetchall()
     for rowid, symbol_name, file_path, palace_object_id in rows:
-        new_id = hashlib.sha256((symbol_name + ":" + file_path + ":" + palace_object_id).encode()).hexdigest()
+        new_id = hashlib.sha256(
+            (symbol_name + ":" + file_path + ":" + palace_object_id).encode()
+        ).hexdigest()
         con.execute("UPDATE symbols SET id=? WHERE rowid=?", (new_id, rowid))
 
 
 def _migrate_v7_repair_distill(con: sqlite3.Connection) -> None:
     """Migration v7: palace_objects テーブルから bm25_text を削除・distill ステータス修復・orphan クリーンアップ"""
     # STEP1: bm25_text カラム削除
-    palace_objects_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'").fetchone()
+    palace_objects_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'"
+    ).fetchone()
     if palace_objects_exists is not None:
         columns = con.execute("PRAGMA table_info(palace_objects)").fetchall()
         column_names = [col[1] for col in columns]
@@ -140,30 +154,42 @@ def _migrate_v7_repair_distill(con: sqlite3.Connection) -> None:
             )
             con.execute("DROP TABLE palace_objects")
             con.execute("ALTER TABLE palace_objects_new RENAME TO palace_objects")
-            con.execute("CREATE INDEX IF NOT EXISTS idx_palace_objects_exchange_id ON palace_objects(exchange_id)")
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_palace_objects_exchange_id ON palace_objects(exchange_id)"
+            )
 
     # STEP2: re-distill reset
-    exchanges_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'").fetchone()
-    palace_objects_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'").fetchone()
+    exchanges_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'"
+    ).fetchone()
+    palace_objects_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'"
+    ).fetchone()
     if exchanges_exists is not None and palace_objects_exists is not None:
         con.execute(
             "UPDATE exchanges SET distill_status='pending', distilled_at=NULL WHERE distill_status='distilled' AND id NOT IN (SELECT exchange_id FROM palace_objects)"
         )
 
     # STEP3: orphan cleanup
-    rooms_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='rooms'").fetchone()
+    rooms_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='rooms'"
+    ).fetchone()
     if rooms_exists is not None:
         con.execute(
             "DELETE FROM rooms WHERE palace_object_id NOT IN (SELECT id FROM palace_objects)"
         )
 
-    symbols_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'").fetchone()
+    symbols_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'"
+    ).fetchone()
     if symbols_exists is not None:
         con.execute(
             "DELETE FROM symbols WHERE palace_object_id NOT IN (SELECT id FROM palace_objects)"
         )
 
-    vec_palace_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vec_palace'").fetchone()
+    vec_palace_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_palace'"
+    ).fetchone()
     if vec_palace_exists is not None:
         con.execute(
             "DELETE FROM vec_palace WHERE palace_id NOT IN (SELECT id FROM palace_objects)"
@@ -175,7 +201,9 @@ def _migrate_v8_add_git_branch(con: sqlite3.Connection) -> None:
     import json
 
     # Guard: check if exchanges table exists
-    exchanges_table = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'").fetchone()
+    exchanges_table = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'"
+    ).fetchone()
     if exchanges_table is None:
         return
 
@@ -187,7 +215,9 @@ def _migrate_v8_add_git_branch(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE exchanges ADD COLUMN git_branch TEXT")
 
     # Nested function to extract git_branch from ply targets in a jsonl file
-    def _extract_git_branch_from_ply(jsonl_path_str: str, ply_targets: list[int]) -> dict[int, str | None]:
+    def _extract_git_branch_from_ply(
+        jsonl_path_str: str, ply_targets: list[int]
+    ) -> dict[int, str | None]:
         """
         Open jsonl file, iterate lines counting only successful json.loads.
         For each ply index in ply_targets, look for entry.get('gitBranch').
@@ -195,14 +225,19 @@ def _migrate_v8_add_git_branch(con: sqlite3.Connection) -> None:
         """
         result: dict[int, str | None] = {}
         try:
-            with open(jsonl_path_str, encoding='utf-8') as f:
+            with open(jsonl_path_str, encoding="utf-8") as f:
                 ply_index = 0
                 for line in f:
                     try:
                         entry = json.loads(line)
                         if ply_index in ply_targets:
-                            git_branch_raw = entry.get('gitBranch', '')
-                            git_branch = git_branch_raw if isinstance(git_branch_raw, str) and git_branch_raw.strip() else None
+                            git_branch_raw = entry.get("gitBranch", "")
+                            git_branch = (
+                                git_branch_raw
+                                if isinstance(git_branch_raw, str)
+                                and git_branch_raw.strip()
+                                else None
+                            )
                             result[ply_index] = git_branch
                         ply_index += 1
                     except json.JSONDecodeError:
@@ -215,8 +250,12 @@ def _migrate_v8_add_git_branch(con: sqlite3.Connection) -> None:
         return result
 
     # QUERY existing exchanges with conversation info
-    exchanges_exist = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'").fetchone()
-    conversations_exist = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'").fetchone()
+    exchanges_exist = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='exchanges'"
+    ).fetchone()
+    conversations_exist = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'"
+    ).fetchone()
 
     if exchanges_exist is None or conversations_exist is None:
         return
@@ -250,7 +289,9 @@ def _migrate_v8_add_git_branch(con: sqlite3.Connection) -> None:
 
 def _migrate_v9_add_code_touches(con: sqlite3.Connection) -> None:
     """Migration v9: code_touches/code_symbols/code_edges を新設し conversations.parent_session_ref を追加する（design §4.1・§4.2）"""
-    conversations_exists = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'").fetchone()
+    conversations_exists = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'"
+    ).fetchone()
     if conversations_exists is not None:
         columns = con.execute("PRAGMA table_info(conversations)").fetchall()
         column_names = [col[1] for col in columns]
@@ -283,9 +324,15 @@ def _migrate_v9_add_code_touches(con: sqlite3.Connection) -> None:
             ts           TEXT
         )
     """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_code_touches_exchange ON code_touches(exchange_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_code_touches_file     ON code_touches(file_path)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_code_touches_symbol   ON code_touches(file_path, symbol_name)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_touches_exchange ON code_touches(exchange_id)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_touches_file     ON code_touches(file_path)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_touches_symbol   ON code_touches(file_path, symbol_name)"
+    )
 
     con.execute("""
         CREATE TABLE IF NOT EXISTS code_symbols (
@@ -301,8 +348,12 @@ def _migrate_v9_add_code_touches(con: sqlite3.Connection) -> None:
             UNIQUE(file_path, symbol_name)
         )
     """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(symbol_name)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_code_symbols_file ON code_symbols(file_path)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(symbol_name)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_symbols_file ON code_symbols(file_path)"
+    )
 
     con.execute("""
         CREATE TABLE IF NOT EXISTS code_edges (
@@ -317,9 +368,15 @@ def _migrate_v9_add_code_touches(con: sqlite3.Connection) -> None:
             ts          TEXT
         )
     """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_symbol   ON code_edges(symbol_id)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_file     ON code_edges(file_path)")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_code_edges_exchange ON code_edges(exchange_id)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_edges_symbol   ON code_edges(symbol_id)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_edges_file     ON code_edges(file_path)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_edges_exchange ON code_edges(exchange_id)"
+    )
 
 
 def _migrate_v10_add_file_renames(con: sqlite3.Connection) -> None:
@@ -333,7 +390,10 @@ def _migrate_v10_add_file_renames(con: sqlite3.Connection) -> None:
             PRIMARY KEY (old_path, new_path)
         )
     """)
-    con.execute("CREATE INDEX IF NOT EXISTS idx_file_renames_new_path ON file_renames(new_path)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_file_renames_new_path ON file_renames(new_path)"
+    )
+
 
 def _migrate_v11_add_canonical_sessions(con: sqlite3.Connection) -> None:
     """Migration v11: persist harness-neutral sessions and exchange provenance."""
@@ -353,9 +413,7 @@ def _migrate_v11_add_canonical_sessions(con: sqlite3.Connection) -> None:
             UNIQUE(harness, source_session_id)
         )
     """)
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_sessions_harness ON sessions(harness)"
-    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_sessions_harness ON sessions(harness)")
     exchanges_exists = con.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'exchanges'"
     ).fetchone()
@@ -383,7 +441,9 @@ def _migrate_v11_add_canonical_sessions(con: sqlite3.Connection) -> None:
     for row in rows:
         source_path = row["source_path"]
         harness, source_session_id = _infer_harness_and_source_session_id(source_path)
-        session_id = hashlib.sha256(f"{harness}:{source_session_id}".encode()).hexdigest()
+        session_id = hashlib.sha256(
+            f"{harness}:{source_session_id}".encode()
+        ).hexdigest()
         cursor = f"v1:ply:{row['last_ply_end']}"
         con.execute(
             """
@@ -393,8 +453,13 @@ def _migrate_v11_add_canonical_sessions(con: sqlite3.Connection) -> None:
             VALUES (?, ?, ?, ?, '', ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
             """,
             (
-                session_id, harness, source_session_id, source_path, cursor,
-                row["started_at"], row["started_at"],
+                session_id,
+                harness,
+                source_session_id,
+                source_path,
+                cursor,
+                row["started_at"],
+                row["started_at"],
             ),
         )
         con.execute(
@@ -432,6 +497,7 @@ def _infer_harness_and_source_session_id(source_path: str) -> tuple[str, str]:
     if "/.grok/" in source_path:
         return "grok", source_path
     return "claude", source_path
+
 
 def _backfill_exchange_provenance(con: sqlite3.Connection) -> None:
     exists = con.execute(
@@ -476,8 +542,6 @@ def _backfill_exchange_provenance(con: sqlite3.Connection) -> None:
             """,
             (session_id, harness, source_path, source_session_id, row["id"]),
         )
-
-
 
 
 def _migrate_v12_add_exchange_conversation_ply_index(con: sqlite3.Connection) -> None:
@@ -535,9 +599,7 @@ def _migrate_v13_repair_legacy_claude_mislabel(con: sqlite3.Connection) -> None:
     }
     has_canonical_column = "canonical_exchange_id" in exchange_columns
 
-    conversations = con.execute(
-        "SELECT id, source_path FROM conversations"
-    ).fetchall()
+    conversations = con.execute("SELECT id, source_path FROM conversations").fetchall()
     for conversation in conversations:
         source_path = conversation["source_path"]
         harness, source_session_id = _infer_harness_and_source_session_id(source_path)
@@ -576,7 +638,13 @@ def _migrate_v13_repair_legacy_claude_mislabel(con: sqlite3.Connection) -> None:
                         canonical_exchange_id = ?
                     WHERE id = ?
                     """,
-                    (harness, session_id, source_session_id, canonical_exchange_id, exchange["id"]),
+                    (
+                        harness,
+                        session_id,
+                        source_session_id,
+                        canonical_exchange_id,
+                        exchange["id"],
+                    ),
                 )
             else:
                 con.execute(
@@ -604,6 +672,117 @@ def _migrate_v13_repair_legacy_claude_mislabel(con: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v14_remove_dead_schema(con: sqlite3.Connection) -> None:
+    """Migration v14: remove unused verbatim vectors and duplicate symbol storage.
+
+    Legacy ``symbols`` rows remain useful to symbol search, so each live
+    palace/exchange relation becomes a canonical ``code_symbols`` row and a
+    ``code_edges`` relation before the duplicate table is dropped.
+    """
+    symbols_exists = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'symbols'"
+    ).fetchone()
+    if symbols_exists is not None:
+        rows = con.execute(
+            """
+            SELECT p.exchange_id, s.file_path, s.symbol_name, s.symbol_kind,
+                   s.signature, s.line
+            FROM symbols s
+            JOIN palace_objects p ON p.id = s.palace_object_id
+            JOIN exchanges e ON e.id = p.exchange_id
+            """
+        ).fetchall()
+        migrated_at = datetime.now(UTC).isoformat()
+        for row in rows:
+            symbol_id = hashlib.sha256(
+                f"{row['file_path']}:{row['symbol_name']}".encode()
+            ).hexdigest()
+            con.execute(
+                """
+                INSERT OR IGNORE INTO code_symbols
+                    (id, file_path, symbol_name, symbol_kind, signature,
+                     line, end_line, lang, resolved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    symbol_id,
+                    row["file_path"],
+                    row["symbol_name"],
+                    row["symbol_kind"],
+                    row["signature"],
+                    row["line"],
+                    row["line"],
+                    Path(row["file_path"]).suffix.lower(),
+                    migrated_at,
+                ),
+            )
+            edge_id = hashlib.sha256(
+                f"{row['exchange_id']}:{row['file_path']}:{symbol_id}:legacy-symbol".encode()
+            ).hexdigest()
+            con.execute(
+                """
+                INSERT OR IGNORE INTO code_edges
+                    (id, exchange_id, file_path, symbol_id, edge_kind,
+                     granularity, confidence, added, ts)
+                VALUES (?, ?, ?, ?, 'distill', 'line', 1.0, 0, NULL)
+                """,
+                (edge_id, row["exchange_id"], row["file_path"], symbol_id),
+            )
+        con.execute("DROP TABLE symbols")
+
+    con.execute("DROP TABLE IF EXISTS vec_exchanges")
+
+    columns = {
+        row[1] for row in con.execute("PRAGMA table_info(code_touches)").fetchall()
+    }
+    if {"symbol_name", "resolved_by"} & columns:
+        con.execute("DROP INDEX IF EXISTS idx_code_touches_symbol")
+        con.execute(
+            """
+            CREATE TABLE code_touches_new (
+                id           TEXT PRIMARY KEY,
+                exchange_id  TEXT NOT NULL,
+                harness      TEXT NOT NULL,
+                tool_call_id TEXT NOT NULL,
+                file_path    TEXT NOT NULL,
+                touch_kind   TEXT NOT NULL,
+                locator_kind TEXT NOT NULL,
+                old_start    INT,
+                old_lines    INT,
+                new_start    INT,
+                new_lines    INT,
+                old_string   TEXT,
+                new_string   TEXT,
+                added        INT NOT NULL DEFAULT 0,
+                removed      INT NOT NULL DEFAULT 0,
+                ts           TEXT
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO code_touches_new
+                (id, exchange_id, harness, tool_call_id, file_path, touch_kind,
+                 locator_kind, old_start, old_lines, new_start, new_lines,
+                 old_string, new_string, added, removed, ts)
+            SELECT id, exchange_id, harness, tool_call_id, file_path, touch_kind,
+                   locator_kind, old_start, old_lines, new_start, new_lines,
+                   old_string, new_string, added, removed, ts
+            FROM code_touches
+            """
+        )
+        con.execute("DROP TABLE code_touches")
+        con.execute("ALTER TABLE code_touches_new RENAME TO code_touches")
+
+    if columns:
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_code_touches_exchange ON code_touches(exchange_id)"
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_code_touches_file ON code_touches(file_path)"
+        )
+
+
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v1_add_last_ply_end,
     _migrate_v2_add_distill_status,
@@ -618,20 +797,16 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v11_add_canonical_sessions,
     _migrate_v12_add_exchange_conversation_ply_index,
     _migrate_v13_repair_legacy_claude_mislabel,
+    _migrate_v14_remove_dead_schema,
 ]
 
 
 def _backfill_legacy_code_edges(con: sqlite3.Connection, project_root: Path) -> None:
-    """design §7 段階B・C: exchange_files・旧 symbols から、まだ code_edges を
-    持たない exchange へファイル粒度の code_edges を作る。LLM は呼ばず、
-    ディスクも読まない（DB内で完結）。`meta` の完了フラグで一度だけ実行する
-    （project_root に依存するため `_MIGRATIONS`/user_version には含めない——
-    他の migration は DB だけに閉じた操作であり、性質が異なる）。
+    """exchange_files から code_edges の無い exchange へ file edge を補完する。
 
-    段階B（exchange_files）を先に処理し、段階C（旧 symbols）は
-    段階Bで既にひも付いた exchange をスキップする（exchange_files の方が
-    直接的な手がかりであり、蒸留経由の symbols より優先する）。
-    project_root 外のパスは記録しない（不変条件3、normalize_repo_path と同じ判定）。
+    project_root に依存するため `_MIGRATIONS`/user_version には含めず、`meta` の
+    完了フラグで一度だけ実行する。旧 `symbols` の補完は v14 migration が
+    symbol-level edge へ変換してから drop するため、ここでは扱わない。
     """
     # meta は v3 で全既存DBに作られるはずだが、念のため（他の migration 関数と同じ流儀）
     con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
@@ -663,7 +838,6 @@ def _backfill_legacy_code_edges(con: sqlite3.Connection, project_root: Path) -> 
 
     exchange_files_exists = con.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='exchange_files'"
-
     ).fetchone()
     if exchange_files_exists is not None:
         rows = con.execute(
@@ -675,31 +849,15 @@ def _backfill_legacy_code_edges(con: sqlite3.Connection, project_root: Path) -> 
         for exchange_id, file_path in rows:
             _insert_mention_edge(exchange_id, file_path)
 
-    symbols_exists = con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='symbols'"
-    ).fetchone()
-    palace_objects_exists = con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='palace_objects'"
-    ).fetchone()
-    if symbols_exists is not None and palace_objects_exists is not None:
-        rows = con.execute(
-            """
-            SELECT DISTINCT p.exchange_id, s.file_path
-            FROM symbols s
-            JOIN palace_objects p ON p.id = s.palace_object_id
-            WHERE p.exchange_id NOT IN (SELECT DISTINCT exchange_id FROM code_edges)
-            """
-        ).fetchall()
-        for exchange_id, file_path in rows:
-            _insert_mention_edge(exchange_id, file_path)
-
     con.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('legacy_edges_backfilled', ?)",
         (datetime.now(UTC).isoformat(),),
     )
 
 
-def _backfill_touch_time_symbol_edges(con: sqlite3.Connection, project_root: Path) -> None:
+def _backfill_touch_time_symbol_edges(
+    con: sqlite3.Connection, project_root: Path
+) -> None:
     """Upgrade stale file-granularity `code_edges` to symbol-level where a
     point-in-time git blob now allows a match.
 
@@ -804,7 +962,10 @@ def _backfill_touch_time_symbol_edges(con: sqlite3.Connection, project_root: Pat
             ts=row["ts"],
         )
         edges = touches_to_edges(
-            touch, exchange_id=row["exchange_id"], rel_file_path=rel_path, symbols=symbols
+            touch,
+            exchange_id=row["exchange_id"],
+            rel_file_path=rel_path,
+            symbols=symbols,
         )
         line_edges = [e for e in edges if e.granularity == "line"]
         if not line_edges:
@@ -857,6 +1018,7 @@ def _backfill_touch_time_symbol_edges(con: sqlite3.Connection, project_root: Pat
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('touch_time_symbol_edges_backfilled', ?)",
         (datetime.now(UTC).isoformat(),),
     )
+
 
 def _run_migrations(con: sqlite3.Connection) -> None:
     """Run pending migrations based on PRAGMA user_version."""
@@ -911,12 +1073,14 @@ def get_connection(db_path: Path) -> sqlite3.Connection:
     return con
 
 
-
 def _backfill_canonical_exchange_ids(con: sqlite3.Connection) -> None:
     """Record canonical identities without rewriting stable exchange IDs."""
-    if con.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'exchanges'"
-    ).fetchone() is None:
+    if (
+        con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'exchanges'"
+        ).fetchone()
+        is None
+    ):
         return
     columns = {row[1] for row in con.execute("PRAGMA table_info(exchanges)")}
     if "canonical_exchange_id" not in columns:
@@ -1093,16 +1257,6 @@ def init_db(db_path: Path) -> None:
                 dedup_hash       TEXT NOT NULL    -- hash(room_type, room_key)
             );
 
-            CREATE TABLE IF NOT EXISTS symbols (
-                id               TEXT PRIMARY KEY,   -- sha256(symbol_name + file_path)
-                palace_object_id TEXT NOT NULL,
-                symbol_name      TEXT NOT NULL,       -- "AuthMiddleware.validate"
-                symbol_kind      TEXT NOT NULL,       -- "function" / "class" / "method"
-                file_path        TEXT NOT NULL,
-                signature        TEXT NOT NULL,
-                line             INT  NOT NULL,
-                dedup_hash       TEXT NOT NULL        -- sha256(symbol_name + file_path)
-            );
 
             CREATE TABLE IF NOT EXISTS exchange_files (
                 exchange_id TEXT,
@@ -1113,7 +1267,6 @@ def init_db(db_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 
             CREATE INDEX IF NOT EXISTS idx_rooms_palace_object_id ON rooms(palace_object_id);
-            CREATE INDEX IF NOT EXISTS idx_symbols_palace_object_id ON symbols(palace_object_id);
             CREATE INDEX IF NOT EXISTS idx_palace_objects_exchange_id ON palace_objects(exchange_id);
 
             CREATE TABLE IF NOT EXISTS code_touches (
@@ -1132,15 +1285,12 @@ def init_db(db_path: Path) -> None:
                 old_string   TEXT,
                 new_string   TEXT,
 
-                symbol_name  TEXT,
-                resolved_by  TEXT,
                 added        INT NOT NULL DEFAULT 0,
                 removed      INT NOT NULL DEFAULT 0,
                 ts           TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_code_touches_exchange ON code_touches(exchange_id);
             CREATE INDEX IF NOT EXISTS idx_code_touches_file     ON code_touches(file_path);
-            CREATE INDEX IF NOT EXISTS idx_code_touches_symbol   ON code_touches(file_path, symbol_name);
 
             CREATE TABLE IF NOT EXISTS code_symbols (
                 id          TEXT PRIMARY KEY,
@@ -1205,14 +1355,6 @@ def init_db(db_path: Path) -> None:
     _backfill_legacy_code_edges(con, db_path.parent.parent)
     _backfill_touch_time_symbol_edges(con, db_path.parent.parent)
 
-    # sqlite-vec の仮想テーブル（HNSW, Phase1 verbatim embedding 用）
-    con.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS vec_exchanges USING vec0(
-            exchange_id TEXT PRIMARY KEY,
-            embedding   FLOAT[384]
-        )
-    """)
-
     # sqlite-vec の仮想テーブル（HNSW, Phase2 distilled embedding 用）
     con.execute("""
         CREATE VIRTUAL TABLE IF NOT EXISTS vec_palace USING vec0(
@@ -1252,8 +1394,13 @@ def check_drift(db_path: Path) -> list[tuple[str, str, str]]:
         if "embedding_model" in recorded and recorded["embedding_model"] != MODEL_NAME:
             drifts.append(("embedding_model", recorded["embedding_model"], MODEL_NAME))
 
-        if "prompt_version" in recorded and recorded["prompt_version"] != DISTILL_PROMPT_VERSION:
-            drifts.append(("prompt_version", recorded["prompt_version"], DISTILL_PROMPT_VERSION))
+        if (
+            "prompt_version" in recorded
+            and recorded["prompt_version"] != DISTILL_PROMPT_VERSION
+        ):
+            drifts.append(
+                ("prompt_version", recorded["prompt_version"], DISTILL_PROMPT_VERSION)
+            )
 
         return drifts
     finally:

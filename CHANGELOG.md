@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- `loci gc` (issue #30) snapshots the database, removes only orphaned
+  palace/vector and exchange/session records, retains bounded `.bak` archives,
+  and compacts the database with `VACUUM`.
 
 - `loci hook install`/`uninstall --harness omp-pi|opencode|grok` now write real
   native hooks (issue #40): `OmpPiHooks`/`OpenCodeHooks` generate a marker-owned
@@ -13,6 +16,10 @@
   remains the safety net for unrecognized harnesses.
 
 ### Changed
+- Database schema v14 removes unused `vec_exchanges`, obsolete
+  `code_touches.symbol_name`/`resolved_by`, and duplicate `symbols` storage.
+  Existing live legacy symbol relations migrate to `code_symbols` plus
+  `code_edges` before the old table is dropped.
 
 - Lifecycle event → loci command mapping (`Stop`→`index`, `SessionStart`→
   `server start`/`distill`/`prime`, compact→`prime`) is now a single source of
