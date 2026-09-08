@@ -41,6 +41,12 @@ dependencies = [
     "tree-sitter-python>=0.23.0,<0.24.0",
     "tree-sitter-typescript>=0.23.0,<0.24.0",
     "tree-sitter-go>=0.23.0,<0.24.0",
+    # tree-sitter-rust >=0.23.3 and tree-sitter-c-sharp >=0.23.1 emit ABI 15,
+    # incompatible with tree-sitter 0.23.x core (ABI 13-14); pinned narrower.
+    "tree-sitter-rust>=0.23.0,<0.23.3",
+    "tree-sitter-java>=0.23.0,<0.24.0",
+    "tree-sitter-c-sharp==0.23.0",
+    "tree-sitter-ruby>=0.23.0,<0.24.0",
     "tomli-w>=1.0.0",
 ]
 
