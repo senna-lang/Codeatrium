@@ -174,3 +174,81 @@ def test_index_opencode_db_is_incremental(tmp_path: Path) -> None:
         index_opencode_db(opencode_db, db_path, min_chars=1, project_root=project_root)
         == 0
     )
+
+
+def test_index_opencode_db_parses_only_appended_rows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """再インデックスでは OpenCode の新規 message/part だけを復元する（issue #22）。"""
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    opencode_db = tmp_path / "opencode.db"
+    _write_opencode_db(opencode_db, project_root)
+    db_path = project_root / ".codeatrium" / "memory.db"
+    init_db(db_path)
+    assert (
+        index_opencode_db(opencode_db, db_path, min_chars=1, project_root=project_root)
+        == 1
+    )
+
+    source = sqlite3.connect(opencode_db)
+    source.executemany(
+        "INSERT INTO message (id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            (
+                "msg_new_user",
+                "ses_synth1",
+                1798761610000,
+                1798761610000,
+                json.dumps({"role": "user"}),
+            ),
+            (
+                "msg_new_assistant",
+                "ses_synth1",
+                1798761611000,
+                1798761611000,
+                json.dumps({"role": "assistant"}),
+            ),
+        ],
+    )
+    source.executemany(
+        "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "prt_new_user",
+                "msg_new_user",
+                "ses_synth1",
+                1798761610100,
+                1798761610100,
+                json.dumps({"type": "text", "text": "新規の質問です。" * 10}),
+            ),
+            (
+                "prt_new_assistant",
+                "msg_new_assistant",
+                "ses_synth1",
+                1798761611100,
+                1798761611100,
+                json.dumps({"type": "text", "text": "新規の回答です。" * 10}),
+            ),
+        ],
+    )
+    source.commit()
+    source.close()
+
+    loads = json.loads
+    parse_calls = 0
+
+    def count_loads(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return loads(*args, **kwargs)
+
+    monkeypatch.setattr("codeatrium.indexer.json.loads", count_loads)
+
+    assert (
+        index_opencode_db(opencode_db, db_path, min_chars=1, project_root=project_root)
+        == 1
+    )
+    assert parse_calls == 4

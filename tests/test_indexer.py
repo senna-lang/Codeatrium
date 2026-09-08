@@ -404,6 +404,55 @@ def test_index_file_incremental(tmp_path: Path) -> None:
     con.close()
 
 
+def test_index_file_parses_only_appended_jsonl_entries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """再インデックスでは追記行だけを JSON パースする（issue #22）。"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+    jsonl = tmp_path / "session.jsonl"
+    existing_entries = [
+        entry
+        for index in range(20)
+        for entry in (
+            make_user_entry(f"u{index}", f"既存の質問 {index} です。" * 10),
+            make_assistant_entry(
+                f"a{index}", f"既存の回答 {index} です。" * 10, f"u{index}"
+            ),
+        )
+    ]
+    write_jsonl(jsonl, existing_entries)
+    assert index_file(jsonl, db_path) == 20
+
+    with jsonl.open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(
+                make_user_entry("u-new", "追記した質問です。" * 10), ensure_ascii=False
+            )
+            + "\n"
+        )
+        stream.write(
+            json.dumps(
+                make_assistant_entry("a-new", "追記した回答です。" * 10, "u-new"),
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+    loads = json.loads
+    parse_calls = 0
+
+    def count_loads(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return loads(*args, **kwargs)
+
+    monkeypatch.setattr("codeatrium.indexer.json.loads", count_loads)
+
+    assert index_file(jsonl, db_path) == 1
+    assert parse_calls == 2
+
+
 def test_parse_exchanges_excludes_compaction_content(tmp_path: Path) -> None:
     """コンパクション要約とその直後の assistant 応答は exchange content から除外される"""
     f = tmp_path / "session.jsonl"
