@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +16,7 @@ from codeatrium.core.models import (
     ParseResult,
 )
 from codeatrium.ignore import load_ignore
+from codeatrium.indexer import _load_raw_entries
 from codeatrium.utils import sha256
 
 LegacyParser = Callable[..., list]
@@ -138,11 +138,8 @@ class JsonlLogSource:
         if self._touch_adapter is None:
             return ()
         try:
-            raw_entries = [
-                json.loads(line)
-                for line in Path(session.primary_ref).read_text().splitlines()
-            ]
-        except (OSError, json.JSONDecodeError):
+            raw_entries = _load_raw_entries(Path(session.primary_ref), last_ply_end=-1)
+        except OSError:
             return ()
         extract_renames = getattr(
             self._touch_adapter, "extract_file_renames", None
@@ -174,7 +171,7 @@ class JsonlLogSource:
         if not separator:
             return None
         try:
-            return Path(path).read_text()
+            return Path(path).read_text(encoding="utf-8")
         except OSError:
             return None
 
