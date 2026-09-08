@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -79,6 +80,21 @@ def normalize_repo_path(file_path: str, project_root: str) -> str | None:
         return None
 
     return rel_path
+
+
+def normalize_touched_paths(paths: Iterable[str], project_root: str) -> list[str]:
+    """`exchange.files` の各パスをプロジェクトルート相対へ揃える（issue #36の ignore 判定用）。
+
+    ハーネスによって絶対パス（例: opencode の filePath）と相対パス（例: claude の
+    tool_use.input.file_path）が混在するため、絶対パスだけ `normalize_repo_path` へ
+    通して相対化し、プロジェクト外・外部ライブラリのパスは結果から除く。
+    """
+    normalized: list[str] = []
+    for path in paths:
+        rel_path = normalize_repo_path(path, project_root) if path.startswith("/") else path
+        if rel_path is not None:
+            normalized.append(rel_path)
+    return normalized
 
 
 def build_code_touch_rows(

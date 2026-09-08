@@ -524,6 +524,90 @@ def test_parse_exchanges_tool_use_excludes_external(tmp_path: Path) -> None:
     assert len(exchanges[0].files) == 0
 
 
+# ---- .codeatrium/ignore プライバシフィルタ（issue #36） ----
+
+
+def test_index_file_excludes_exchange_touching_ignored_file(tmp_path: Path) -> None:
+    """ignore パターンにマッチするファイルへ触れた exchange は索引されない"""
+    project_root = tmp_path / "proj"
+    codeatrium_dir = project_root / ".codeatrium"
+    codeatrium_dir.mkdir(parents=True)
+    (codeatrium_dir / "ignore").write_text("secrets/*\n")
+    db_path = codeatrium_dir / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Please refactor the auth module. " * 5),
+            make_assistant_entry_with_tool_use("a1", "src/auth.py", "u1"),
+            make_user_entry("u2", "Please rotate the api key file. " * 5, "a1"),
+            make_assistant_entry_with_tool_use("a2", "secrets/api_key.txt", "u2"),
+        ],
+    )
+
+    count = index_file(jsonl, db_path, project_root=project_root)
+
+    con = get_connection(db_path)
+    rows = con.execute("SELECT user_content FROM exchanges").fetchall()
+    con.close()
+
+    assert count == 1
+    assert len(rows) == 1
+    assert "auth module" in rows[0]["user_content"]
+
+
+def test_index_file_reconsiders_previously_ignored_exchange_after_rule_removed(
+    tmp_path: Path,
+) -> None:
+    """cursor は除外分だけ進めない——ignore ルールを外せば次回実行で拾える"""
+    project_root = tmp_path / "proj"
+    codeatrium_dir = project_root / ".codeatrium"
+    codeatrium_dir.mkdir(parents=True)
+    ignore_path = codeatrium_dir / "ignore"
+    ignore_path.write_text("secrets/*\n")
+    db_path = codeatrium_dir / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Please rotate the api key file. " * 5),
+            make_assistant_entry_with_tool_use("a1", "secrets/api_key.txt", "u1"),
+        ],
+    )
+
+    first_count = index_file(jsonl, db_path, project_root=project_root)
+    assert first_count == 0
+
+    ignore_path.unlink()
+    second_count = index_file(jsonl, db_path, project_root=project_root)
+    assert second_count == 1
+
+
+def test_index_file_without_ignore_file_indexes_everything(tmp_path: Path) -> None:
+    """`.codeatrium/ignore` が存在しない場合は何も除外しない（既定の後方互換）"""
+    project_root = tmp_path / "proj"
+    codeatrium_dir = project_root / ".codeatrium"
+    codeatrium_dir.mkdir(parents=True)
+    db_path = codeatrium_dir / "memory.db"
+    init_db(db_path)
+
+    jsonl = tmp_path / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "Please rotate the api key file. " * 5),
+            make_assistant_entry_with_tool_use("a1", "secrets/api_key.txt", "u1"),
+        ],
+    )
+
+    count = index_file(jsonl, db_path, project_root=project_root)
+    assert count == 1
+
+
 def test_index_file_writes_exchange_files(tmp_path: Path) -> None:
     """index_file が exchange_files テーブルに書き込む"""
     db_path = tmp_path / ".codeatrium" / "memory.db"
