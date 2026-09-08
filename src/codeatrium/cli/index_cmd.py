@@ -15,6 +15,7 @@ _HARNESS_CHOICES = ("claude", "codex", "opencode", "omp-pi", "grok")
 # 素朴な "*.jsonl" では拾いすぎる。
 _LOG_PATTERNS = {"codex": "rollout-*.jsonl", "grok": "updates.jsonl"}
 
+
 def _codex_belongs_to_project(rollout: Path, project_root: Path) -> bool:
     """Accept only rollout logs whose recorded cwd is inside project_root."""
     root = project_root.resolve()
@@ -39,6 +40,7 @@ def _codex_belongs_to_project(rollout: Path, project_root: Path) -> bool:
     except OSError:
         return False
     return False
+
 
 def _purge_foreign_codex_exchanges(db: Path, project_root: Path) -> int:
     """Remove previously indexed Codex rollouts outside the active project."""
@@ -68,22 +70,17 @@ def _purge_foreign_codex_exchanges(db: Path, project_root: Path) -> int:
             return 0
         placeholders = ",".join("?" for _ in foreign_ids)
         palace_ids = (
-            "SELECT id FROM palace_objects "
-            f"WHERE exchange_id IN ({placeholders})"
+            f"SELECT id FROM palace_objects WHERE exchange_id IN ({placeholders})"
         )
         con.execute(
             f"DELETE FROM rooms WHERE palace_object_id IN ({palace_ids})",
             foreign_ids,
         )
         con.execute(
-            f"DELETE FROM symbols WHERE palace_object_id IN ({palace_ids})",
-            foreign_ids,
-        )
-        con.execute(
             f"DELETE FROM vec_palace WHERE palace_id IN ({palace_ids})",
             foreign_ids,
         )
-        for table in ("exchange_files", "code_touches", "code_edges", "vec_exchanges"):
+        for table in ("exchange_files", "code_touches", "code_edges"):
             con.execute(
                 f"DELETE FROM {table} WHERE exchange_id IN ({placeholders})",
                 foreign_ids,
@@ -92,9 +89,7 @@ def _purge_foreign_codex_exchanges(db: Path, project_root: Path) -> int:
             f"DELETE FROM palace_objects WHERE exchange_id IN ({placeholders})",
             foreign_ids,
         )
-        con.execute(
-            f"DELETE FROM exchanges WHERE id IN ({placeholders})", foreign_ids
-        )
+        con.execute(f"DELETE FROM exchanges WHERE id IN ({placeholders})", foreign_ids)
         con.execute(
             """
             DELETE FROM sessions

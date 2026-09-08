@@ -262,7 +262,9 @@ def test_distill_exchange_merges_exchange_files(mock_call, tmp_path) -> None:
 # --- save_palace_object ---
 
 
-def test_save_palace_object_symbol_id_uses_3part_hash(tmp_path) -> None:
+def test_save_palace_object_symbol_uses_canonical_id_and_exchange_edge(
+    tmp_path,
+) -> None:
     db_path = tmp_path / "memory.db"
     init_db(db_path)
     _make_exchange(
@@ -276,6 +278,8 @@ def test_save_palace_object_symbol_id_uses_3part_hash(tmp_path) -> None:
     sym.symbol_kind = "method"
     sym.signature = "def bar"
     sym.line = 1
+    sym.end_line = 1
+    sym.lang = ".py"
     resolver.extract.return_value = [sym]
 
     palace = PalaceObject(
@@ -289,15 +293,16 @@ def test_save_palace_object_symbol_id_uses_3part_hash(tmp_path) -> None:
     )
 
     con = get_connection(db_path)
-    row = con.execute("SELECT id, dedup_hash FROM symbols").fetchone()
+    row = con.execute("SELECT id FROM code_symbols").fetchone()
+    edge = con.execute(
+        "SELECT exchange_id, symbol_id FROM code_edges WHERE edge_kind = 'distill'"
+    ).fetchone()
     con.close()
 
-    palace_id = hashlib.sha256(b"palace:ex1").hexdigest()
-    expected_id = hashlib.sha256(f"Foo.bar:src/foo.py:{palace_id}".encode()).hexdigest()
-    expected_dedup = hashlib.sha256(b"Foo.bar:src/foo.py").hexdigest()
-
+    expected_id = hashlib.sha256(b"src/foo.py:Foo.bar").hexdigest()
     assert row["id"] == expected_id
-    assert row["dedup_hash"] == expected_dedup
+    assert edge["exchange_id"] == "ex1"
+    assert edge["symbol_id"] == expected_id
 
 
 def test_save_palace_object_stores_in_db(tmp_path) -> None:
@@ -356,7 +361,7 @@ def test_save_palace_object_skips_symbol_not_in_body(tmp_path) -> None:
     )
 
     con = get_connection(db_path)
-    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0]
     con.close()
 
     assert count == 0
@@ -376,6 +381,8 @@ def test_save_palace_object_includes_symbol_in_body(tmp_path) -> None:
     sym.symbol_kind = "method"
     sym.signature = "def bar"
     sym.line = 1
+    sym.end_line = 1
+    sym.lang = ".py"
     resolver.extract.return_value = [sym]
 
     palace = PalaceObject(
@@ -389,7 +396,7 @@ def test_save_palace_object_includes_symbol_in_body(tmp_path) -> None:
     )
 
     con = get_connection(db_path)
-    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0]
     con.close()
 
     assert count == 1
@@ -474,6 +481,8 @@ def test_save_palace_object_single_char_symbol_requires_word_boundary(
     sym.symbol_kind = "variable"
     sym.signature = "a = 1"
     sym.line = 1
+    sym.end_line = 1
+    sym.lang = ".py"
     sym.file_path = "src/foo.py"
     resolver.extract.return_value = [sym]
 
@@ -488,7 +497,7 @@ def test_save_palace_object_single_char_symbol_requires_word_boundary(
     )
 
     con = get_connection(db_path)
-    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0]
     con.close()
 
     assert count == 0
@@ -512,6 +521,8 @@ def test_save_palace_object_includes_dollar_prefixed_symbol_in_body(
     sym.symbol_kind = "variable"
     sym.signature = "const $trace"
     sym.line = 1
+    sym.end_line = 1
+    sym.lang = ".ts"
     sym.file_path = "src/foo.ts"
     resolver.extract.return_value = [sym]
 
@@ -526,10 +537,11 @@ def test_save_palace_object_includes_dollar_prefixed_symbol_in_body(
     )
 
     con = get_connection(db_path)
-    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0]
     con.close()
 
     assert count == 1
+
 
 def test_save_palace_object_excludes_dollar_symbol_inside_unicode_identifier(
     tmp_path,
@@ -547,6 +559,8 @@ def test_save_palace_object_excludes_dollar_symbol_inside_unicode_identifier(
     sym.symbol_kind = "variable"
     sym.signature = "const $trace"
     sym.line = 1
+    sym.end_line = 1
+    sym.lang = ".ts"
     sym.file_path = "src/foo.ts"
     resolver.extract.return_value = [sym]
 
@@ -561,10 +575,11 @@ def test_save_palace_object_excludes_dollar_symbol_inside_unicode_identifier(
     )
 
     con = get_connection(db_path)
-    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0]
     con.close()
 
     assert count == 0
+
 
 def test_save_palace_object_excludes_dollar_symbol_inside_combining_identifier(
     tmp_path,
@@ -585,6 +600,8 @@ def test_save_palace_object_excludes_dollar_symbol_inside_combining_identifier(
     sym.symbol_kind = "variable"
     sym.signature = "const $trace"
     sym.line = 1
+    sym.end_line = 1
+    sym.lang = ".ts"
     sym.file_path = "src/foo.ts"
     resolver.extract.return_value = [sym]
 
@@ -599,10 +616,11 @@ def test_save_palace_object_excludes_dollar_symbol_inside_combining_identifier(
     )
 
     con = get_connection(db_path)
-    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0]
     con.close()
 
     assert count == 0
+
 
 @pytest.mark.parametrize(
     ("prefix", "expected_count", "description"),
@@ -635,6 +653,8 @@ def test_save_palace_object_handles_dollar_symbol_after_unicode_escape(
     sym.symbol_kind = "variable"
     sym.signature = "const $trace"
     sym.line = 1
+    sym.end_line = 1
+    sym.lang = ".ts"
     sym.file_path = "src/foo.ts"
     resolver.extract.return_value = [sym]
 
@@ -649,10 +669,11 @@ def test_save_palace_object_handles_dollar_symbol_after_unicode_escape(
     )
 
     con = get_connection(db_path)
-    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0]
     con.close()
 
     assert count == expected_count, description
+
 
 @pytest.mark.parametrize(
     ("prefix", "description"),
@@ -701,6 +722,8 @@ def test_save_palace_object_excludes_dollar_symbol_inside_ecmascript_identifier_
     sym.symbol_kind = "variable"
     sym.signature = "const $trace"
     sym.line = 1
+    sym.end_line = 1
+    sym.lang = ".ts"
     sym.file_path = "src/foo.ts"
     resolver.extract.return_value = [sym]
 
@@ -715,7 +738,7 @@ def test_save_palace_object_excludes_dollar_symbol_inside_ecmascript_identifier_
     )
 
     con = get_connection(db_path)
-    count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+    count = con.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0]
     con.close()
 
     assert count == 0, description
@@ -790,6 +813,8 @@ def test_save_palace_object_two_palace_objects_same_symbol(tmp_path) -> None:
     sym.symbol_kind = "method"
     sym.signature = "def bar"
     sym.line = 1
+    sym.end_line = 1
+    sym.lang = ".py"
     resolver.extract.return_value = [sym]
 
     palace = PalaceObject(
@@ -807,14 +832,16 @@ def test_save_palace_object_two_palace_objects_same_symbol(tmp_path) -> None:
     )
 
     con = get_connection(db_path)
-    all_rows = con.execute("SELECT id, dedup_hash FROM symbols").fetchall()
+    symbol_rows = con.execute("SELECT id FROM code_symbols").fetchall()
+    edge_rows = con.execute(
+        "SELECT exchange_id, symbol_id FROM code_edges WHERE edge_kind = 'distill'"
+    ).fetchall()
     con.close()
 
-    assert len(all_rows) == 2
-    ids = {row["id"] for row in all_rows}
-    dedup_hashes = {row["dedup_hash"] for row in all_rows}
-    assert len(ids) == 2  # Two different ids
-    assert len(dedup_hashes) == 1  # Same dedup_hash
+    expected_id = hashlib.sha256(b"src/foo.py:Foo.bar").hexdigest()
+    assert [row["id"] for row in symbol_rows] == [expected_id]
+    assert {row["exchange_id"] for row in edge_rows} == {"ex1", "ex2"}
+    assert {row["symbol_id"] for row in edge_rows} == {expected_id}
 
 
 def test_save_palace_object_saves_vec(tmp_path) -> None:

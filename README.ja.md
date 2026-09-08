@@ -92,6 +92,7 @@ loci init
 | `loci init` | `.codeatrium/` を初期化し、共通 `AGENTS.md` 指示を追加、Claude Code フックを登録（`--no-hooks` で省略可） |
 | `loci index [--harness all\|claude\|codex\|opencode\|omp-pi\|grok]` | 新しいセッションログをインデックス（既定は検出した全 harness） |
 | `loci distill [--limit N]` | 未蒸留の exchange を LLM で蒸留 |
+| `loci gc` | `memory.db` を `.bak` に安全にスナップショットし、孤立した palace/vector/session レコードだけを削除。現行 backup と直近3世代を残して `VACUUM` |
 | `loci search "クエリ" --json` | セマンティック検索（エージェント向け）。`--branch NAME` で git ブランチ絞り込み |
 | `loci context --symbol "名前" --json` | コードシンボル → 過去の会話（軽量。`--full` で会話原文も含める） |
 | `loci context --branch "名前" --json` | git ブランチ → 過去の会話（未蒸留の exchange も含む） |

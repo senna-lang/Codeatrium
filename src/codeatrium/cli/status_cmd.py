@@ -44,7 +44,7 @@ def status(
             "SELECT COUNT(*) FROM exchanges WHERE distill_status = 'pending'"
         ).fetchone()[0]
         palace_count = con.execute("SELECT COUNT(*) FROM palace_objects").fetchone()[0]
-        symbol_count = con.execute("SELECT COUNT(*) FROM symbols").fetchone()[0]
+        symbol_count = con.execute("SELECT COUNT(*) FROM code_symbols").fetchone()[0]
     finally:
         con.close()
     cfg = load_config(root)

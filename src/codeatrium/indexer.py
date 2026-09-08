@@ -986,7 +986,7 @@ def index_opencode_db(
                 # source_turn_id / ply_start / ply_end / session_ref を新しい
                 # 位置・スキームへその場で書き換える。id/canonical_exchange_id は
                 # 変更しない — code_touches / exchange_files / palace_objects /
-                # vec_exchanges からの exchange_id 参照はそのまま有効であり、以後の
+                # code_edges からの exchange_id 参照はそのまま有効であり、以後の
                 # 重複判定は本関数の事前フィルタのみで行われるため書き換え不要。
                 #
                 # 同一セッション内で (user_content, agent_content) が完全一致する

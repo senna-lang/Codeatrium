@@ -230,8 +230,8 @@ def _symbol_mentioned_in_body(symbol_name: str, body_text: str) -> bool:
     while start != -1:
         end = start + len(symbol_name)
         previous_is_identifier_part = _is_identifier_part_before(body_text, start)
-        next_is_identifier_part = (
-            end < len(body_text) and _is_identifier_part(body_text[end])
+        next_is_identifier_part = end < len(body_text) and _is_identifier_part(
+            body_text[end]
         )
         if not previous_is_identifier_part and not next_is_identifier_part:
             return True
@@ -322,9 +322,11 @@ def save_palace_object(
                 (palace_id, blob),
             )
 
-        # ⑤ tree-sitter シンボル解決
+        # ⑤ tree-sitter シンボル解決。旧 `symbols` の palace ごとの重複ではなく、
+        # code_symbols（正本）と code_edges（exchange との関係）へ保存する。
         if resolver is None:
             from codeatrium.resolver import SymbolResolver
+
             resolver = SymbolResolver()
 
         # Fetch exchange body text for symbol body-mention filter
@@ -354,32 +356,42 @@ def save_palace_object(
                 if not _symbol_mentioned_in_body(sym.symbol_name, body_text):
                     continue
 
-                # Compute sym_id with palace_id, dedup_hash separate
-                sym_id = sha256(f"{sym.symbol_name}:{sym.file_path}:{palace_id}")
-                dedup_hash = sha256(f"{sym.symbol_name}:{sym.file_path}")
-
-                sym_exists = con.execute(
-                    "SELECT 1 FROM symbols WHERE id = ?", (sym_id,)
-                ).fetchone()
-                if sym_exists is None:
-                    con.execute(
-                        """
-                        INSERT INTO symbols
-                            (id, palace_object_id, symbol_name, symbol_kind,
-                             file_path, signature, line, dedup_hash)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            sym_id,
-                            palace_id,
-                            sym.symbol_name,
-                            sym.symbol_kind,
-                            sym.file_path,
-                            sym.signature,
-                            sym.line,
-                            dedup_hash,
-                        ),
-                    )
+                file_path = sym.file_path
+                if project_root:
+                    normalized = normalize_repo_path(file_path, project_root)
+                    if normalized is None:
+                        continue
+                    file_path = normalized
+                symbol_id = sha256(f"{file_path}:{sym.symbol_name}")
+                con.execute(
+                    """
+                    INSERT OR IGNORE INTO code_symbols
+                        (id, file_path, symbol_name, symbol_kind, signature,
+                         line, end_line, lang, resolved_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        symbol_id,
+                        file_path,
+                        sym.symbol_name,
+                        sym.symbol_kind,
+                        sym.signature,
+                        sym.line,
+                        sym.end_line,
+                        sym.lang,
+                        datetime.datetime.now(datetime.UTC).isoformat(),
+                    ),
+                )
+                edge_id = sha256(f"{exchange_id}:{file_path}:{symbol_id}:distill")
+                con.execute(
+                    """
+                    INSERT OR IGNORE INTO code_edges
+                        (id, exchange_id, file_path, symbol_id, edge_kind,
+                         granularity, confidence, added, ts)
+                    VALUES (?, ?, ?, ?, 'distill', 'line', 1.0, 0, NULL)
+                    """,
+                    (edge_id, exchange_id, file_path, symbol_id),
+                )
 
         con.execute(
             "UPDATE exchanges SET distilled_at = ?, distill_status = 'distilled' WHERE id = ?",
@@ -417,13 +429,16 @@ def distill_all(
     # 蒸留対象外の exchange を skipped にマーク:
     # - 1-exchange セッション
     # - distill_min_chars 未満（ワンフレーズ指示・システムメッセージ等）
-    con.execute("""
+    con.execute(
+        """
         UPDATE exchanges SET distilled_at = 'skipped', distill_status = 'skipped'
         WHERE distilled_at IS NULL
           AND ((SELECT COUNT(*) FROM exchanges e2
                 WHERE e2.conversation_id = exchanges.conversation_id) < 2
                OR LENGTH(user_content) + LENGTH(agent_content) < ?)
-    """, (distill_min_chars,))
+    """,
+        (distill_min_chars,),
+    )
     con.commit()
 
     query = """
