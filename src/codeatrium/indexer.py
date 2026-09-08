@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,6 +53,15 @@ class Exchange:
     agent_content: str
     files: list[str] = field(default_factory=list)
     git_branch: str | None = None
+
+
+@dataclass
+class _JsonlChunk:
+    """追記区間の JSONL entry と、永続カーソル更新に必要なバイト終端位置。"""
+
+    entries: list[dict | None]
+    ply_offset: int
+    end_offsets: list[int]
 
 
 # ---- 内部ヘルパー ----
@@ -213,11 +223,54 @@ def _load_raw_entries(jsonl_path: Path, last_ply_end: int) -> list[dict | None]:
     return raw_entries
 
 
+def _load_incremental_raw_entries(
+    jsonl_path: Path, byte_offset: int, ply_offset: int
+) -> _JsonlChunk:
+    """永続バイトカーソル以降だけを読み、成功パース行の座標を維持する。"""
+    if not jsonl_path.exists():
+        return _JsonlChunk([], ply_offset, [])
+
+    entries: list[dict | None] = []
+    end_offsets: list[int] = []
+    with jsonl_path.open("rb") as stream:
+        stream.seek(byte_offset)
+        for line in stream:
+            end_offset = stream.tell()
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
+                end_offsets.append(end_offset)
+    return _JsonlChunk(entries, ply_offset, end_offsets)
+
+
+def _jsonl_cursor_offset(cursor: str | None) -> int | None:
+    """v2 JSONL カーソルから seek 用バイト位置を取り出す。"""
+    prefix = "v2:jsonl:"
+    if cursor is None or not cursor.startswith(prefix):
+        return None
+    try:
+        return int(cursor.removeprefix(prefix).split(":", maxsplit=1)[0])
+    except ValueError:
+        return None
+
+
+def _jsonl_cursor(byte_offset: int, exchange_id: str) -> str:
+    """位置に依存しない exchange id と次回 seek 位置を永続化する。"""
+    return f"v2:jsonl:{byte_offset}:{exchange_id}"
+
+
 def parse_exchanges(
     jsonl_path: Path,
     min_chars: int = 50,
     last_ply_end: int = -1,
     raw_entries: list[dict | None] | None = None,
+    ply_offset: int = 0,
 ) -> list[Exchange]:
     """
     .jsonl ファイルを読んで exchange リストを返す。
@@ -276,7 +329,7 @@ def parse_exchanges(
         if len(combined) < min_chars:
             continue
 
-        user_uuid = user_entry.get("uuid", f"{start}")
+        user_uuid = user_entry.get("uuid", f"{ply_offset + start}")
         git_branch_raw = user_entry.get("gitBranch", "")
         git_branch = (
             git_branch_raw
@@ -292,8 +345,8 @@ def parse_exchanges(
             Exchange(
                 id=exchange_id,
                 conversation_id=conversation_id,
-                ply_start=start,
-                ply_end=end,
+                ply_start=ply_offset + start,
+                ply_end=ply_offset + end,
                 user_content=user_text,
                 agent_content=agent_text,
                 files=tool_files,
@@ -309,6 +362,7 @@ def parse_codex_exchanges(
     min_chars: int = 50,
     last_ply_end: int = -1,
     raw_entries: list[dict | None] | None = None,
+    ply_offset: int = 0,
 ) -> list[Exchange]:
     """Codex rollout JSONL をユーザーターン単位の exchange に分割する。"""
     if raw_entries is None:
@@ -342,7 +396,7 @@ def parse_codex_exchanges(
         if len(user_text + agent_text) < min_chars:
             continue
 
-        turn_id = _codex_turn_id(raw_entries, start) or f"ply:{start}"
+        turn_id = _codex_turn_id(raw_entries, start) or f"ply:{ply_offset + start}"
         touch_slice = raw_entries[start : end + 1]
         touches = codex_adapter.extract_code_touches(touch_slice)
         files = list(dict.fromkeys(touch.file_path for touch in touches))
@@ -350,8 +404,8 @@ def parse_codex_exchanges(
             Exchange(
                 id=sha256(f"{conversation_id}:{turn_id}"),
                 conversation_id=conversation_id,
-                ply_start=start,
-                ply_end=end,
+                ply_start=ply_offset + start,
+                ply_end=ply_offset + end,
                 user_content=user_text,
                 agent_content=agent_text,
                 files=files,
@@ -427,9 +481,9 @@ def parse_grok_exchanges(
     min_chars: int = 50,
     last_ply_end: int = -1,
     raw_entries: list[dict | None] | None = None,
+    ply_offset: int = 0,
 ) -> list[Exchange]:
     """grok の ACP セッション JSONL をユーザー発話単位の exchange に分割する。
-
     envelope は `{timestamp, method, params: {sessionId, update}}`。会話は
     `user_message_chunk` / `agent_message_chunk` で届く（実測ではどちらも1エントリに
     1メッセージが収まり、連続分割はされない）。`agent_thought_chunk` は思考なので
@@ -468,10 +522,10 @@ def parse_grok_exchanges(
         files = list(dict.fromkeys(touch.file_path for touch in touches))
         exchanges.append(
             Exchange(
-                id=sha256(f"{conversation_id}:{start}"),
+                id=sha256(f"{conversation_id}:{ply_offset + start}"),
                 conversation_id=conversation_id,
-                ply_start=start,
-                ply_end=end,
+                ply_start=ply_offset + start,
+                ply_end=ply_offset + end,
                 user_content=user_text,
                 agent_content=agent_text,
                 files=files,
@@ -510,9 +564,9 @@ def parse_omp_pi_exchanges(
     min_chars: int = 50,
     last_ply_end: int = -1,
     raw_entries: list[dict | None] | None = None,
+    ply_offset: int = 0,
 ) -> list[Exchange]:
     """omp-pi のセッション JSONL をユーザー発話単位の exchange に分割する。
-
     envelope は `{type, id, parentId, timestamp, message}`。role は user / assistant に加えて
     toolResult / developer があり、message 以外の type（custom が実測 6553件）も混ざるため、
     exchange 境界は `type=="message"` かつ `role=="user"` に限定する。
@@ -556,10 +610,12 @@ def parse_omp_pi_exchanges(
         files = list(dict.fromkeys(touch.file_path for touch in touches))
         exchanges.append(
             Exchange(
-                id=sha256(f"{conversation_id}:{user_entry.get('id', start)}"),
+                id=sha256(
+                    f"{conversation_id}:{user_entry.get('id', ply_offset + start)}"
+                ),
                 conversation_id=conversation_id,
-                ply_start=start,
-                ply_end=end,
+                ply_start=ply_offset + start,
+                ply_end=ply_offset + end,
                 user_content=user_text,
                 agent_content=agent_text,
                 files=files,
@@ -652,6 +708,7 @@ def parse_opencode_exchanges(
     source_path: str,
     raw_entries: list[dict | None],
     min_chars: int = 50,
+    ply_offset: int = 0,
 ) -> list[Exchange]:
     """OpenCode の message/part envelope 列をユーザーメッセージ単位の exchange に分割する。
 
@@ -698,8 +755,8 @@ def parse_opencode_exchanges(
             Exchange(
                 id=sha256(f"{conversation_id}:{user_message_id}"),
                 conversation_id=conversation_id,
-                ply_start=start,
-                ply_end=end,
+                ply_start=ply_offset + start,
+                ply_end=ply_offset + end,
                 user_content=user_text,
                 agent_content=agent_text,
                 files=files,
@@ -765,22 +822,67 @@ def _parse_opencode_row(
         return None
 
 
-def _load_opencode_raw_entries(
-    src: sqlite3.Connection, session_id: str
-) -> tuple[list[dict | None], str]:
-    """OpenCode session DB から message/part を (time_created, id) 順の envelope 列にする。
+@dataclass
+class _OpenCodeChunk:
+    """SQLite の追記区間を復元した結果と、次回の stable row cursor。"""
 
-    id は opencode 側で時刻順に単調生成される保証がないため、time_created を
-    第一キーにし、id を tie-break にする。started_at には最初の envelope の時刻を使う
-    （DB ファイルの mtime は全セッションで同一になり使えないため）。
+    entries: list[dict | None]
+    started_at: str
+    message_rowid: int
+    part_rowid: int
+
+    def __iter__(self) -> Iterator[list[dict | None] | str]:
+        """旧 private loader の `(entries, started_at)` 展開を互換維持する。"""
+        yield self.entries
+        yield self.started_at
+
+
+def _opencode_cursor(cursor: str | None) -> tuple[int, int] | None:
+    """v2 OpenCode カーソルから message/part の SQLite rowid を取り出す。"""
+    prefix = "v2:opencode:"
+    if cursor is None or not cursor.startswith(prefix):
+        return None
+    parts = cursor.removeprefix(prefix).split(":", maxsplit=2)
+    if len(parts) != 3:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def _make_opencode_cursor(message_rowid: int, part_rowid: int, exchange_id: str) -> str:
+    """SQLite の追記境界を stable exchange id とともに永続化する。"""
+    return f"v2:opencode:{message_rowid}:{part_rowid}:{exchange_id}"
+
+
+def _load_opencode_raw_entries(
+    src: sqlite3.Connection,
+    session_id: str,
+    message_rowid: int = 0,
+    part_rowid: int = 0,
+) -> _OpenCodeChunk:
+    """OpenCode DB の未処理 message/part だけを時刻順 envelope 列へ復元する。
+
+    SQLite rowid は挿入順で単調に増えるため、OpenCode の非単調な公開 id や
+    time_created と違い、追記の seek cursor に使える。exchange identity は
+    user message id 由来のままで、rowid に依存しない。
     """
     messages = src.execute(
-        "SELECT id, time_created, data FROM message WHERE session_id = ?",
-        (session_id,),
+        """
+        SELECT rowid AS source_rowid, id, time_created, data
+        FROM message
+        WHERE session_id = ? AND rowid > ?
+        """,
+        (session_id, message_rowid),
     ).fetchall()
     parts = src.execute(
-        "SELECT id, message_id, time_created, data FROM part WHERE session_id = ?",
-        (session_id,),
+        """
+        SELECT rowid AS source_rowid, id, message_id, time_created, data
+        FROM part
+        WHERE session_id = ? AND rowid > ?
+        """,
+        (session_id, part_rowid),
     ).fetchall()
 
     ordered: list[tuple[int, str, dict]] = []
@@ -794,11 +896,18 @@ def _load_opencode_raw_entries(
             ordered.append(parsed)
     ordered.sort(key=lambda item: (item[0], item[1]))
 
-    raw_entries: list[dict | None] = [entry for _, _, entry in ordered]
-    started_at = (
-        _epoch_ms_to_iso(ordered[0][0]) if ordered else datetime.now(UTC).isoformat()
+    return _OpenCodeChunk(
+        entries=[entry for _, _, entry in ordered],
+        started_at=(
+            _epoch_ms_to_iso(ordered[0][0])
+            if ordered
+            else datetime.now(UTC).isoformat()
+        ),
+        message_rowid=max(
+            (row["source_rowid"] for row in messages), default=message_rowid
+        ),
+        part_rowid=max((row["source_rowid"] for row in parts), default=part_rowid),
     )
-    return raw_entries, started_at
 
 
 def _is_legacy_opencode_turn_id(source_turn_id: str) -> bool:
@@ -903,9 +1012,34 @@ def index_opencode_db(
                 for candidates in legacy_by_content.values():
                     candidates.sort(key=lambda row: row["ply_start"])
 
-                raw_entries, started_at = _load_opencode_raw_entries(src, session_id)
+                cursor_row = con.execute(
+                    "SELECT cursor FROM sessions "
+                    "WHERE harness = 'opencode' AND source_session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                parsed_cursor = _opencode_cursor(
+                    cursor_row["cursor"] if cursor_row is not None else None
+                )
+                if parsed_cursor is None or legacy_by_content:
+                    chunk = _load_opencode_raw_entries(src, session_id)
+                    ply_offset = 0
+                else:
+                    last_ply_row = con.execute(
+                        "SELECT last_ply_end FROM conversations WHERE source_path = ?",
+                        (source_path,),
+                    ).fetchone()
+                    ply_offset = (
+                        last_ply_row["last_ply_end"] + 1
+                        if last_ply_row is not None
+                        else 0
+                    )
+                    chunk = _load_opencode_raw_entries(src, session_id, *parsed_cursor)
+                raw_entries = chunk.entries
                 exchanges = parse_opencode_exchanges(
-                    source_path, raw_entries, min_chars=min_chars
+                    source_path,
+                    raw_entries,
+                    min_chars=min_chars,
+                    ply_offset=ply_offset,
                 )
                 new_exchanges = []
                 for exchange in exchanges:
@@ -957,22 +1091,18 @@ def index_opencode_db(
                     opencode_adapter, "extract_file_renames", None
                 )
                 for exchange in new_exchanges:
-                    entry_slice = raw_entries[
-                        exchange.ply_start : exchange.ply_end + 1
-                    ]
+                    start = exchange.ply_start - ply_offset
+                    end = exchange.ply_end - ply_offset
+                    entry_slice = raw_entries[start : end + 1]
                     renames = (
                         tuple(
                             FileRename(old_path, new_path, ts)
-                            for old_path, new_path, ts in extract_renames(
-                                entry_slice
-                            )
+                            for old_path, new_path, ts in extract_renames(entry_slice)
                         )
                         if extract_renames is not None
                         else ()
                     )
-                    touches = tuple(
-                        opencode_adapter.extract_code_touches(entry_slice)
-                    )
+                    touches = tuple(opencode_adapter.extract_code_touches(entry_slice))
                     if touches or renames:
                         artifacts.append(
                             ExchangeArtifacts(
@@ -1000,7 +1130,11 @@ def index_opencode_db(
                         )
                         for exchange in new_exchanges
                     ),
-                    next_cursor=f"v1:ply:{new_exchanges[-1].ply_end}",
+                    next_cursor=_make_opencode_cursor(
+                        chunk.message_rowid,
+                        chunk.part_rowid,
+                        new_exchanges[-1].id,
+                    ),
                     artifacts=tuple(artifacts),
                 )
                 total += ingest_parse_result(
@@ -1010,7 +1144,7 @@ def index_opencode_db(
                         source_session_id=session_id,
                         primary_ref=source_path,
                         project_key=str(project_root),
-                        started_at=started_at,
+                        started_at=chunk.started_at,
                     ),
                     result,
                 )
@@ -1020,6 +1154,77 @@ def index_opencode_db(
         return total
     finally:
         src.close()
+
+
+def _is_legacy_jsonl_turn_id(source_turn_id: str | None) -> bool:
+    """旧 JSONL indexer の ply_start 由来 source_turn_id を判定する。"""
+    return (
+        source_turn_id is not None
+        and source_turn_id.isdigit()
+        and len(source_turn_id) < 64
+    )
+
+
+def _reconcile_legacy_jsonl_exchanges(
+    con: sqlite3.Connection,
+    harness: str,
+    source_session_id: str,
+    source_path: str,
+    exchanges: list[Exchange],
+) -> tuple[list[Exchange], list[Exchange]]:
+    """旧 ply id の exchange を内容対応で stable id へ in-place 移行する。"""
+    existing_rows = con.execute(
+        """
+        SELECT source_turn_id, ply_start, user_content, agent_content
+        FROM exchanges
+        WHERE harness = ? AND source_session_id = ?
+        """,
+        (harness, source_session_id),
+    ).fetchall()
+    known_exchange_ids = {
+        row["source_turn_id"]
+        for row in existing_rows
+        if isinstance(row["source_turn_id"], str)
+    }
+    legacy_by_content: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in existing_rows:
+        if _is_legacy_jsonl_turn_id(row["source_turn_id"]):
+            legacy_by_content.setdefault(
+                (row["user_content"], row["agent_content"]), []
+            ).append(row)
+    for candidates in legacy_by_content.values():
+        candidates.sort(key=lambda row: row["ply_start"])
+
+    new_exchanges: list[Exchange] = []
+    migrated_exchanges: list[Exchange] = []
+    for exchange in exchanges:
+        if exchange.id in known_exchange_ids:
+            continue
+        candidates = legacy_by_content.get(
+            (exchange.user_content, exchange.agent_content)
+        )
+        if not candidates:
+            new_exchanges.append(exchange)
+            continue
+        legacy_row = candidates.pop(0)
+        con.execute(
+            """
+            UPDATE exchanges
+            SET source_turn_id = ?, ply_start = ?, ply_end = ?, session_ref = ?
+            WHERE harness = ? AND source_session_id = ? AND source_turn_id = ?
+            """,
+            (
+                exchange.id,
+                exchange.ply_start,
+                exchange.ply_end,
+                f"{source_path}#ply={exchange.ply_start}-{exchange.ply_end}",
+                harness,
+                source_session_id,
+                legacy_row["source_turn_id"],
+            ),
+        )
+        migrated_exchanges.append(exchange)
+    return new_exchanges, migrated_exchanges
 
 
 def index_file(
@@ -1062,16 +1267,28 @@ def index_file(
     else:
         raise ValueError(f"Unsupported harness: {harness}")
 
-    conversation_id = sha256(str(jsonl_path))
+    source_session_id = str(jsonl_path.resolve())
+    conversation_id = sha256(f"{harness}:{source_session_id}")
     con = get_connection(db_path)
 
-    # 既存 conversation の last_ply_end を取得
+    # `last_ply_end` は表示座標の継続にだけ使う。追記の検出・読み飛ばしは
+    # sessions.cursor の byte offset と stable exchange id が正本になる。
     row = con.execute(
         "SELECT last_ply_end FROM conversations WHERE id = ?", (conversation_id,)
     ).fetchone()
     last_ply_end = row["last_ply_end"] if row is not None else -1
-
-    raw_entries = _load_raw_entries(jsonl_path, last_ply_end)
+    cursor_row = con.execute(
+        "SELECT cursor FROM sessions WHERE harness = ? AND source_session_id = ?",
+        (harness, source_session_id),
+    ).fetchone()
+    cursor = cursor_row["cursor"] if cursor_row is not None else None
+    byte_offset = _jsonl_cursor_offset(cursor)
+    legacy_cursor = cursor is not None and cursor.startswith("v1:ply:")
+    ply_offset = last_ply_end + 1 if byte_offset is not None else 0
+    chunk = _load_incremental_raw_entries(
+        jsonl_path, byte_offset if byte_offset is not None else 0, ply_offset
+    )
+    raw_entries = chunk.entries
     if harness == "omp-pi":
         # 編集記録の抽出より前に cwd を載せる（相対パスの絶対化に必要）
         _annotate_omp_pi_cwd(jsonl_path, raw_entries)
@@ -1081,10 +1298,14 @@ def index_file(
         exchanges = parse(
             jsonl_path,
             min_chars=min_chars,
-            last_ply_end=last_ply_end,
             raw_entries=raw_entries,
+            ply_offset=chunk.ply_offset,
         )
-    new_exchanges = [ex for ex in exchanges if ex.ply_start > last_ply_end]
+    new_exchanges = (
+        exchanges
+        if legacy_cursor
+        else [ex for ex in exchanges if ex.ply_start > last_ply_end]
+    )
     if project_root is not None:
         # issue #36: 機微パスへ触れた exchange は永続化前に除外する。cursor は
         # 除外分だけ進めない——後から ignore パターンを外した場合に遡って拾える。
@@ -1096,8 +1317,33 @@ def index_file(
                 normalize_touched_paths(ex.files, str(project_root))
             )
         ]
+    new_exchanges, migrated_exchanges = _reconcile_legacy_jsonl_exchanges(
+        con,
+        harness,
+        source_session_id,
+        str(jsonl_path),
+        new_exchanges,
+    )
 
     if not new_exchanges:
+        if migrated_exchanges:
+            migrated_last = migrated_exchanges[-1]
+            con.execute(
+                """
+                UPDATE sessions
+                SET cursor = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE harness = ? AND source_session_id = ?
+                """,
+                (
+                    _jsonl_cursor(
+                        chunk.end_offsets[migrated_last.ply_end - chunk.ply_offset],
+                        migrated_last.id,
+                    ),
+                    harness,
+                    source_session_id,
+                ),
+            )
+            con.commit()
         con.close()
         return 0
 
@@ -1110,7 +1356,6 @@ def index_file(
         ParseResult,
     )
 
-    source_session_id = str(jsonl_path.resolve())
     session = CanonicalSession(
         harness=harness,
         source_session_id=source_session_id,
@@ -1123,7 +1368,9 @@ def index_file(
     artifacts = []
     extract_renames = getattr(touch_adapter, "extract_file_renames", None)
     for exchange in new_exchanges:
-        entry_slice = raw_entries[exchange.ply_start : exchange.ply_end + 1]
+        start = exchange.ply_start - chunk.ply_offset
+        end = exchange.ply_end - chunk.ply_offset
+        entry_slice = raw_entries[start : end + 1]
         renames = (
             tuple(
                 FileRename(old_path, new_path, ts)
@@ -1136,7 +1383,7 @@ def index_file(
         if touches or renames:
             artifacts.append(
                 ExchangeArtifacts(
-                    source_turn_id=str(exchange.ply_start),
+                    source_turn_id=exchange.id,
                     code_touches=touches,
                     file_renames=renames,
                 )
@@ -1147,7 +1394,7 @@ def index_file(
                 harness=harness,
                 session_ref=f"{jsonl_path}#ply={exchange.ply_start}-{exchange.ply_end}",
                 source_session_id=source_session_id,
-                source_turn_id=str(exchange.ply_start),
+                source_turn_id=exchange.id,
                 ply_start=exchange.ply_start,
                 ply_end=exchange.ply_end,
                 user_content=exchange.user_content,
@@ -1157,12 +1404,13 @@ def index_file(
             )
             for exchange in new_exchanges
         ),
-        next_cursor=f"v1:ply:{new_exchanges[-1].ply_end}",
+        next_cursor=_jsonl_cursor(
+            chunk.end_offsets[new_exchanges[-1].ply_end - chunk.ply_offset],
+            new_exchanges[-1].id,
+        ),
         artifacts=tuple(artifacts),
     )
     count = ingest_parse_result(con, session, result)
     con.commit()
     con.close()
     return count
-
-

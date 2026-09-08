@@ -5,6 +5,8 @@
 import json
 from pathlib import Path
 
+from codeatrium.core.ingest import ingest_parse_result
+from codeatrium.core.models import CanonicalExchange, CanonicalSession, ParseResult
 from codeatrium.db import get_connection, init_db
 from codeatrium.indexer import index_file, parse_exchanges
 from codeatrium.utils import sha256
@@ -398,10 +400,150 @@ def test_index_file_incremental(tmp_path: Path) -> None:
     count2 = index_file(jsonl, db_path)
     assert count2 == 1  # 新規の1件だけ
 
+    # もう1 exchange を追記しても座標は連続する。
+    with jsonl.open("a") as f:
+        f.write(
+            json.dumps(
+                make_user_entry("u3", "三つ目の質問です。詳しく教えてください。" * 5, "a2"),
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                make_assistant_entry(
+                    "a3", "三つ目の説明です。ご参考になれば幸いです。" * 5, "u3"
+                ),
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    assert index_file(jsonl, db_path) == 1
+
     con = get_connection(db_path)
-    rows = con.execute("SELECT * FROM exchanges").fetchall()
-    assert len(rows) == 2  # 合計2件
+    rows = con.execute(
+        "SELECT ply_start, ply_end FROM exchanges ORDER BY rowid"
+    ).fetchall()
     con.close()
+
+    assert [(row["ply_start"], row["ply_end"]) for row in rows] == [
+        (0, 1),
+        (2, 3),
+        (4, 5),
+    ]
+
+
+def test_index_file_parses_only_appended_jsonl_entries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """再インデックスでは追記行だけを JSON パースする（issue #22）。"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+    jsonl = tmp_path / "session.jsonl"
+    existing_entries = [
+        entry
+        for index in range(20)
+        for entry in (
+            make_user_entry(f"u{index}", f"既存の質問 {index} です。" * 10),
+            make_assistant_entry(
+                f"a{index}", f"既存の回答 {index} です。" * 10, f"u{index}"
+            ),
+        )
+    ]
+    write_jsonl(jsonl, existing_entries)
+    assert index_file(jsonl, db_path) == 20
+
+    with jsonl.open("a", encoding="utf-8") as stream:
+        stream.write(
+            json.dumps(
+                make_user_entry("u-new", "追記した質問です。" * 10), ensure_ascii=False
+            )
+            + "\n"
+        )
+        stream.write(
+            json.dumps(
+                make_assistant_entry("a-new", "追記した回答です。" * 10, "u-new"),
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+    loads = json.loads
+    parse_calls = 0
+
+    def count_loads(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return loads(*args, **kwargs)
+
+    monkeypatch.setattr("codeatrium.indexer.json.loads", count_loads)
+
+    assert index_file(jsonl, db_path) == 1
+    assert parse_calls == 2
+
+
+def test_index_file_migrates_legacy_ply_cursor_without_duplicates(
+    tmp_path: Path,
+) -> None:
+    """v1 ply cursor の既存 exchange は stable id へ in-place 移行する（issue #22）。"""
+    db_path = tmp_path / ".codeatrium" / "memory.db"
+    init_db(db_path)
+    jsonl = tmp_path / "session.jsonl"
+    write_jsonl(
+        jsonl,
+        [
+            make_user_entry("u1", "最初の質問です。" * 10),
+            make_assistant_entry("a1", "最初の回答です。" * 10, "u1"),
+            make_user_entry("u2", "二つ目の質問です。" * 10, "a1"),
+            make_assistant_entry("a2", "二つ目の回答です。" * 10, "u2"),
+        ],
+    )
+    legacy = parse_exchanges(jsonl)
+    source_session_id = str(jsonl.resolve())
+
+    con = get_connection(db_path)
+    ingest_parse_result(
+        con,
+        CanonicalSession(
+            harness="claude",
+            source_session_id=source_session_id,
+            primary_ref=str(jsonl),
+            project_key="",
+            started_at="2026-01-01T00:00:00+00:00",
+        ),
+        ParseResult(
+            exchanges=tuple(
+                CanonicalExchange(
+                    harness="claude",
+                    session_ref=(
+                        f"{jsonl}#ply={exchange.ply_start}-{exchange.ply_end}"
+                    ),
+                    source_session_id=source_session_id,
+                    source_turn_id=str(exchange.ply_start),
+                    ply_start=exchange.ply_start,
+                    ply_end=exchange.ply_end,
+                    user_content=exchange.user_content,
+                    agent_content=exchange.agent_content,
+                )
+                for exchange in legacy
+            ),
+            next_cursor=f"v1:ply:{legacy[-1].ply_end}",
+        ),
+    )
+    con.commit()
+    con.close()
+
+    assert index_file(jsonl, db_path) == 0
+
+    con = get_connection(db_path)
+    rows = con.execute(
+        "SELECT source_turn_id, ply_start, ply_end FROM exchanges ORDER BY rowid"
+    ).fetchall()
+    con.close()
+
+    assert len(rows) == 2
+    assert [(row["ply_start"], row["ply_end"]) for row in rows] == [(0, 1), (2, 3)]
+    assert {row["source_turn_id"] for row in rows} == {exchange.id for exchange in legacy}
 
 
 def test_parse_exchanges_excludes_compaction_content(tmp_path: Path) -> None:
