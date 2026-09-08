@@ -293,6 +293,22 @@ def test_context_u1_symbol_match(tmp_path, monkeypatch):
     assert "user_content" not in data[0]
 
 
+def test_context_u1_symbol_match_text_output_shows_file_path(tmp_path, monkeypatch):
+    """回帰: text-mode（--json 無し）でも symbol ヒットの実ファイルパスが表示されること。
+    label は symbol_name を優先するため（`label = h.symbol_name or h.file_path`）、
+    file_path 専用行が別途無いと non-JSON 出力から実ファイルパスが消える（#58 review）。
+    """
+    monkeypatch.chdir(tmp_path)
+    db, con = _setup(tmp_path)
+    _insert_code_edge_fixture(con)
+    con.close()
+
+    result = runner.invoke(app, ["context", "src/foo.py:greet"])
+    assert result.exit_code == 0
+    assert "src/foo.py" in result.output
+
+
+
 def test_context_u1_full_flag_includes_content(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     db, con = _setup(tmp_path)

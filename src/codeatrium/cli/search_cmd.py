@@ -363,6 +363,7 @@ def _print_context_hits(hits, json_output: bool, full: bool) -> None:
             label = h.symbol_name or h.file_path
             source_note = "" if h.distilled else " [undistilled: code-touch based]"
             typer.echo(f"\n[{i}] {h.match_kind} (confidence={h.confidence:.2f}) {label}{source_note}")
+            typer.echo(f"    {h.file_path}")
             if h.exchange_core:
                 typer.echo(f"    Core: {h.exchange_core}")
             if h.verbatim_ref:
