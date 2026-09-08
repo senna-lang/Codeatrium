@@ -1,7 +1,7 @@
 """
 SymbolResolver のテスト
 
-tree-sitter で Python / TypeScript / Go のシンボルを抽出する。
+tree-sitter で Python / TypeScript / Go / Rust / Java / C# / Ruby のシンボルを抽出する。
 抽出対象: 関数・クラス・メソッド（symbol_name / symbol_kind / signature / line）
 """
 
@@ -43,7 +43,7 @@ def test_extract_source_matches_extract_for_equivalent_bytes(tmp_path):
 
 
 def test_extract_source_unsupported_suffix_returns_empty(tmp_path):
-    assert resolver.extract_source(b"anything", "foo.rs") == []
+    assert resolver.extract_source(b"anything", "foo.kt") == []
 
 
 def test_python_method(tmp_path):
@@ -301,6 +301,195 @@ def test_go_lang(tmp_path):
     assert s.lang == ".go"
 
 
+# ---- Rust ----
+
+
+def test_rust_function(tmp_path):
+    f = tmp_path / "foo.rs"
+    f.write_text("fn greet(name: &str) -> String {\n    name.to_string()\n}\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "greet" in names
+
+
+def test_rust_struct(tmp_path):
+    f = tmp_path / "foo.rs"
+    f.write_text("struct Foo {\n    x: i32,\n}\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Foo" in names
+
+
+def test_rust_struct_symbol_kind(tmp_path):
+    f = tmp_path / "foo.rs"
+    f.write_text("struct Foo {\n    x: i32,\n}\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Foo")
+    assert s.symbol_kind == "class"
+
+
+def test_rust_enum(tmp_path):
+    f = tmp_path / "foo.rs"
+    f.write_text("enum Color {\n    Red,\n    Green,\n}\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Color" in names
+
+
+def test_rust_impl_method(tmp_path):
+    f = tmp_path / "foo.rs"
+    f.write_text(
+        "struct Foo {\n    x: i32,\n}\n\n"
+        "impl Foo {\n    fn bar(&self) -> i32 {\n        self.x\n    }\n}\n"
+    )
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Foo.bar" in names
+
+
+def test_rust_impl_method_symbol_kind(tmp_path):
+    f = tmp_path / "foo.rs"
+    f.write_text(
+        "struct Foo {\n    x: i32,\n}\n\n"
+        "impl Foo {\n    fn bar(&self) -> i32 {\n        self.x\n    }\n}\n"
+    )
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Foo.bar")
+    assert s.symbol_kind == "method"
+
+
+def test_rust_lang(tmp_path):
+    f = tmp_path / "foo.rs"
+    f.write_text("fn greet() {}\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "greet")
+    assert s.lang == ".rs"
+
+
+# ---- Java ----
+
+
+def test_java_class(tmp_path):
+    f = tmp_path / "Foo.java"
+    f.write_text("public class Foo {\n}\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Foo" in names
+
+
+def test_java_method(tmp_path):
+    f = tmp_path / "Foo.java"
+    f.write_text("public class Foo {\n    public int bar() {\n        return 0;\n    }\n}\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Foo.bar" in names
+
+
+def test_java_method_symbol_kind(tmp_path):
+    f = tmp_path / "Foo.java"
+    f.write_text("public class Foo {\n    public int bar() {\n        return 0;\n    }\n}\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Foo.bar")
+    assert s.symbol_kind == "method"
+
+
+def test_java_lang(tmp_path):
+    f = tmp_path / "Foo.java"
+    f.write_text("public class Foo {\n}\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Foo")
+    assert s.lang == ".java"
+
+
+# ---- C# ----
+
+
+def test_csharp_class(tmp_path):
+    f = tmp_path / "Foo.cs"
+    f.write_text("public class Foo {\n}\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Foo" in names
+
+
+def test_csharp_method(tmp_path):
+    f = tmp_path / "Foo.cs"
+    f.write_text("public class Foo {\n    public int Bar() {\n        return 0;\n    }\n}\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Foo.Bar" in names
+
+
+def test_csharp_method_symbol_kind(tmp_path):
+    f = tmp_path / "Foo.cs"
+    f.write_text("public class Foo {\n    public int Bar() {\n        return 0;\n    }\n}\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Foo.Bar")
+    assert s.symbol_kind == "method"
+
+
+def test_csharp_lang(tmp_path):
+    f = tmp_path / "Foo.cs"
+    f.write_text("public class Foo {\n}\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Foo")
+    assert s.lang == ".cs"
+
+
+# ---- Ruby ----
+
+
+def test_ruby_function(tmp_path):
+    f = tmp_path / "foo.rb"
+    f.write_text("def greet(name)\n  name\nend\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "greet" in names
+
+
+def test_ruby_class(tmp_path):
+    f = tmp_path / "foo.rb"
+    f.write_text("class Foo\nend\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Foo" in names
+
+
+def test_ruby_method(tmp_path):
+    f = tmp_path / "foo.rb"
+    f.write_text("class Foo\n  def bar\n    1\n  end\nend\n")
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Foo.bar" in names
+
+
+def test_ruby_method_symbol_kind(tmp_path):
+    f = tmp_path / "foo.rb"
+    f.write_text("class Foo\n  def bar\n    1\n  end\nend\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "Foo.bar")
+    assert s.symbol_kind == "method"
+
+
+def test_ruby_module_nested_class(tmp_path):
+    f = tmp_path / "foo.rb"
+    f.write_text(
+        "module Outer\n  class Inner\n    def qux\n      1\n    end\n  end\nend\n"
+    )
+    symbols = resolver.extract(f)
+    names = [s.symbol_name for s in symbols]
+    assert "Inner" in names
+    assert "Inner.qux" in names
+
+
+def test_ruby_lang(tmp_path):
+    f = tmp_path / "foo.rb"
+    f.write_text("def greet; end\n")
+    symbols = resolver.extract(f)
+    s = next(s for s in symbols if s.symbol_name == "greet")
+    assert s.lang == ".rb"
+
+
 # ---- Robustness (issue #24) ----
 
 
@@ -372,8 +561,8 @@ def test_symbol_has_file_path(tmp_path):
 
 
 def test_unsupported_extension_returns_empty(tmp_path):
-    f = tmp_path / "foo.rb"
-    f.write_text("def hello; end\n")
+    f = tmp_path / "foo.kt"
+    f.write_text("fun hello() {}\n")
     symbols = resolver.extract(f)
     assert symbols == []
 

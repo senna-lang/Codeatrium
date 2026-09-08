@@ -37,12 +37,13 @@ from pathlib import Path
 
 from codeatrium.code_touches import normalize_repo_path
 from codeatrium.eval.datasets.schema import Query
-from codeatrium.resolver import Symbol, SymbolResolver
+from codeatrium.resolver import _LANGUAGES, Symbol, SymbolResolver
 from codeatrium.utils import sha256
 
 DATASET_NAME = "symbol-recall"
 
-_SUPPORTED_SUFFIXES = frozenset({".py", ".ts", ".tsx", ".go"})
+# resolver.py の _LANGUAGES と定義が乖離しないよう、そこから直接導出する。
+_SUPPORTED_SUFFIXES = frozenset(_LANGUAGES)
 _GIT_TIMEOUT_S = 60
 
 AllowedBranchesFn = Callable[[Path, str, str], "frozenset[str] | None"]

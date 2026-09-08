@@ -26,7 +26,7 @@ The whole recall interface is two commands:
 
 - **`loci search "query"`** — semantic search over past conversations
 - **`loci context`** — reverse lookup, by code symbol (`--symbol "name"`) or git branch (`--branch "name"`)
-  - tree-sitter symbol resolution (Python / TypeScript / Go) lets agents understand implementation intent before editing
+  - tree-sitter symbol resolution (Python / TypeScript / Go / Rust / Java / C# / Ruby) lets agents understand implementation intent before editing
   - `--branch "name"` recalls what was done and discussed on a specific git branch (also available as `loci search "query" --branch "name"`)
 
 That's deliberate. The user here is the agent, and an agent handed a 50-tool palette hesitates, mis-picks, and burns tokens just deciding which to call. With a surface this small — and no MCP tool schemas sitting resident in the context window — the agent reaches for the right call the first time, every time. *(When the full transcript is needed, `loci show "<exchange-id>"` expands a search result to its stored verbatim source.)*
