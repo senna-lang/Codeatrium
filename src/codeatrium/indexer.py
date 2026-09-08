@@ -1156,6 +1156,77 @@ def index_opencode_db(
         src.close()
 
 
+def _is_legacy_jsonl_turn_id(source_turn_id: str | None) -> bool:
+    """旧 JSONL indexer の ply_start 由来 source_turn_id を判定する。"""
+    return (
+        source_turn_id is not None
+        and source_turn_id.isdigit()
+        and len(source_turn_id) < 64
+    )
+
+
+def _reconcile_legacy_jsonl_exchanges(
+    con: sqlite3.Connection,
+    harness: str,
+    source_session_id: str,
+    source_path: str,
+    exchanges: list[Exchange],
+) -> tuple[list[Exchange], list[Exchange]]:
+    """旧 ply id の exchange を内容対応で stable id へ in-place 移行する。"""
+    existing_rows = con.execute(
+        """
+        SELECT source_turn_id, ply_start, user_content, agent_content
+        FROM exchanges
+        WHERE harness = ? AND source_session_id = ?
+        """,
+        (harness, source_session_id),
+    ).fetchall()
+    known_exchange_ids = {
+        row["source_turn_id"]
+        for row in existing_rows
+        if isinstance(row["source_turn_id"], str)
+    }
+    legacy_by_content: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in existing_rows:
+        if _is_legacy_jsonl_turn_id(row["source_turn_id"]):
+            legacy_by_content.setdefault(
+                (row["user_content"], row["agent_content"]), []
+            ).append(row)
+    for candidates in legacy_by_content.values():
+        candidates.sort(key=lambda row: row["ply_start"])
+
+    new_exchanges: list[Exchange] = []
+    migrated_exchanges: list[Exchange] = []
+    for exchange in exchanges:
+        if exchange.id in known_exchange_ids:
+            continue
+        candidates = legacy_by_content.get(
+            (exchange.user_content, exchange.agent_content)
+        )
+        if not candidates:
+            new_exchanges.append(exchange)
+            continue
+        legacy_row = candidates.pop(0)
+        con.execute(
+            """
+            UPDATE exchanges
+            SET source_turn_id = ?, ply_start = ?, ply_end = ?, session_ref = ?
+            WHERE harness = ? AND source_session_id = ? AND source_turn_id = ?
+            """,
+            (
+                exchange.id,
+                exchange.ply_start,
+                exchange.ply_end,
+                f"{source_path}#ply={exchange.ply_start}-{exchange.ply_end}",
+                harness,
+                source_session_id,
+                legacy_row["source_turn_id"],
+            ),
+        )
+        migrated_exchanges.append(exchange)
+    return new_exchanges, migrated_exchanges
+
+
 def index_file(
     jsonl_path: Path,
     db_path: Path,
@@ -1196,8 +1267,8 @@ def index_file(
     else:
         raise ValueError(f"Unsupported harness: {harness}")
 
-    conversation_id = sha256(str(jsonl_path))
     source_session_id = str(jsonl_path.resolve())
+    conversation_id = sha256(f"{harness}:{source_session_id}")
     con = get_connection(db_path)
 
     # `last_ply_end` は表示座標の継続にだけ使う。追記の検出・読み飛ばしは
@@ -1210,9 +1281,9 @@ def index_file(
         "SELECT cursor FROM sessions WHERE harness = ? AND source_session_id = ?",
         (harness, source_session_id),
     ).fetchone()
-    byte_offset = _jsonl_cursor_offset(
-        cursor_row["cursor"] if cursor_row is not None else None
-    )
+    cursor = cursor_row["cursor"] if cursor_row is not None else None
+    byte_offset = _jsonl_cursor_offset(cursor)
+    legacy_cursor = cursor is not None and cursor.startswith("v1:ply:")
     ply_offset = last_ply_end + 1 if byte_offset is not None else 0
     chunk = _load_incremental_raw_entries(
         jsonl_path, byte_offset if byte_offset is not None else 0, ply_offset
@@ -1230,7 +1301,11 @@ def index_file(
             raw_entries=raw_entries,
             ply_offset=chunk.ply_offset,
         )
-    new_exchanges = [ex for ex in exchanges if ex.ply_start > last_ply_end]
+    new_exchanges = (
+        exchanges
+        if legacy_cursor
+        else [ex for ex in exchanges if ex.ply_start > last_ply_end]
+    )
     if project_root is not None:
         # issue #36: 機微パスへ触れた exchange は永続化前に除外する。cursor は
         # 除外分だけ進めない——後から ignore パターンを外した場合に遡って拾える。
@@ -1242,8 +1317,33 @@ def index_file(
                 normalize_touched_paths(ex.files, str(project_root))
             )
         ]
+    new_exchanges, migrated_exchanges = _reconcile_legacy_jsonl_exchanges(
+        con,
+        harness,
+        source_session_id,
+        str(jsonl_path),
+        new_exchanges,
+    )
 
     if not new_exchanges:
+        if migrated_exchanges:
+            migrated_last = migrated_exchanges[-1]
+            con.execute(
+                """
+                UPDATE sessions
+                SET cursor = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE harness = ? AND source_session_id = ?
+                """,
+                (
+                    _jsonl_cursor(
+                        chunk.end_offsets[migrated_last.ply_end - chunk.ply_offset],
+                        migrated_last.id,
+                    ),
+                    harness,
+                    source_session_id,
+                ),
+            )
+            con.commit()
         con.close()
         return 0
 
