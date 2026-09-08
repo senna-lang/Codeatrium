@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
+
+if TYPE_CHECKING:
+    from codeatrium.indexer import Exchange
 
 import typer
 
@@ -123,13 +126,24 @@ def init(
     skip_strategy = "recent"
     total_exchanges = 0
     run_distill_now = False
+    parsed_exchanges_by_file: dict[Path, list[Exchange]] = {}
 
     if jsonl_files:
-        resolved_min_chars = _resolve_min_chars(jsonl_files, min_chars)
+        # min_chars=0 で全ファイルを一度だけフルパースし、閾値集計・総数カウント・
+        # 実インデックスの3箇所で使い回す（同一ファイルの3重パースを避ける、issue #25）
+        parsed_exchanges_by_file = {
+            jsonl: parse_exchanges(jsonl, min_chars=0) for jsonl in jsonl_files
+        }
+        all_exchanges = [
+            ex for exs in parsed_exchanges_by_file.values() for ex in exs
+        ]
+
+        resolved_min_chars = _resolve_min_chars(all_exchanges, min_chars)
 
         total_exchanges = sum(
-            len(parse_exchanges(jsonl, min_chars=resolved_min_chars))
-            for jsonl in jsonl_files
+            1
+            for ex in all_exchanges
+            if len(ex.user_content) + len(ex.agent_content) >= resolved_min_chars
         )
 
         if total_exchanges > 0:
@@ -227,8 +241,16 @@ def init(
             actual_total = 0
             for jsonl in jsonl_files:
                 try:
+                    filtered = [
+                        ex
+                        for ex in parsed_exchanges_by_file[jsonl]
+                        if len(ex.user_content) + len(ex.agent_content) >= resolved_min_chars
+                    ]
                     actual_total += index_file(
-                        jsonl, db, min_chars=resolved_min_chars
+                        jsonl,
+                        db,
+                        min_chars=resolved_min_chars,
+                        preparsed_exchanges=filtered,
                     )
                 except Exception as exc:  # noqa: BLE001
                     typer.echo(f"  ⚠ skip {jsonl.name}: {exc}", err=True)
@@ -359,17 +381,11 @@ _MIN_CHARS_CANDIDATES = [50, 100, 200, 500]
 
 
 def _count_exchanges_by_threshold(
-    jsonl_files: list[Path], thresholds: list[int]
+    exchanges: list[Exchange], thresholds: list[int]
 ) -> dict[int, int]:
-    """各閾値ごとの exchange 件数をカウントする。min_chars=0 で全件パースして集計。"""
-    from codeatrium.indexer import parse_exchanges
-
-    # 全 exchange の combined 文字数を収集
-    lengths: list[int] = []
-    for jsonl in jsonl_files:
-        for ex in parse_exchanges(jsonl, min_chars=0):
-            lengths.append(len(ex.user_content) + len(ex.agent_content))
-
+    """各閾値ごとの exchange 件数をカウントする。呼び出し側が min_chars=0 で
+    パース済みの exchange リストを渡す（同一ファイルの再パースを避けるため、issue #25）。"""
+    lengths = [len(ex.user_content) + len(ex.agent_content) for ex in exchanges]
     return {t: sum(1 for length in lengths if length >= t) for t in thresholds}
 
 
@@ -399,13 +415,13 @@ def _prompt_int_range(prompt: str, min_v: int, max_v: int | None = None) -> int:
 
 
 def _resolve_min_chars(
-    jsonl_files: list[Path], min_chars_flag: int | None
+    exchanges: list[Exchange], min_chars_flag: int | None
 ) -> int:
     """init 時の min_chars を決定する。フラグ指定済みならそのまま、未指定なら対話。"""
     if min_chars_flag is not None:
         return min_chars_flag
 
-    counts = _count_exchanges_by_threshold(jsonl_files, _MIN_CHARS_CANDIDATES)
+    counts = _count_exchanges_by_threshold(exchanges, _MIN_CHARS_CANDIDATES)
 
     # exchange が0件なら対話不要
     if counts.get(_MIN_CHARS_CANDIDATES[0], 0) == 0:

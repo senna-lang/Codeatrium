@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 import sqlite3
 import subprocess
 from datetime import UTC, datetime
@@ -72,6 +73,129 @@ def _resolve_symbols_at(
     if source is not None:
         return resolver.extract_source(source, rel_path)
     return resolver.extract(Path(touch_file_path))
+
+
+def _git_log_for_path(project_root: Path, rel_path: str) -> list[tuple[float, str]]:
+    """Full commit history touching `rel_path`, oldest→newest, as (epoch, sha).
+
+    One subprocess call per unique file — the batched counterpart to
+    `_git_blob_near`'s per-(file, ts) `git log --before=`/`--after=` pair,
+    used by `_batch_git_blobs_near` to resolve many timestamps against the
+    same file without repeating the `git log` spawn for each one (issue #25).
+    Returns `[]` on any failure (not a git repo, git unavailable, timeout),
+    the same best-effort contract as `_git_blob_near`.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "log", "--format=%H %cI", "--", rel_path],
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    commits: list[tuple[float, str]] = []
+    for line in result.stdout.splitlines():
+        sha, _, iso_date = line.partition(" ")
+        if not sha or not iso_date:
+            continue
+        try:
+            epoch = datetime.fromisoformat(iso_date).timestamp()
+        except ValueError:
+            continue
+        commits.append((epoch, sha))
+    commits.sort(key=lambda c: c[0])
+    return commits
+
+
+def _nearest_sha(commits: list[tuple[float, str]], ts_epoch: float) -> str | None:
+    """Same selection `_git_blob_near` makes one file at a time: the latest
+    commit at or before `ts_epoch`, else (only reachable when every commit
+    postdates it) the newest commit overall — mirrors git's own `-n 1
+    --after=` picking the most recent match in its default newest-first
+    order once `--before=` found nothing."""
+    if not commits:
+        return None
+    epochs = [c[0] for c in commits]
+    idx = bisect.bisect_right(epochs, ts_epoch)
+    return commits[idx - 1][1] if idx > 0 else commits[-1][1]
+
+
+def _git_show_blob(project_root: Path, rel_path: str, sha: str) -> bytes | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "show", f"{sha}:{rel_path}"],
+            capture_output=True,
+            timeout=_GIT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _batch_git_blobs_near(
+    project_root: Path, requests: set[tuple[str, str | None]]
+) -> dict[tuple[str, str | None], bytes | None]:
+    """Batched counterpart to `_git_blob_near` for many (rel_path, ts) pairs.
+
+    Fetches each unique file's commit history once via `_git_log_for_path`
+    instead of a `git log --before=`/`--after=` pair per (file, ts), and
+    dedupes `git show` calls by resolved sha. A historical backfill over N
+    touches spanning a handful of files and commits costs O(unique files +
+    unique blobs) subprocess spawns instead of O(N) (issue #25).
+    """
+    blobs: dict[tuple[str, str | None], bytes | None] = {}
+    by_path: dict[str, list[str | None]] = {}
+    for rel_path, ts in requests:
+        by_path.setdefault(rel_path, []).append(ts)
+
+    show_cache: dict[tuple[str, str], bytes | None] = {}
+    for rel_path, ts_list in by_path.items():
+        commits = _git_log_for_path(project_root, rel_path)
+        for ts in ts_list:
+            if not ts or not commits:
+                blobs[(rel_path, ts)] = None
+                continue
+            try:
+                ts_epoch = datetime.fromisoformat(ts).timestamp()
+            except ValueError:
+                blobs[(rel_path, ts)] = None
+                continue
+            sha = _nearest_sha(commits, ts_epoch)
+            if sha is None:
+                blobs[(rel_path, ts)] = None
+                continue
+            show_key = (rel_path, sha)
+            if show_key not in show_cache:
+                show_cache[show_key] = _git_show_blob(project_root, rel_path, sha)
+            blobs[(rel_path, ts)] = show_cache[show_key]
+
+    return blobs
+
+
+def _batch_resolve_symbols_at(
+    resolver: SymbolResolver,
+    project_root: Path,
+    requests: set[tuple[str, str | None]],
+) -> dict[tuple[str, str | None], list[Symbol]]:
+    """Batched counterpart to `_resolve_symbols_at` for the historical
+    touch-time backfill (`db._backfill_touch_time_symbol_edges`), which
+    resolves many (file, ts) pairs up front rather than one touch at a
+    time. Falls back to the live disk file per-request, same as
+    `_resolve_symbols_at`, when no git blob is available."""
+    blobs = _batch_git_blobs_near(project_root, requests)
+    resolved: dict[tuple[str, str | None], list[Symbol]] = {}
+    for key in requests:
+        rel_path, _ts = key
+        blob = blobs.get(key)
+        resolved[key] = (
+            resolver.extract_source(blob, rel_path)
+            if blob is not None
+            else resolver.extract(project_root / rel_path)
+        )
+    return resolved
 
 
 def ingest_parse_result(

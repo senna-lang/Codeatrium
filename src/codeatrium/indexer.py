@@ -1017,6 +1017,7 @@ def index_file(
     min_chars: int = 50,
     project_root: Path | None = None,
     harness: str = "claude",
+    preparsed_exchanges: list[Exchange] | None = None,
 ) -> int:
     """
     .jsonl ファイルを DB に登録する。
@@ -1025,6 +1026,11 @@ def index_file(
     None の場合は code_touches の記録をスキップする（project_root が無いと相対パス化できないため）。
     harness はログ形式と編集記録の抽出器を選ぶ。claude / codex / omp-pi / grok に対応する
     （opencode は SQLite なので index_opencode_db が別経路になる）。
+    preparsed_exchanges: 呼び出し側が同じ min_chars で既にパース済みの exchange
+    リストを渡すと、内部での再パースをスキップする（`loci init` が閾値集計・総数
+    カウント・実インデックスの3回パースを避けるために使う、issue #25）。
+    last_ply_end が -1（新規 conversation）の場合のみ使用し、それ以外は
+    無視して従来どおり内部でパースする（インクリメンタル取り込みの整合性を守るため）。
     Returns: 新規登録した exchange 数
     """
     from codeatrium.db import get_connection
@@ -1057,12 +1063,15 @@ def index_file(
     if harness == "omp-pi":
         # 編集記録の抽出より前に cwd を載せる（相対パスの絶対化に必要）
         _annotate_omp_pi_cwd(jsonl_path, raw_entries)
-    exchanges = parse(
-        jsonl_path,
-        min_chars=min_chars,
-        last_ply_end=last_ply_end,
-        raw_entries=raw_entries,
-    )
+    if preparsed_exchanges is not None and last_ply_end == -1:
+        exchanges = preparsed_exchanges
+    else:
+        exchanges = parse(
+            jsonl_path,
+            min_chars=min_chars,
+            last_ply_end=last_ply_end,
+            raw_entries=raw_entries,
+        )
     new_exchanges = [ex for ex in exchanges if ex.ply_start > last_ply_end]
 
     if not new_exchanges:
