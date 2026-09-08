@@ -141,7 +141,7 @@ def index(
     root = find_project_root()
     db = db_path(root)
 
-    if not db.exists() and not (root / ".codeatrium").exists():
+    if not db.exists():
         typer.echo("Not initialized. Run `loci init` first.", err=True)
         raise typer.Exit(1)
     if harness == "all":

@@ -91,6 +91,20 @@ def test_index_rejects_uninitialized_repo(tmp_path: Path, monkeypatch) -> None:
     assert not (tmp_path / ".codeatrium").exists()
 
 
+def test_index_rejects_codeatrium_directory_without_database(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A partial .codeatrium directory is not initialized without memory.db."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".codeatrium").mkdir()
+
+    result = runner.invoke(app, ["index", "--harness", "claude"])
+
+    assert result.exit_code != 0
+    assert "loci init" in result.output
+    assert not (tmp_path / ".codeatrium" / "memory.db").exists()
+
+
 def test_index_works_after_init(tmp_path: Path, monkeypatch) -> None:
     """loci init 済みのリポジトリでは loci index が正常に動作する"""
     monkeypatch.chdir(tmp_path)

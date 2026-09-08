@@ -49,6 +49,28 @@ def test_status_empty_db(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "0" in result.output
 
+def test_status_closes_connection_when_query_fails(tmp_path, monkeypatch):
+    class FailingConnection:
+        closed = False
+
+        def execute(self, *_args, **_kwargs):
+            raise RuntimeError("query failed")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.chdir(tmp_path)
+    _setup_db(tmp_path)
+    failing_connection = FailingConnection()
+    monkeypatch.setattr(
+        "codeatrium.db.get_connection", lambda _db: failing_connection
+    )
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code != 0
+    assert failing_connection.closed
+
 
 def test_status_json_output(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -108,6 +130,22 @@ def test_status_shows_unconfigured_distill(tmp_path, monkeypatch):
     assert data["distill_available"] is False
 
 
+def test_status_does_not_probe_distill_client_without_check(tmp_path, monkeypatch):
+    _setup_db(tmp_path)
+    (tmp_path / ".codeatrium" / "config.toml").write_text(
+        '[distill]\nclient = "claude-cli"\n'
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with patch("codeatrium.adapters.model.registry.check_ready") as check_ready:
+        result = runner.invoke(app, ["status", "--json"])
+
+    assert result.exit_code == 0
+    assert not check_ready.called
+    data = json.loads(result.output)
+    assert data["distill_available"] is None
+    assert data["distill_checked"] is False
+
 def test_status_shows_ready_distill_client(tmp_path, monkeypatch):
     _setup_db(tmp_path)
     (tmp_path / ".codeatrium" / "config.toml").write_text(
@@ -134,10 +172,11 @@ def test_status_shows_ready_distill_client(tmp_path, monkeypatch):
         ),
     )
 
-    result = runner.invoke(app, ["status", "--json"])
+    result = runner.invoke(app, ["status", "--json", "--check"])
     data = json.loads(result.output)
     assert data["distill_client"] == "claude-cli"
     assert data["distill_available"] is True
+    assert data["distill_checked"] is True
 
 
 def test_status_surfaces_broken_config_toml(tmp_path, monkeypatch):

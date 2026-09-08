@@ -87,18 +87,15 @@ def show(
 
 def dump(
     distilled: Annotated[
-        bool, typer.Option("--distilled", help="蒸留済み palace objects を出力")
+        bool, typer.Option("--distilled", help="蒸留済み palace objects を出力（互換オプション）")
     ] = False,
     limit: Annotated[int, typer.Option("--limit", "-n", help="最大件数")] = 1000,
     json_output: Annotated[bool, typer.Option("--json", help="JSON で出力")] = False,
 ) -> None:
-    """蒸留済み palace objects を新しい順に出力する（セッション開始時の in-context ロード用）"""
+    """蒸留済み palace objects を新しい順に出力する（唯一の出力モード）"""
     from codeatrium.db import get_connection
     from codeatrium.paths import db_path, find_project_root
 
-    if not distilled:
-        typer.echo("Use --distilled to dump palace objects.", err=True)
-        raise typer.Exit(1)
 
     root = find_project_root()
     db = db_path(root)
@@ -107,35 +104,38 @@ def dump(
         raise typer.Exit(1)
 
     con = get_connection(db)
-    rows = con.execute(
-        """
-        SELECT p.id, p.exchange_id, p.exchange_core, p.specific_context,
-               e.distilled_at
-        FROM palace_objects p
-        JOIN exchanges e ON e.id = p.exchange_id
-        ORDER BY e.distilled_at DESC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    try:
+        rows = con.execute(
+            """
+            SELECT p.id, p.exchange_id, p.exchange_core, p.specific_context,
+                   e.distilled_at
+            FROM palace_objects p
+            JOIN exchanges e ON e.id = p.exchange_id
+            ORDER BY e.distilled_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        room_rows = []
+        if rows:
+            palace_ids = [r["id"] for r in rows]
+            placeholders = ",".join("?" * len(palace_ids))
+            room_rows = con.execute(
+                f"""
+                SELECT palace_object_id, room_type, room_key, room_label
+                FROM rooms
+                WHERE palace_object_id IN ({placeholders})
+                ORDER BY relevance DESC
+                """,
+                palace_ids,
+            ).fetchall()
+    finally:
+        con.close()
 
     if not rows:
         typer.echo("No distilled objects found.")
-        con.close()
         return
-
-    palace_ids = [r["id"] for r in rows]
-    placeholders = ",".join("?" * len(palace_ids))
-    room_rows = con.execute(
-        f"""
-        SELECT palace_object_id, room_type, room_key, room_label
-        FROM rooms
-        WHERE palace_object_id IN ({placeholders})
-        ORDER BY relevance DESC
-        """,
-        palace_ids,
-    ).fetchall()
-    con.close()
 
     rooms_map: dict[str, list[Any]] = {}
     for r in room_rows:
