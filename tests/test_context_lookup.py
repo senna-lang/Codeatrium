@@ -96,7 +96,13 @@ def _setup_db(tmp_path: Path):
 
 
 def _insert_conversation_and_exchange(
-    con, conv_id: str, ex_id: str, ply_start: int = 0, git_branch: str | None = None
+    con,
+    conv_id: str,
+    ex_id: str,
+    ply_start: int = 0,
+    git_branch: str | None = None,
+    user_content: str | None = None,
+    agent_content: str | None = None,
 ) -> None:
     con.execute(
         "INSERT OR IGNORE INTO conversations (id, source_path) VALUES (?, ?)",
@@ -106,7 +112,15 @@ def _insert_conversation_and_exchange(
         """INSERT OR IGNORE INTO exchanges
            (id, conversation_id, ply_start, ply_end, user_content, agent_content, git_branch)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (ex_id, conv_id, ply_start, ply_start + 1, "user " + LONG, "agent " + LONG, git_branch),
+        (
+            ex_id,
+            conv_id,
+            ply_start,
+            ply_start + 1,
+            user_content if user_content is not None else "user " + LONG,
+            agent_content if agent_content is not None else "agent " + LONG,
+            git_branch,
+        ),
     )
 
 
@@ -137,6 +151,20 @@ def _insert_edge(
     )
 
 
+def _insert_touch(
+    con, touch_id: str, exchange_id: str, file_path: str, ts: str = "2026-08-09T00:00:00Z"
+) -> None:
+    """distill/tree-sitter 解決を経ない生の code_touches 行を挿入する（design: issue #32 の
+    フォールバック段のテスト用フィクスチャ）。"""
+    con.execute(
+        """INSERT OR IGNORE INTO code_touches
+           (id, exchange_id, harness, tool_call_id, file_path, touch_kind, locator_kind,
+            added, removed, ts)
+           VALUES (?, ?, 'claude', 'tc1', ?, 'edit', 'file', 1, 0, ?)""",
+        (touch_id, exchange_id, file_path, ts),
+    )
+
+
 # ---- resolve_u1 ----
 
 
@@ -155,6 +183,7 @@ def test_resolve_u1_exact_symbol_match(tmp_path: Path) -> None:
     assert hits[0].symbol_name == "greet"
     assert hits[0].exchange_id == "ex1"
     assert hits[0].verbatim_ref == "/fake/c1.jsonl:ply=0"
+    assert hits[0].distilled is True
 
 
 def test_resolve_u1_falls_back_to_file_when_symbol_not_found(tmp_path: Path) -> None:
@@ -266,6 +295,83 @@ def test_resolve_u1_alias_paths_do_not_affect_lookup_when_empty(tmp_path: Path) 
     assert hits == []
 
 
+# ---- resolve_u1 code_touches フォールバック（design: issue #32） ----
+
+
+def test_resolve_u1_falls_back_to_touch_symbol_when_no_distilled_edges(tmp_path: Path) -> None:
+    """distill 済み code_edges が1件も無くても、code_touches + 本文の symbol 名一致から
+    フォールバックできる（受け入れ基準: distill 前の DB でも会話を返す）"""
+    con = _setup_db(tmp_path)
+    _insert_conversation_and_exchange(
+        con, "c1", "ex1", user_content="please rename greet() to greeting()"
+    )
+    _insert_touch(con, "t1", "ex1", "src/foo.py")
+    con.commit()
+
+    hits = resolve_u1(con, "src/foo.py", "greet", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].match_kind == "touch_symbol"
+    assert hits[0].confidence == 0.20
+    assert hits[0].symbol_name == "greet"
+    assert hits[0].exchange_id == "ex1"
+    assert hits[0].distilled is False
+
+
+def test_resolve_u1_falls_back_to_touch_file_when_symbol_not_mentioned(tmp_path: Path) -> None:
+    """本文に symbol 名の言及が無い touch は touch_file 段（symbol無し）まで落ちる"""
+    con = _setup_db(tmp_path)
+    _insert_conversation_and_exchange(
+        con, "c1", "ex1", user_content="fix the off-by-one bug", agent_content="done"
+    )
+    _insert_touch(con, "t1", "ex1", "src/foo.py")
+    con.commit()
+
+    hits = resolve_u1(con, "src/foo.py", "greet", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].match_kind == "touch_file"
+    assert hits[0].confidence == 0.15
+    assert hits[0].symbol_name is None
+    assert hits[0].distilled is False
+
+
+def test_resolve_u1_touch_symbol_matches_dotted_leaf(tmp_path: Path) -> None:
+    """"Foo.bar" で問い合わせても、本文中の裸の "bar" に語境界付きで一致する
+    （eval/gen/gen_symbol_recall.py の gold 判定と同じ leaf 一致基準）"""
+    con = _setup_db(tmp_path)
+    _insert_conversation_and_exchange(
+        con, "c1", "ex1", user_content="the bar method needs a null check"
+    )
+    _insert_touch(con, "t1", "ex1", "src/foo.py")
+    con.commit()
+
+    hits = resolve_u1(con, "src/foo.py", "Foo.bar", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].match_kind == "touch_symbol"
+    assert hits[0].symbol_name == "Foo.bar"
+
+
+def test_resolve_u1_touch_fallback_not_used_when_code_edges_present(tmp_path: Path) -> None:
+    """symbol/file/directory 段のいずれかがヒットしていれば、code_touches段は試さない
+    （最初にヒットした段だけを返す設計を touch フォールバックでも保つ）"""
+    con = _setup_db(tmp_path)
+    _insert_conversation_and_exchange(con, "c1", "ex1")
+    _insert_edge(con, "e1", "ex1", "src/bar.py", None, "file", 0.5)
+    _insert_conversation_and_exchange(
+        con, "c2", "ex2", user_content="mentions greet() too"
+    )
+    _insert_touch(con, "t1", "ex2", "src/foo.py")
+    con.commit()
+
+    hits = resolve_u1(con, "src/foo.py", "greet", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].match_kind == "directory"
+    assert hits[0].distilled is True
+
+
 # ---- resolve_u2 ----
 
 
@@ -286,6 +392,7 @@ def test_resolve_u2_file_match_groups_multiple_symbols(tmp_path: Path) -> None:
     assert all(h.match_kind == "file" for h in hits)
     assert all(h.confidence == 1.0 for h in hits)
     assert {h.symbol_name for h in hits} == {"greet", "farewell"}
+    assert all(h.distilled is True for h in hits)
 
 
 def test_resolve_u2_falls_back_to_directory(tmp_path: Path) -> None:
@@ -340,6 +447,41 @@ def test_resolve_u2_alias_paths_widen_file_tier(tmp_path: Path) -> None:
     assert hits[0].confidence == 1.0
     assert hits[0].file_path == "src/logo/db.py"
 
+
+
+# ---- resolve_u2 code_touches フォールバック（design: issue #32） ----
+
+
+def test_resolve_u2_falls_back_to_touch_file_when_no_distilled_edges(tmp_path: Path) -> None:
+    """distill 済み code_edges が1件も無くても、code_touches から会話を返す
+    （受け入れ基準: distill 前の DB でも `loci context <file>` が touch ベースの会話を返す）"""
+    con = _setup_db(tmp_path)
+    _insert_conversation_and_exchange(con, "c1", "ex1")
+    _insert_touch(con, "t1", "ex1", "src/foo.py")
+    con.commit()
+
+    hits = resolve_u2(con, "src/foo.py", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].match_kind == "touch_file"
+    assert hits[0].confidence == 0.20
+    assert hits[0].symbol_name is None
+    assert hits[0].distilled is False
+
+
+def test_resolve_u2_touch_fallback_not_used_when_code_edges_present(tmp_path: Path) -> None:
+    con = _setup_db(tmp_path)
+    _insert_conversation_and_exchange(con, "c1", "ex1")
+    _insert_edge(con, "e1", "ex1", "src/bar.py", None, "file", 0.5)
+    _insert_conversation_and_exchange(con, "c2", "ex2")
+    _insert_touch(con, "t1", "ex2", "src/foo.py")
+    con.commit()
+
+    hits = resolve_u2(con, "src/foo.py", limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].match_kind == "directory"
+    assert hits[0].distilled is True
 
 
 # ---- select_ply_window（純関数、周辺コンテキストのply隣接窓） ----
