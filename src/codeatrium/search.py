@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 import struct
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +48,7 @@ def _enrich_results(con: sqlite3.Connection, results: list[FusedResult]) -> None
 
     ref_rows = con.execute(
         f"""
-        SELECT e.id, c.source_path, e.ply_start
+        SELECT e.id, c.source_path, e.ply_start, e.git_branch
         FROM exchanges e
         JOIN conversations c ON c.id = e.conversation_id
         WHERE e.id IN ({placeholders})
@@ -56,6 +56,7 @@ def _enrich_results(con: sqlite3.Connection, results: list[FusedResult]) -> None
         exchange_ids,
     ).fetchall()
     ref_map = {r["id"]: f"{r['source_path']}:ply={r['ply_start']}" for r in ref_rows}
+    branch_map = {r["id"]: r["git_branch"] for r in ref_rows}
 
     room_rows = con.execute(
         f"""
@@ -98,12 +99,6 @@ def _enrich_results(con: sqlite3.Connection, results: list[FusedResult]) -> None
             }
         )
 
-    branch_rows = con.execute(
-        f'SELECT e.id, e.git_branch FROM exchanges e WHERE e.id IN ({placeholders})',
-        exchange_ids,
-    ).fetchall()
-    branch_map = {r['id']: r['git_branch'] for r in branch_rows}
-
     for r in results:
         r.verbatim_ref = ref_map.get(r.exchange_id)
         r.rooms = rooms_map.get(r.exchange_id, [])
@@ -122,15 +117,26 @@ def _fts5_query(text: str) -> str:
 
 
 def search_bm25(
-    db_path: Path, query_text: str, limit: int = 10, min_exchanges: int = 2, branch: str | None = None
+    db_path: Path,
+    query_text: str,
+    limit: int = 10,
+    min_exchanges: int = 2,
+    branch: str | None = None,
+    con: sqlite3.Connection | None = None,
 ) -> list[BM25Result]:
-    """FTS5 BM25 で exchanges_fts を検索する"""
+    """FTS5 BM25 で exchanges_fts を検索する。
+
+    `con` を渡すと呼び出し側の接続をそのまま使い、クローズは呼び出し側の責務になる
+    （`search_combined` が bm25/hnsw/enrich で1接続を共有するため、issue #25）。
+    省略時は従来どおり自前で接続を開き、返す前に閉じる。
+    """
     fts_query = _fts5_query(query_text)
     branch_clause = "AND e.git_branch LIKE ? ESCAPE '\\'" if branch is not None else ''
     branch_params: list = [f'%{escape_like(branch)}%'] if branch is not None else []
-    with closing(get_connection(db_path)) as con:
+    ctx = nullcontext(con) if con is not None else closing(get_connection(db_path))
+    with ctx as c:
         try:
-            rows = con.execute(
+            rows = c.execute(
                 f"""
                 SELECT
                     e.id          AS exchange_id,
@@ -183,22 +189,31 @@ limit 件に満たない場合は、その時点までに見つかった最良�
 
 
 def search_hnsw_palace(
-    db_path: Path, query_vec: np.ndarray, limit: int = 10, min_exchanges: int = 2, branch: str | None = None
+    db_path: Path,
+    query_vec: np.ndarray,
+    limit: int = 10,
+    min_exchanges: int = 2,
+    branch: str | None = None,
+    con: sqlite3.Connection | None = None,
 ) -> list[HNSWPalaceResult]:
-    """sqlite-vec HNSW で vec_palace を検索する（distilled embedding）"""
+    """sqlite-vec HNSW で vec_palace を検索する（distilled embedding）。
+
+    `con` の共有規約は `search_bm25` と同じ（issue #25）。
+    """
     branch_clause = "AND e.git_branch LIKE ? ESCAPE '\\'" if branch is not None else ''
     branch_params: list = [f'%{escape_like(branch)}%'] if branch is not None else []
 
-    with closing(get_connection(db_path)) as con:
+    ctx = nullcontext(con) if con is not None else closing(get_connection(db_path))
+    with ctx as c:
         blob = _serialize(query_vec)
         rows: list[sqlite3.Row] = []
         try:
-            total_row = con.execute("SELECT COUNT(*) AS n FROM vec_palace").fetchone()
+            total_row = c.execute("SELECT COUNT(*) AS n FROM vec_palace").fetchone()
             total_candidates = total_row["n"] if total_row is not None else 0
 
             candidate_k = min(limit * _KNN_INITIAL_CANDIDATE_FACTOR, _KNN_MAX_CANDIDATE_K)
             while True:
-                rows = con.execute(
+                rows = c.execute(
                     f"""
                     SELECT
                         p.exchange_id,
@@ -303,17 +318,22 @@ def search_combined(
     min_exchanges: int = 2,
     branch: str | None = None,
 ) -> list[FusedResult]:
-    """BM25(V) + HNSW(D) の RRF 融合検索。"""
-    bm25_results = search_bm25(
-        db_path, query_text, limit=limit * 2, min_exchanges=min_exchanges, branch=branch
-    )
-    hnsw_results = search_hnsw_palace(
-        db_path, query_vec, limit=limit * 2, min_exchanges=min_exchanges, branch=branch
-    )
-    fused = rrf(bm25_results, hnsw_results, limit=limit)
+    """BM25(V) + HNSW(D) の RRF 融合検索。
 
-    if fused:
-        with closing(get_connection(db_path)) as con:
+    bm25/hnsw/enrich の3クエリ群で1つの sqlite 接続を共有する。接続ごとに
+    sqlite-vec 拡張ロード + WAL/busy_timeout PRAGMA が再実行されるコストを
+    1検索あたり3回から1回に減らす（issue #25）。
+    """
+    with closing(get_connection(db_path)) as con:
+        bm25_results = search_bm25(
+            db_path, query_text, limit=limit * 2, min_exchanges=min_exchanges, branch=branch, con=con
+        )
+        hnsw_results = search_hnsw_palace(
+            db_path, query_vec, limit=limit * 2, min_exchanges=min_exchanges, branch=branch, con=con
+        )
+        fused = rrf(bm25_results, hnsw_results, limit=limit)
+
+        if fused:
             _enrich_results(con, fused)
 
     return fused

@@ -3,6 +3,7 @@ Phase 2 検索テスト: BM25・RRF・search_combined
 embedding は固定ベクトルで代替してモデルロードを避ける
 """
 
+import sqlite3
 import struct
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -359,29 +360,53 @@ def test_search_hnsw_branch_filter_correct_binding(tmp_path: Path) -> None:
         assert result.exchange_id == "hnsw-branch-a", f"Expected only 'hnsw-branch-a', got {result.exchange_id}"
 
 
-def test_search_combined_enrich_connection_leak(tmp_path: Path) -> None:
-    """search_combined は enrich 時に exception が出ても enrich con を close する"""
+def test_search_combined_shares_single_connection(tmp_path: Path) -> None:
+    """search_combined は bm25/hnsw/enrich で get_connection を1回だけ呼ぶ
+    （1検索3コネクション問題の回帰防止、issue #25）"""
     db_path = tmp_path / "memory.db"
     init_db(db_path)
     con = get_connection(db_path)
     _insert_exchange(con, "ex1", LONG_TEXT, "pool response")
     con.close()
 
-    fake_enrich_con = MagicMock()
-    real_cons: list = []
+    with patch(
+        "codeatrium.search.get_connection", wraps=get_connection
+    ) as mock_get_connection:
+        results = search_combined(
+            db_path, "connection pool", np.ones(384, dtype=np.float32), limit=5
+        )
 
-    def mock_get_connection(path):
-        """search_bm25 / search_hnsw_palace 用の最初の2回はそれぞれ新規の real
-        con を返す（各関数が自前の with closing() で閉じる）。enrich 用の
-        3回目の呼び出しだけ fake con を返す。"""
-        if len(real_cons) < 2:
-            c = get_connection(path)
-            real_cons.append(c)
-            return c
-        return fake_enrich_con
+    assert mock_get_connection.call_count == 1
+    assert any(r.exchange_id == "ex1" for r in results)
+
+
+def test_search_combined_connection_leak(tmp_path: Path) -> None:
+    """search_combined は enrich 時に exception が出ても共有 connection を close する"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    con = get_connection(db_path)
+    _insert_exchange(con, "ex1", LONG_TEXT, "pool response")
+
+    class _CloseCountingConnection:
+        """sqlite3.Connection は C 拡張型でインスタンス属性の再代入を許さない
+        （`close` の再代入は AttributeError）ため、close 呼び出し回数を数える
+        委譲プロキシで代用する。"""
+
+        def __init__(self, real_con: sqlite3.Connection) -> None:
+            self._real_con = real_con
+            self.close_calls = 0
+
+        def __getattr__(self, name: str):
+            return getattr(self._real_con, name)
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self._real_con.close()
+
+    proxy = _CloseCountingConnection(con)
 
     with patch(
-        "codeatrium.search.get_connection", side_effect=mock_get_connection
+        "codeatrium.search.get_connection", return_value=proxy
     ), patch(
         "codeatrium.search._enrich_results", side_effect=RuntimeError("enrich failed")
     ):
@@ -390,9 +415,7 @@ def test_search_combined_enrich_connection_leak(tmp_path: Path) -> None:
                 db_path, "connection pool", np.ones(384, dtype=np.float32), limit=5
             )
 
-    assert fake_enrich_con.close.called
-    for real_con in real_cons:
-        real_con.close()
+    assert proxy.close_calls == 1
 
 
 def test_search_bm25_branch_filter(tmp_path: Path) -> None:

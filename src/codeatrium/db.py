@@ -756,13 +756,12 @@ def _backfill_touch_time_symbol_edges(con: sqlite3.Connection, project_root: Pat
         return
 
     from codeatrium.code_touches import touches_to_edges
-    from codeatrium.core.ingest import _resolve_symbols_at
+    from codeatrium.core.ingest import _batch_resolve_symbols_at
     from codeatrium.models import CodeTouch, LineRange
-    from codeatrium.resolver import Symbol, SymbolResolver
+    from codeatrium.resolver import SymbolResolver
     from codeatrium.utils import sha256
 
     resolver = SymbolResolver()
-    symbol_cache: dict[tuple[str, str | None], list[Symbol]] = {}
     resolved_at = datetime.now(UTC).isoformat()
 
     rows = con.execute(
@@ -774,19 +773,16 @@ def _backfill_touch_time_symbol_edges(con: sqlite3.Connection, project_root: Pat
         """
     ).fetchall()
 
+    # 全 (file, ts) をまとめて解決する: 行ごとに git log/show を叩くと
+    # 大規模 DB で最大 (file,ts) 件数の2倍のサブプロセス起動になり init/upgrade
+    # をブロックする（issue #25）。ファイル単位の履歴取得＋blob キャッシュで
+    # サブプロセス数をユニークファイル数＋ユニーク blob 数まで削減する。
+    unique_requests = {(row["file_path"], row["ts"]) for row in rows}
+    symbol_cache = _batch_resolve_symbols_at(resolver, project_root, unique_requests)
+
     for row in rows:
         rel_path = row["file_path"]
-        cache_key = (rel_path, row["ts"])
-        symbols = symbol_cache.get(cache_key)
-        if symbols is None:
-            symbols = _resolve_symbols_at(
-                resolver,
-                project_root,
-                str(project_root / rel_path),
-                rel_path,
-                row["ts"],
-            )
-            symbol_cache[cache_key] = symbols
+        symbols = symbol_cache[(rel_path, row["ts"])]
         if not symbols:
             continue
 
