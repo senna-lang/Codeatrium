@@ -21,10 +21,11 @@ def status(
     """インデックス状態を表示し、--check 指定時だけ distill client の readiness を確認する"""
     from codeatrium.adapters.model.registry import check_ready
     from codeatrium.config import load_config
-    from codeatrium.db import check_drift, get_connection
+    from codeatrium.db import check_drift, get_connection, get_last_distill_error
     from codeatrium.paths import db_path, find_project_root
 
     root = find_project_root()
+
     db = db_path(root)
 
     if not db.exists():
@@ -76,31 +77,28 @@ def status(
             f"[drift] {key}: recorded={recorded}, current={current} — re-index recommended",
             err=True,
         )
-
     db_size_bytes = db.stat().st_size
     db_size_kb = db_size_bytes / 1024
+    last_error = get_last_distill_error(db)
 
     if json_output:
-        typer.echo(
-            json.dumps(
-                {
-                    "db_path": str(db),
-                    "config_error": cfg.config_error,
-                    "exchanges": total,
-                    "distilled": distilled,
-                    "skipped": skipped,
-                    "pending": pending,
-                    "palace_objects": palace_count,
-                    "symbols": symbol_count,
-                    "db_size_kb": round(db_size_kb, 1),
-                    "distill_client": distill_client_label,
-                    "distill_available": distill_available,
-                    "distill_checked": distill_checked,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        payload = {
+            "db_path": str(db),
+            "config_error": cfg.config_error,
+            "exchanges": total,
+            "distilled": distilled,
+            "skipped": skipped,
+            "pending": pending,
+            "palace_objects": palace_count,
+            "symbols": symbol_count,
+            "db_size_kb": round(db_size_kb, 1),
+            "distill_client": distill_client_label,
+            "distill_available": distill_available,
+            "distill_checked": distill_checked,
+        }
+        if last_error is not None:
+            payload["last_distill_error"] = last_error
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         typer.echo(f"DB: {db} ({db_size_kb:.1f} KB)")
         typer.echo(
@@ -113,5 +111,11 @@ def status(
         else:
             avail = "ready" if distill_available else "not ready"
         typer.echo(f"Distill   : {distill_client_label} ({avail})")
+        if last_error is not None:
+            typer.echo(
+                f"Last distill failure: {last_error['exchange_id']} — "
+                f"{last_error['message']} ({last_error['timestamp']})"
+            )
         if cfg.config_error:
             typer.echo(f"Config    : ⚠ parse error — {cfg.config_error}")
+

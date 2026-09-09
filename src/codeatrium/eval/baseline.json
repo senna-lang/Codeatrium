@@ -1,0 +1,16 @@
+{
+  "dataset": "symbol-recall",
+  "adapter": "symbol",
+  "seed": 42,
+  "k": 10,
+  "tolerance_abs_mrr_at_10": 0.01,
+  "metrics": {
+    "recall_at": {
+      "1": 1.0,
+      "3": 1.0,
+      "5": 1.0,
+      "10": 1.0
+    },
+    "mrr_at_10": 1.0
+  }
+}

@@ -31,5 +31,7 @@ loci status                                  # Show index state
 loci server start / stop / status            # Embedding server management
 loci hook install [--harness NAME]                # Install Claude hooks or print fallback
 loci eval gen --dataset symbol-recall             # Build the symbol-recall eval dataset from this repo's own corpus
-loci eval run --dataset symbol-recall --adapter symbol --json  # Recall@k/MRR@10 for the code→conversation lookup (completeness, no baseline)
+loci eval run --dataset symbol-recall --adapter symbol --json  # Recall@k/MRR@10 for the code→conversation lookup (completeness)
+loci eval gate [--baseline PATH] --json           # CI regression gate: synthetic fixture vs committed baseline (abs MRR@10 0.01)
+
 ```

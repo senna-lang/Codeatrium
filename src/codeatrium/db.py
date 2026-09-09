@@ -20,6 +20,7 @@ project_root（ファイルシステムのレイアウト）に依存する点�
 """
 
 import hashlib
+import json
 import os
 import sqlite3
 from collections.abc import Callable
@@ -1405,3 +1406,50 @@ def check_drift(db_path: Path) -> list[tuple[str, str, str]]:
         return drifts
     finally:
         con.close()
+
+
+LAST_DISTILL_ERROR_KEY = "last_distill_error"
+
+
+def record_last_distill_error(
+    db_path: Path,
+    exchange_id: str,
+    message: str,
+    timestamp: str | None = None,
+) -> None:
+    """Persist the most recent per-row distill failure in `meta` (issue #37)."""
+    ts = timestamp if timestamp is not None else datetime.now(UTC).isoformat()
+    payload = json.dumps(
+        {"exchange_id": exchange_id, "message": message, "timestamp": ts},
+        ensure_ascii=False,
+    )
+    con = get_connection(db_path)
+    try:
+        con.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            (LAST_DISTILL_ERROR_KEY, payload),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def get_last_distill_error(db_path: Path) -> dict[str, str] | None:
+    """Return `{exchange_id, message, timestamp}` or None when nothing is recorded."""
+    con = get_connection(db_path)
+    try:
+        row = con.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (LAST_DISTILL_ERROR_KEY,),
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None or not row[0]:
+        return None
+    data = json.loads(row[0])
+    return {
+        "exchange_id": str(data["exchange_id"]),
+        "message": str(data["message"]),
+        "timestamp": str(data["timestamp"]),
+    }
+

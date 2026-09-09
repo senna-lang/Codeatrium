@@ -3,6 +3,16 @@
 ## [Unreleased]
 
 ### Added
+- `loci eval gate` (issue #37) is a CI regression gate for symbol-recall.
+  It builds a tiny synthetic git+`code_edges` fixture (no network, no
+  embeddings, no dogfood corpus) and fails if MRR@10 drops more than an
+  absolute 0.01 against committed `src/codeatrium/eval/baseline.json`.
+  Keyword-recall (BM25/HNSW/RRF) remains out of scope.
+
+- `loci status` now surfaces the most recent distill per-row failure
+  (`exchange_id`, message, timestamp) from `meta` when one has been
+  recorded; the field/section is omitted when nothing failed.
+
 - `loci recall --file X --branch Y --json` (issue #33) is a session-start
   warmup that merges code-anchored `context` lookup with `search_combined`
   into one deduplicated response (`exchange_core` / `specific_context` /

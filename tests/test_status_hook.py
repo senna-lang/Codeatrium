@@ -208,6 +208,45 @@ def test_status_no_config_error_when_unconfigured(tmp_path, monkeypatch):
     assert data["config_error"] is None
 
 
+def test_status_omits_last_distill_error_when_absent(tmp_path, monkeypatch):
+    """失敗記録が無いときは JSON からキーを落とし、テキストにも出さない。"""
+    _setup_db(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["status", "--json"])
+    data = json.loads(result.output)
+    assert "last_distill_error" not in data
+
+    text = runner.invoke(app, ["status"])
+    assert "last distill" not in text.output.lower()
+    assert "distill error" not in text.output.lower()
+
+
+def test_status_surfaces_last_distill_error_in_json_and_text(tmp_path, monkeypatch):
+    """meta に残した直近の distill 失敗を status の JSON / テキストに出す。"""
+    db = _setup_db(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    from codeatrium.db import record_last_distill_error
+
+    record_last_distill_error(
+        db,
+        exchange_id="ex-fail",
+        message="claude --print timed out",
+        timestamp="2026-09-09T00:00:00+00:00",
+    )
+
+    result = runner.invoke(app, ["status", "--json"])
+    data = json.loads(result.output)
+    err = data["last_distill_error"]
+    assert err["exchange_id"] == "ex-fail"
+    assert err["message"] == "claude --print timed out"
+    assert err["timestamp"] == "2026-09-09T00:00:00+00:00"
+
+    text = runner.invoke(app, ["status"])
+    assert "ex-fail" in text.output
+    assert "claude --print timed out" in text.output
+
+
+
 # ---- hook install ----
 
 

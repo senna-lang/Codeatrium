@@ -954,6 +954,34 @@ def test_distill_all_error_count(mock_call, tmp_path) -> None:
     assert errors == 1
 
 
+@patch("codeatrium.distiller.call_claude")
+def test_distill_all_persists_last_error_in_meta(mock_call, tmp_path) -> None:
+    """per-row 例外の直近失敗を meta に残す（issue #37, loci status 可視化）。"""
+    db_path = tmp_path / "memory.db"
+    init_db(db_path)
+    _make_exchange(db_path, "ex1")
+    _make_exchange(db_path, "ex2")
+
+    mock_call.side_effect = [RuntimeError("Test error"), MOCK_PALACE_RESPONSE]
+
+    mock_embedder = MagicMock()
+    mock_embedder.embed_passage.return_value = np.zeros(384, dtype=np.float32)
+
+    with patch("codeatrium.distiller.Embedder", return_value=mock_embedder):
+        count, errors = distill_all(db_path)
+
+    assert count == 1
+    assert errors == 1
+
+    from codeatrium.db import get_last_distill_error
+
+    err = get_last_distill_error(db_path)
+    assert err is not None
+    assert err["exchange_id"] == "ex1"
+    assert "Test error" in err["message"]
+    assert err["timestamp"]
+
+
 def test_save_palace_object_sets_distill_status_distilled(tmp_path) -> None:
     """save_palace_object は distill_status を 'distilled' にセットする"""
     db_path = tmp_path / "memory.db"
