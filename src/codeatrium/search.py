@@ -10,13 +10,18 @@
   - verbatim_ref: "{source_path}:ply={ply_start}"
   - rooms: palace_objects に紐づく room_assignments
   - symbols: code_edges から exchange に紐づく tree-sitter 解決済みシンボル
+
+recency 減衰は opt-in（`search_combined(..., recency_half_life_days=)`）。
+既定の search()/context() 呼び出しはスコアを変えない。主消費は `loci recall`。
 """
 
 from __future__ import annotations
 
 import sqlite3
 import struct
+from collections.abc import Mapping
 from contextlib import closing, nullcontext
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -311,6 +316,99 @@ def rrf(
     return results
 
 
+# ---- recency 減衰（opt-in。recall が主消費） ----
+
+DEFAULT_RECENCY_HALF_LIFE_DAYS = 14.0
+
+
+def recency_weight(age_days: float, half_life_days: float) -> float:
+    """指数減衰の重み。半減期日数が 0 以下なら減衰しない。"""
+    if half_life_days <= 0:
+        return 1.0
+    return 0.5 ** (age_days / half_life_days)
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt
+
+
+def _coerce_ts(value: datetime | str | None) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return _parse_ts(value)
+
+
+def _age_days(ts: datetime | None, now: datetime) -> float | None:
+    if ts is None:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    return max(0.0, (now - ts).total_seconds() / 86400.0)
+
+
+def exchange_timestamps(
+    con: sqlite3.Connection, exchange_ids: list[str]
+) -> dict[str, datetime | None]:
+    """exchange の時刻。`code_edges.ts` の最大値を優先し、無ければ
+    `conversations.started_at` に落とす。
+    """
+    if not exchange_ids:
+        return {}
+    placeholders = ",".join("?" * len(exchange_ids))
+    rows = con.execute(
+        f"""
+        SELECT e.id AS exchange_id,
+               COALESCE(
+                   (SELECT MAX(ce.ts) FROM code_edges ce
+                    WHERE ce.exchange_id = e.id
+                      AND ce.ts IS NOT NULL
+                      AND ce.ts != ''),
+                   c.started_at
+               ) AS ts
+        FROM exchanges e
+        JOIN conversations c ON c.id = e.conversation_id
+        WHERE e.id IN ({placeholders})
+        """,
+        exchange_ids,
+    ).fetchall()
+    return {row["exchange_id"]: _parse_ts(row["ts"]) for row in rows}
+
+
+def apply_recency_decay(
+    results: list[FusedResult],
+    timestamps: Mapping[str, datetime | str | None],
+    *,
+    half_life_days: float,
+    now: datetime | None = None,
+) -> list[FusedResult]:
+    """同一関連度なら新しい timestamp を上にする時間減衰ブースト。
+
+    `score *= 0.5 ** (age_days / half_life_days)`。
+    half_life_days <= 0 は no-op。timestamp が無い結果は減衰しない。
+    """
+    if half_life_days <= 0 or not results:
+        return results
+    now_dt = now or datetime.now(UTC)
+    for r in results:
+        age = _age_days(_coerce_ts(timestamps.get(r.exchange_id)), now_dt)
+        if age is None:
+            continue
+        r.score = r.score * recency_weight(age, half_life_days)
+    results.sort(key=lambda r: r.score, reverse=True)
+    return results
+
+
 # ---- メイン検索 ----
 
 
@@ -321,12 +419,17 @@ def search_combined(
     limit: int = 5,
     min_exchanges: int = 2,
     branch: str | None = None,
+    recency_half_life_days: float | None = None,
 ) -> list[FusedResult]:
     """BM25(V) + HNSW(D) の RRF 融合検索。
 
     bm25/hnsw/enrich の3クエリ群で1つの sqlite 接続を共有する。接続ごとに
     sqlite-vec 拡張ロード + WAL/busy_timeout PRAGMA が再実行されるコストを
     1検索あたり3回から1回に減らす（issue #25）。
+
+    `recency_half_life_days` を渡すと RRF 後に code_edges.ts /
+    conversations.started_at による指数減衰を掛ける。省略時（既定）は
+    既存の search()/context() ランキングを変えない。
     """
     with closing(get_connection(db_path)) as con:
         bm25_results = search_bm25(
@@ -345,7 +448,16 @@ def search_combined(
             branch=branch,
             con=con,
         )
-        fused = rrf(bm25_results, hnsw_results, limit=limit)
+        rrf_limit = limit * 2 if recency_half_life_days else limit
+        fused = rrf(bm25_results, hnsw_results, limit=rrf_limit)
+
+        if fused and recency_half_life_days:
+            apply_recency_decay(
+                fused,
+                exchange_timestamps(con, [r.exchange_id for r in fused]),
+                half_life_days=recency_half_life_days,
+            )
+            fused = fused[:limit]
 
         if fused:
             _enrich_results(con, fused)

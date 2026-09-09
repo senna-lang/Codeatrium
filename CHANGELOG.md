@@ -3,6 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- `loci recall --file X --branch Y --json` (issue #33) is a session-start
+  warmup that merges code-anchored `context` lookup with `search_combined`
+  into one deduplicated response (`exchange_core` / `specific_context` /
+  `verbatim_ref`). `--file` and `--branch` are independent AND filters.
+  Ranking applies an opt-in exponential recency decay
+  (`search_combined(..., recency_half_life_days=)`, default half-life 14 days
+  on `loci recall` only; existing `search()`/`context()` ranking is unchanged)
+  using `code_edges.ts` with `conversations.started_at` as fallback.
+
 - `loci gc` (issue #30) snapshots the database, removes only orphaned
   palace/vector and exchange/session records, retains bounded `.bak` archives,
   and compacts the database with `VACUUM`.

@@ -116,6 +116,7 @@ loci search "query" --json --limit 5         # Semantic search (agent-facing)
 loci search "query" --branch NAME --json     # Branch-filtered semantic search
 loci context --symbol "Foo.bar" --json       # Reverse lookup: code -> past conversations
 loci context --branch NAME --json            # Branch reverse lookup (undistilled exchanges included)
+loci recall --file PATH --branch NAME --json # Session-start warmup: context+search, recency-ranked
 loci show "~/.claude/.../abc.jsonl:ply=42"   # Fetch verbatim exchange
 loci status                                  # Show index state
 loci server start / stop / status            # Embedding server management
