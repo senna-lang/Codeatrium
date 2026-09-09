@@ -2,7 +2,7 @@
 
 `codeatrium` is a CLI-first memory layer for AI coding agents. The command is `loci`. It lets agents search past conversations, retrieve code locations (file + line + symbol), and link conversation history to code symbols.
 
-Primary user is **the agent itself**, not a human. The main entry point is `loci context <file>[:<symbol-or-line>] --json` — before touching a function, component, or file, recall what's already known about it. `loci search "..." --json` is a secondary, word-based fallback for when you don't know which file or symbol to look at.
+Primary user is **the agent itself**, not a human. The main entry point is `loci context <file>[:<symbol-or-line>] --json` — before touching a function, component, or file, recall what's already known about it. `loci recall --file X --branch Y --json` warms a new session by merging that code-anchored lookup with semantic search (recency-ranked). `loci search "..." --json` is a secondary, word-based fallback for when you don't know which file or symbol to look at.
 
 ## When to use
 
@@ -25,6 +25,7 @@ loci context --symbol "Foo.bar" --json       # Legacy form (no file scope, may c
 loci context --branch NAME --json            # Branch reverse lookup (undistilled exchanges included)
 loci search "query" --json --limit 5         # Semantic search (secondary, word-based)
 loci search "query" --branch NAME --json     # Branch-filtered semantic search
+loci recall --file PATH --branch NAME --json # Session-start warmup: context+search, recency-ranked
 loci show "<exchange-id>" --json                 # Fetch a stored exchange by ID
 loci status                                  # Show index state
 loci server start / stop / status            # Embedding server management

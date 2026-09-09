@@ -18,6 +18,7 @@ from codeatrium.cli.gc_cmd import gc
 from codeatrium.cli.hook_cmd import hook_app
 from codeatrium.cli.index_cmd import index
 from codeatrium.cli.prime_cmd import prime
+from codeatrium.cli.recall_cmd import recall
 from codeatrium.cli.search_cmd import context, search
 from codeatrium.cli.server_cmd import server_app
 from codeatrium.cli.show_cmd import dump, show
@@ -579,6 +580,7 @@ app.command()(distill)
 app.command()(search)
 app.command()(gc)
 app.command()(context)
+app.command()(recall)
 app.command()(status)
 app.command()(show)
 app.command()(dump)

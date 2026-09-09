@@ -101,6 +101,7 @@ Invalid input on any prompt re-prompts instead of silently falling back to a def
 | `loci search "query" --json` | Semantic search (agent-facing); add `--branch NAME` to filter by git branch |
 | `loci context --symbol "name" --json` | Code symbol → past conversations (lightweight; add `--full` for verbatim text) |
 | `loci context --branch "name" --json` | Git branch → past conversations (includes undistilled exchanges) |
+| `loci recall --file PATH --branch NAME --json` | Session-start warmup: merge context+search, recency-ranked; `--file`/`--branch` AND-combinable |
 | `loci show "<exchange-id>" --json` | Retrieve a stored exchange by its primary ID |
 | `loci status` | Show index state |
 | `loci prime` | Inject command usage into the session context |

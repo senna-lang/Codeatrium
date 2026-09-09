@@ -96,6 +96,7 @@ loci init
 | `loci search "クエリ" --json` | セマンティック検索（エージェント向け）。`--branch NAME` で git ブランチ絞り込み |
 | `loci context --symbol "名前" --json` | コードシンボル → 過去の会話（軽量。`--full` で会話原文も含める） |
 | `loci context --branch "名前" --json` | git ブランチ → 過去の会話（未蒸留の exchange も含む） |
+| `loci recall --file PATH --branch NAME --json` | セッション開始ウォームアップ。context+search を融合し recency 順。`--file`/`--branch` は AND 可能 |
 | `loci show "<exchange-id>" --json` | primary ID から会話原文を取得 |
 | `loci status` | インデックス状態を表示 |
 | `loci prime` | コマンドの使い方をセッションコンテキストに注入 |
