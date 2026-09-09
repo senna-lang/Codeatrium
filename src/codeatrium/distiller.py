@@ -421,7 +421,7 @@ def distill_all(
     on_progress: (current, total, error=None) を受け取るコールバック
     Returns: (処理した exchange 数, エラー数)
     """
-    from codeatrium.db import get_connection
+    from codeatrium.db import get_connection, record_last_distill_error
     from codeatrium.resolver import SymbolResolver
 
     con = get_connection(db_path)
@@ -491,9 +491,11 @@ def distill_all(
             raise
         except Exception as e:
             errors += 1
+            record_last_distill_error(db_path, row["id"], str(e))
             if on_progress is not None:
                 on_progress(count, total, error=str(e))
             continue
+
         if on_progress is not None:
             on_progress(count, total)
 

@@ -33,3 +33,7 @@ jobs:
 
       - name: Run tests
         run: uv run pytest tests/ -v
+
+      - name: Run symbol-recall regression gate
+        run: uv run loci eval gate --json
+
